@@ -1,0 +1,3 @@
+# config/domain/tac.yaml
+name: "TAC"
+description: "戦術モデル：短期的な売買タイミングの予測"

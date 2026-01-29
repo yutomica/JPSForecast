@@ -1,0 +1,9 @@
+# 学習・検証・テストの期間定義
+valid_start_date: "2024-01-01"
+test_start_date: "2025-01-01"
+embargo_days: 7
+
+# 時系列クロスバリデーションを行う場合の設定
+cv:
+  n_splits: 5
+  gap_days: 5  # 学習と検証の間のリークを防ぐためのバッファ

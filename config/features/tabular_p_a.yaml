@@ -1,0 +1,82 @@
+# config/features/tabular_p_a.yaml
+name: "pattern_a"
+feature_cols: [
+  'ADX',
+  'ATR_Ratio',
+  'ATR_Squeeze',
+  'Abnormal_Volume',
+  'BB_Bandwidth',
+  'BB_Percent_B',
+  # 'Beta_60',
+  # 'Body_Ratio',              # Low Importance (Rank 14)
+  # 'Bullish_Ratio_20',        # Low Importance (Rank 10)
+  'DayOfWeek',
+  'Dist_High_250',
+  'Dist_High_60',
+  # 'Dist_Kijun',              # Low Importance (Rank 17)
+  # 'Dist_SMA25',              # Low Importance (Rank 8)
+  'Dist_SMA75',
+  # 'Dist_VWAP_5',             # Low Importance (Rank 11)
+  'Dist_VWAP_Slope',
+  'Efficiency_Ratio_10',
+  'Gap_Abs',
+  'Gap_Rate',
+  # 'Gap_Ratio',               # Low Importance (Rank 3)
+  'HV_30',
+  'HV_Slope',
+  # 'Intraday_Strength',       # Low Importance (Rank 18)
+  # 'Is_Gotobi',               # Low Importance (Rank 19)
+  # 'Is_Month_End',            # Low Importance (Rank 4)
+  # 'Large_Move_Count',        # Low Importance (Rank 7)
+  'LinReg_Slope_10',
+  'Log_Trading_Cap',
+  'Lower_Shadow_MA5',
+  'Lower_Shadow_Ratio',
+  'MACD_Hist_Diff',
+  # 'MACD_Hist_Norm',          # Low Importance (Rank 16)
+  'MAE_10',
+  'MAE_5',
+  'MFI_14',
+  # 'Market_Foreign_Diff',
+  # 'Market_Foreign_Z_250',
+  # 'Market_Foreign_Z_60',
+  # 'Market_HV_20',
+  # 'Market_Individual_Z_250',
+  # 'Market_Individual_Z_60',
+  # 'Market_Trend_Idx',
+  'Max_Gain_5',
+  'Month',
+  # 'New_High_Flag_3',         # Low Importance (Rank 1)
+  # 'Quarter',                 # Low Importance (Rank 2)
+  'RCI_26',
+  'RCI_26_Diff',
+  'RCI_52',
+  'RCI_9',
+  'RCI_9_Diff',
+  # 'RSI_14',                  # Low Importance (Rank 15)
+  'RSI_9',                   # Keep (Rank > 20 but borderline, keeping for oscillator diversity) -> Wait, RSI_9 was in bottom list.
+  # 'RSI_9',                   # Low Importance (Rank 9)
+  # 'RS_25',
+  'Range_Ratio_Long',
+  'Realized_Skew_20',
+  # 'Rel_Sector_Return_1d',
+  # 'Rel_Sector_Return_5d',
+  # 'Return_10d',              # Low Importance (Rank 13)
+  # 'Return_1d',               # Low Importance (Rank 12)
+  'Return_1d_Lag1',
+  'Return_1d_Lag2',
+  'Return_20d',
+  'Return_3d',
+  'Return_5d',
+  'Return_Kurtosis',
+  'Return_Volatility',
+  # 'Sector_Momentum_5d',
+  # 'Streak',                  # Low Importance (Rank 5)
+  'Ulcer_Index_14',
+  'Upper_Shadow_Ratio',
+  # 'Vol_Ratio_5d',            # Low Importance (Rank 20)
+  'Vol_Ratio_HV',
+  # 'Vol_Spike_Count_20',      # Low Importance (Rank 6)
+  'Vol_Up_Down_Ratio',
+  'Volatility_Parkinson'
+] 

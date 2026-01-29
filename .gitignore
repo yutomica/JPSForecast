@@ -1,5 +1,6 @@
 # MLflow & Hydra
 mlruns/
+mlflow_runs/
 outputs/
 .hydra/
 
@@ -18,3 +19,5 @@ models/*.pkl
 
 # OS
 .DS_Store
+
+.vscode/

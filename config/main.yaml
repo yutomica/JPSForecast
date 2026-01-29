@@ -1,3 +1,15 @@
-# Main configuration file
+# config/main.yaml
 defaults:
+  - domain: tac
+  - target: balanced
+  - data: tabular_test
+  - period: standard
+  - features: tabular_p_a
+  - model: lgbm
+  - hparams: lgbm_default
   - _self_
+
+# MLflow設定（全実験共通）
+mlflow:
+  tracking_uri: "file:///Users/yuu/JPSForecast/mlflow_runs"
+  experiment_name: "test"

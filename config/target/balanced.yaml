@@ -1,0 +1,6 @@
+name: "balanced"
+column: "target_balanced"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+prediction_horizon: 5       # 何日先を予測するか（5日後など）
+# ラベル作成時の閾値などがあれば記述
+threshold: 0.02             # 例：2%以上の変動を1とする場合
