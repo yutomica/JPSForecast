@@ -1,0 +1,3 @@
+# Main configuration file
+defaults:
+  - _self_
