@@ -69,9 +69,7 @@ class LGBMWrapper(BaseModelWrapper):
             }).sort_values(by='importance_gain', ascending=False)
 
     def _log_feature_importance(self, model_idx):
-        """
-        特徴量重要度を計算・可視化し、MLflowのArtifactとして保存する
-        """
+        """特徴量重要度を計算・可視化し、MLflowのArtifactとして保存する"""
         if self.model is None:
             return
         # 重要度の取得 (Gain: 目的関数の減少にどれだけ寄与したか)
@@ -103,4 +101,7 @@ class LGBMWrapper(BaseModelWrapper):
             os.remove(temp_path)
 
     def predict(self, X):
-        return self.model.predict(X)
+        if self.model is None:
+            raise ValueError("Model has not been trained yet.")
+        preds = self.model.predict(X)
+        return preds

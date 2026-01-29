@@ -1,3 +1,4 @@
+import numpy as np
 import os
 import hydra
 import mlflow
@@ -85,9 +86,38 @@ def train(cfg: DictConfig):
         ensemble_model = EnsembleModel(models)
 
         # --- E. 評価メトリクスの算出 ---
-        # metrics = preprocessor.evaluate(model, X_valid, y_valid)
-        # mlflow.log_metrics(metrics)
-        
+        datasets = [
+            ('Train', X_train, y_train, train_raw),
+            ('Valid', X_valid, y_valid, valid_raw),
+            ('Test', X_test, y_test, test_raw)
+        ]
+        all_metrics = {}
+        for name, X, y, raw_df in datasets:
+            # アンサンブル予測 (平均)
+            final_pred = ensemble_model.predict(context=None, model_input=X)
+            # 指標計算
+            metrics = evaluate_metrics(y, final_pred, cfg.target.task_type, raw_df, prefix=f"{name.lower()}/")
+            all_metrics.update(metrics)
+            # ビン分析
+            # 分析用にメタデータ(日付など)と結合
+            df_res = raw_df[['date', 'scode']].copy() if 'scode' in raw_df.columns else pd.DataFrame()
+            if 'Entry_Price' in raw_df.columns:
+                df_res = pd.concat([df_res, raw_df[['Entry_Price', 'Future_High', 'Future_Low', 'Future_Close']]], axis=1)
+            df_res['target'] = y
+            df_res['score'] = final_pred
+            bin_stats = calculate_bin_stats(df_res, 'score', 'target', cfg.target.task_type)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # ExcelまたはCSVとして保存（ご希望のExcel形式の場合）
+                file_name = f"{name.lower()}_bin_stats.csv"
+                local_path = os.path.join(tmpdir, file_name)
+                # Excel出力（openpyxlなどのライブラリが必要です）
+                bin_stats.to_csv(local_path, index=False)
+                # MLflowにファイルをアップロード
+                mlflow.log_artifact(local_path, artifact_path="bin_analysis")
+        numeric_metrics = {k: v for k, v in all_metrics.items() if isinstance(v, (int, float, np.number))}
+        mlflow.log_metrics(numeric_metrics)
+
+
         # --- F. 成果物（Artifacts）の保存 ---
         # 1. 前処理でfitしたプリプロセッサ (StandardScalerなど)
         preprocessor_path = "preprocessor.joblib"

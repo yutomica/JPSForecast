@@ -42,10 +42,10 @@ def calculate_bin_stats(df, score_col, target_col, model_type):
         bin_stats.columns = [f"{c[0]}_{c[1]}" for c in bin_stats.columns]
     return bin_stats.reset_index()
 
-def evaluate_metrics(y_true, y_pred, config, df_meta=None):
+def evaluate_metrics(y_true, y_pred, type, df_meta=None, prefix=""):
     metrics = {}
     if np.isnan(y_pred).any():
-        if config['type'] == 'classification':
+        if type == 'classification':
             metrics['AUC'] = 0.5
             metrics['LogLoss'] = 999.0
         else:
@@ -53,7 +53,7 @@ def evaluate_metrics(y_true, y_pred, config, df_meta=None):
             metrics['IC'] = 0.0
         return metrics
 
-    if config['type'] == 'classification':
+    if type == 'classification':
         try:
             auc = roc_auc_score(y_true, y_pred)
             metrics['AUC'] = auc
@@ -75,4 +75,6 @@ def evaluate_metrics(y_true, y_pred, config, df_meta=None):
                 if not np.isnan(corr):
                     ic_list.append(corr)
             metrics['IC'] = np.mean(ic_list) if ic_list else 0
+    if prefix:
+        metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
     return metrics
