@@ -4,3 +4,5 @@ n_estimators: 1000
 num_leaves: 31
 max_depth: -1
 use_time_decay: true
+verbose: -1
+early_stopping_rounds: 50

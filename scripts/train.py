@@ -4,9 +4,11 @@ import mlflow
 import pandas as pd
 import joblib
 import tempfile
+import copy
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import instantiate, get_class
 from src.preprocess.common import calculate_time_decay_weights
+from src.models.ensemble import EnsembleModel
 from src.evaluation import evaluate_metrics, calculate_bin_stats
 
 @hydra.main(version_base=None, config_path="../config", config_name="main")
@@ -75,9 +77,12 @@ def train(cfg: DictConfig):
         
         # 5種類のモデルに対応した共通インターフェース（fit）で学習
         models = []
-        for _ in range(cfg.model.n_ensembles):
-            model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train)
-            models.append(model)
+        for i in range(cfg.model.n_ensembles):
+            print(f"Training ensemble model {i+1}/{cfg.model.n_ensembles}")
+            # model_idx を渡す
+            model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
+            models.append(copy.deepcopy(model))
+        ensemble_model = EnsembleModel(models)
 
         # --- E. 評価メトリクスの算出 ---
         # metrics = preprocessor.evaluate(model, X_valid, y_valid)
@@ -90,7 +95,11 @@ def train(cfg: DictConfig):
         mlflow.log_artifact(preprocessor_path, artifact_path="preprocessor")
         
         # 2. 学習済みモデル
-        mlflow.sklearn.log_model(model, artifact_path="model")
+        mlflow.pyfunc.log_model(
+            artifact_path="ensemble_model",
+            python_model=ensemble_model,
+            # 依存ライブラリ（conda_env等）が必要な場合は追加指定
+        )
         
         # 3. Hydraの最終的なconfigファイル自体も保存（完全な再現用）
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
