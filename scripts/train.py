@@ -1,16 +1,20 @@
 import numpy as np
+from datetime import datetime
 import os
 import hydra
 import mlflow
 import pandas as pd
 import joblib
 import tempfile
+import shutil
+from urllib.parse import urlparse
 import copy
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import instantiate, get_class
 from src.preprocess.common import calculate_time_decay_weights
 from src.models.ensemble import EnsembleModel
 from src.evaluation import evaluate_metrics, calculate_bin_stats
+path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 
 @hydra.main(version_base=None, config_path="../config", config_name="main")
 def train(cfg: DictConfig):
@@ -75,7 +79,6 @@ def train(cfg: DictConfig):
         # ハイパーパラメータを渡してモデルをインスタンス化
         model_class = get_class(cfg.model.model_target)
         model = model_class(task_type=cfg.target.task_type, **cfg.hparams)
-        
         # 5種類のモデルに対応した共通インターフェース（fit）で学習
         models = []
         for i in range(cfg.model.n_ensembles):
@@ -117,27 +120,49 @@ def train(cfg: DictConfig):
         numeric_metrics = {k: v for k, v in all_metrics.items() if isinstance(v, (int, float, np.number))}
         mlflow.log_metrics(numeric_metrics)
 
-
         # --- F. 成果物（Artifacts）の保存 ---
-        # 1. 前処理でfitしたプリプロセッサ (StandardScalerなど)
+        # 前処理でfitしたプリプロセッサ (StandardScalerなど)
         preprocessor_path = "preprocessor.joblib"
         joblib.dump(preprocessor, preprocessor_path)
         mlflow.log_artifact(preprocessor_path, artifact_path="preprocessor")
-        
-        # 2. 学習済みモデル
+        # 学習済みモデル
         mlflow.pyfunc.log_model(
             artifact_path="ensemble_model",
             python_model=ensemble_model,
             # 依存ライブラリ（conda_env等）が必要な場合は追加指定
         )
-        
-        # 3. Hydraの最終的なconfigファイル自体も保存（完全な再現用）
+        # Hydraの最終的なconfigファイル自体も保存（完全な再現用）
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             OmegaConf.save(config=cfg, f=f.name)
             mlflow.log_artifact(f.name, artifact_path="config")
         os.remove(f.name)
         
-        # print(f"Run completed. Metrics: {metrics}")
+        # --- G. MLflow成果物の一括ZIP化とGoogle Driveへの移動 ---
+        # 現在の日時を取得してファイル名を作成（YYYY-MM-DD_HH-MM-SS）
+        current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        zip_filename = f"{current_time}_artifacts_bundle"
+        # 現在のRunの成果物保存場所（ローカルパス）を取得
+        artifact_uri = mlflow.get_artifact_uri()
+        local_artifact_path = urlparse(artifact_uri).path
+        with tempfile.TemporaryDirectory() as tmp_zip_dir:
+            # 圧縮用の一時パス
+            zip_temp_path = os.path.join(tmp_zip_dir, zip_filename)
+            # MLflowの成果物ディレクトリ全体をZIP圧縮
+            # shutil.make_archive(出力先, 形式, 圧縮対象フォルダ)
+            if os.path.exists(local_artifact_path):
+                shutil.make_archive(zip_temp_path, 'zip', local_artifact_path)
+                # 生成されたZIPファイルをGoogle Driveのパスへ移動
+                # path_gdrive は cfg.path_gdrive など、適宜コンフィグから読み取ってください
+                gdrive_destination = os.path.join(path_to_gdrive,"マイドライブ/JPS/results_TAC", f"{zip_filename}.zip")
+                # 移動先ディレクトリが存在することを確認
+                os.makedirs(path_to_gdrive, exist_ok=True)
+                # ファイルを移動（shutil.move を使用）
+                shutil.move(f"{zip_temp_path}.zip", gdrive_destination)
+                print(f"✅ Artifacts bundled and moved to: {gdrive_destination}")
+            else:
+                print("⚠️ Artifact directory not found. ZIP creation skipped.") 
+            
+        print("✅ All artifacts have been bundled into a ZIP file and uploaded to MLflow.")
 
 if __name__ == "__main__":
     train()
