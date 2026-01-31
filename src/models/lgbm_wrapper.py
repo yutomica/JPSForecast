@@ -25,6 +25,7 @@ class LGBMWrapper(BaseModelWrapper):
         evals_result = {}
         verbose_val = self.params.get("verbose", -1)
         callbacks = [lgb.record_evaluation(evals_result)]
+        callbacks.append(lgb.early_stopping(stopping_rounds=50))
         # - verboseが0以上の場合のみ、ログ出力コールバックを追加
         if verbose_val >= 0:
             # - 例えば 100 イテレーションごとにログを出す設定
@@ -34,6 +35,7 @@ class LGBMWrapper(BaseModelWrapper):
             train_set=train_set,
             valid_sets=valid_sets,
             valid_names=valid_names,
+            num_boost_round=10000,
             callbacks=callbacks # 履歴を記録
         )
         # 重要度の作成と保存

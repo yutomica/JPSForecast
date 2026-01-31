@@ -76,12 +76,13 @@ def train(cfg: DictConfig):
         
         # --- D. モデルの学習 ---
         print(f"Training model: {cfg.model.name}")
-        # ハイパーパラメータを渡してモデルをインスタンス化
-        model_class = get_class(cfg.model.model_target)
-        model = model_class(task_type=cfg.target.task_type, **cfg.hparams)
         # 5種類のモデルに対応した共通インターフェース（fit）で学習
         models = []
         for i in range(cfg.model.n_ensembles):
+            # ハイパーパラメータを渡してモデルをインスタンス化
+            model_class = get_class(cfg.model.model_target)
+            cfg.hparams['random_state'] = i + 42  # アンサンブルごとに異なる乱数シードを設定
+            model = model_class(task_type=cfg.target.task_type, **cfg.hparams)
             print(f"Training ensemble model {i+1}/{cfg.model.n_ensembles}")
             # model_idx を渡す
             model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
@@ -153,7 +154,7 @@ def train(cfg: DictConfig):
                 shutil.make_archive(zip_temp_path, 'zip', local_artifact_path)
                 # 生成されたZIPファイルをGoogle Driveのパスへ移動
                 # path_gdrive は cfg.path_gdrive など、適宜コンフィグから読み取ってください
-                gdrive_destination = os.path.join(path_to_gdrive,"マイドライブ/JPS/results_TAC", f"{zip_filename}.zip")
+                gdrive_destination = os.path.join(path_to_gdrive,"results_TAC", f"{zip_filename}.zip")
                 # 移動先ディレクトリが存在することを確認
                 os.makedirs(path_to_gdrive, exist_ok=True)
                 # ファイルを移動（shutil.move を使用）
