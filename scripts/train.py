@@ -76,13 +76,22 @@ def train(cfg: DictConfig):
         
         # --- D. モデルの学習 ---
         print(f"Training model: {cfg.model.name}")
-        # 5種類のモデルに対応した共通インターフェース（fit）で学習
+        # 前処理オブジェクトからモデル定義に必要な情報を取得
+        model_meta_params = {}
+        if hasattr(preprocessor, 'cat_idx'): # TabNet
+            model_meta_params['cat_idx'] = preprocessor.cat_idx
+        if hasattr(preprocessor, 'cat_dims'): # TabNet
+            model_meta_params['cat_dims'] = preprocessor.cat_dims
+        # 静的なhparamsと動的なmeta_paramsを統合
+        # 既存のcfg.hparamsを壊さないようコピーを使用
+        full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
+        full_params.update(model_meta_params)
         models = []
         for i in range(cfg.model.n_ensembles):
             # ハイパーパラメータを渡してモデルをインスタンス化
             model_class = get_class(cfg.model.model_target)
             cfg.hparams['random_state'] = i + 42  # アンサンブルごとに異なる乱数シードを設定
-            model = model_class(task_type=cfg.target.task_type, **cfg.hparams)
+            model = model_class(task_type=cfg.target.task_type, **full_params)
             print(f"Training ensemble model {i+1}/{cfg.model.n_ensembles}")
             # model_idx を渡す
             model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)

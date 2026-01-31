@@ -1,0 +1,9 @@
+# config/model/tabnet.yaml
+name: "TabNet"
+_target_: "src.models.tabnet_wrapper.TabNetWrapper"
+# 前処理クラスのパスを記述（後述のスクリプトで動的ロード）
+preprocessor_target: "src.preprocess.preprocess_tabnet.TabNetPreprocessor"
+model_target: "src.models.tabnet_wrapper.TabNetWrapper"
+# このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
+data_category: "tabular"
+n_ensembles: 5

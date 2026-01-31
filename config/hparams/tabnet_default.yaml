@@ -1,0 +1,22 @@
+n_d: 8
+n_a: 24
+n_steps: 3
+gamma: 1.3
+lambda_sparse: 1.39e-06
+optimizer_fn: "adam"
+optimizer_params:
+  lr: 0.002
+mask_type: "entmax"
+scheduler_params:
+  step_size: 50
+  gamma: 0.9
+scheduler_fn: "step"
+random_state: 42
+use_pretrain: True
+use_time_decay: True
+
+max_epochs: 100
+patience: 15
+batch_size: 1024
+n_trials: 30
+device_name: "cpu"  # Use "cpu" if GPU is not available

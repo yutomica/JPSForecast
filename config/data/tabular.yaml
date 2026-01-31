@@ -1,0 +1,3 @@
+# config/data/tabular.yaml
+type: "tabular"
+path: "/Users/yuu/JPSForecast/data/training_data_ver7.pkl"
