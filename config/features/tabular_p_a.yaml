@@ -1,7 +1,7 @@
 # config/features/tabular_p_a.yaml
 name: "pattern_a"
 feature_cols: [
-  'ADX',
+  'ADX_14',
   'ATR_Ratio',
   'ATR_Squeeze',
   'Abnormal_Volume',
@@ -80,3 +80,7 @@ feature_cols: [
   'Vol_Up_Down_Ratio',
   'Volatility_Parkinson'
 ] 
+cat_cols: [
+  'DayOfWeek',
+  'Month'
+]

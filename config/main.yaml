@@ -2,7 +2,7 @@
 defaults:
   - domain: tac
   - target: balanced
-  - data: tabular
+  - data: master
   - period: standard
   - features: tabular_p_a
   - model: lgbm

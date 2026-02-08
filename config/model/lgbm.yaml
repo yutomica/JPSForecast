@@ -9,3 +9,4 @@ model_target: "src.models.lgbm_wrapper.LGBMWrapper"
 # このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
 data_category: "tabular"
 n_ensembles: 5
+sampling_interval: 5

@@ -1,3 +1,4 @@
 # config/data/tabular_test.yaml
 type: "tabular"
 path: "/Users/yuu/JPSForecast/data/training_data_sample.pkl"
+format: "pkl"

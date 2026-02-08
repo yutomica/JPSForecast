@@ -1,0 +1,4 @@
+# config/data/master.yaml
+type: "master"
+path: "/Users/yuu/JPSForecast/data/master"
+format: "pkl"

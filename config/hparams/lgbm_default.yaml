@@ -14,5 +14,6 @@ reg_alpha: 6.423
 reg_lambda: 9.948
 is_unbalance: true
 use_time_decay: true
+time_decay_rate: 0.9999
 bagging_freq: 6
 verbose: 1

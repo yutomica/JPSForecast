@@ -68,9 +68,12 @@ def main():
             df = filter_str.apply(df)
             
             # --- 特徴量とメタデータの書き込み ---
+            future_cols = ['Future_High_Tac','Future_Low_Tac','Future_Close_Tac','Future_High_Str','Future_Low_Str','Future_Close_Str']
+            for col in future_cols:
+                df[col] = df[col]/df['Entry_Price']
             data_to_write = df[feature_cols].values.astype('float32')
             mmap_array[current_row : current_row + len(df)] = data_to_write
-            meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str'] + engineer.target_cols
+            meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str'] + future_cols + engineer.target_cols
             meta_list.append(df[meta_cols])
             
             current_row += len(df)
