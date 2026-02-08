@@ -10,26 +10,23 @@ class TabNetPreprocessor(BasePreprocessor):
     """
     TabNet用の前処理クラス
     """
-    def __init__(self, save_dir, feature_cols=None):
+    def __init__(self, save_dir, feature_cols=None, cat_cols=None):
         super().__init__(save_dir)
         self.feature_cols = feature_cols if feature_cols else []
-        self.cat_cols = []                
+        self.cat_cols = cat_cols if cat_cols else []
         # 状態保持用
         self.encoders = {} # col -> LabelEncoder
         self.imputer = SimpleImputer(strategy='median', keep_empty_features=True)
-        self.feature_names = None
         self.cat_idxs = []
         self.cat_dims = []
 
-    def fit(self, df):
+    def fit(self, data):
         """
         カテゴリ変数のLabelEncoding
         数値変数の欠損補完(median)
         cat_idxs, cat_dims の保持
         """
-        # object型 または category型 のカラムを特定
-        self.cat_cols = df[self.feature_cols].select_dtypes(include=['object', 'category']).columns.tolist()
-        self.feature_names = df[self.feature_cols].columns.tolist()
+        df = pd.DataFrame(data,columns=self.feature_cols)
         # カテゴリ変数のLabelEncodingを実行
         for col in self.cat_cols:
             le = LabelEncoder()
@@ -52,14 +49,22 @@ class TabNetPreprocessor(BasePreprocessor):
         self.is_fitted = True
         print(f"TabNet Preprocessor fitted. Categorical cols: {self.cat_cols}")
 
-    def transform(self, df):
+    def transform(self, data, row_indices=None, col_indices=None):
         """
         不要カラム削除、型変換を行う
         """
         if not self.is_fitted:
-            self.fit(df) # Fitされてなければその場でする
-        X = df[self.feature_names]
-        for col in self.feature_names:
+            raise ValueError("Preprocessor must be fitted.")
+        if isinstance(data, pd.DataFrame):
+            df_processed = data[self.feature_cols].copy()
+        else:
+            if col_indices is not None:
+                extracted = data[row_indices][:, col_indices]
+            else:
+                extracted = data[row_indices]
+            df_processed = pd.DataFrame(extracted, columns=self.feature_cols)
+        X = df_processed[self.feature_cols]
+        for col in self.feature_cols:
             if col not in X.columns:
                 X[col] = np.nan
         # 数値変数の欠損補完
@@ -102,7 +107,7 @@ class TabNetPreprocessor(BasePreprocessor):
             'imputer': self.imputer,
             'cat_idxs': self.cat_idxs,
             'cat_dims': self.cat_dims,
-            'feature_names': self.feature_names
+            'feature_cols': self.feature_cols
         }
         path = os.path.join(self.save_dir, filename)
         joblib.dump(state, path)
@@ -121,6 +126,6 @@ class TabNetPreprocessor(BasePreprocessor):
         self.imputer = state['imputer']
         self.cat_idxs = state['cat_idxs']
         self.cat_dims = state['cat_dims']
-        self.feature_names = state['feature_names']
+        self.feature_cols = state['feature_cols']
         self.is_fitted = True
         print(f"TabNet Preprocessor loaded from {load_path}")

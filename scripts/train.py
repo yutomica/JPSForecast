@@ -128,7 +128,7 @@ def train(cfg: DictConfig):
             ]
             train_idx = train_val_meta.index[train_val_meta['date'] < (valid_start - embargo_td)]
             # 1つの分割としてリスト化
-            splits = [(train_idx, valid_idx, test_idx)]
+            splits = [(train_idx, valid_idx, test_idx, None, None)]
         elif cv_method in ["purged_kfold", "cpcv"]:
             train_val_meta["date_floor"] = pd.to_datetime(train_val_meta["date"]).dt.normalize()
             train_val_meta["t1_floor"]   = pd.to_datetime(train_val_meta["t1"]).dt.normalize()

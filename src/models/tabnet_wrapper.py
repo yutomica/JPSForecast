@@ -5,7 +5,6 @@ import pandas as pd
 import mlflow
 from .base import BaseModelWrapper
 import torch
-# PyTorch TabNet
 from pytorch_tabnet.tab_model import TabNetClassifier, TabNetRegressor
 from pytorch_tabnet.callbacks import Callback
 from pytorch_tabnet.pretraining import TabNetPretrainer
