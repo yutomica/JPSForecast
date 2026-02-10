@@ -9,6 +9,7 @@ class LGBMWrapper(BaseModelWrapper):
     def __init__(self, task_type="regression", **params):
         self.task_type = task_type
         params.pop("use_time_decay", None)
+        params.pop("time_decay_rate", None)
         self.params = params
         self.model = None
 
