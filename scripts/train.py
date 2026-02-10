@@ -194,8 +194,6 @@ def train(cfg: DictConfig):
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
             print(f"Starting Fold {i}...")
             print(f"--- Fold {i} ---")
-            fold_dir = Path(f"fold_{i}")
-            fold_dir.mkdir(parents=True, exist_ok=True)
             if tr_pos is not None and val_pos is not None:
                 info = summarize_split_for_logging(
                     fold=i,
@@ -232,7 +230,7 @@ def train(cfg: DictConfig):
                 })
             # プリプロセッサのインスタンス化
             prep_params = {
-                "save_dir": str(fold_dir),
+                "save_dir": ".",
                 "feature_cols": feature_cols,
                 "cat_cols": cat_cols
             }
@@ -260,7 +258,7 @@ def train(cfg: DictConfig):
                     preprocessor.partial_fit(pd.DataFrame(chunk_data, columns=feature_cols))
             else:
                 # partial_fit がない場合の代替（サンプリング）
-                print(f" Warning: Preprocessor for Fold {i} has no partial_fit. Sampling 1k...")
+                print(f" Fitting on Fold {i} using fit (Sampling 1k)")
                 sample_data = features_mmap[:1000, col_indices]
                 preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
             # 時間減衰ウェイトの計算 (common.py のロジックを使用)
