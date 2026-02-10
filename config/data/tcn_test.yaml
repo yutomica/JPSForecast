@@ -1,0 +1,4 @@
+# config/data/tcn_test.yaml
+type: "tcn"
+path: "/Users/yuu/JPSForecast/data/tcn_data_sample.pkl"
+format: "pkl"

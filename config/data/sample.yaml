@@ -1,0 +1,4 @@
+# config/data/sample.yaml
+type: "sample"
+path: "/Users/yuu/JPSForecast/data/sample"
+format: "pkl"

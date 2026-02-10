@@ -1,0 +1,10 @@
+# config/model/tcn.yaml
+name: "TCN"
+_target_: "src.models.tcn_wrapper.TCNWrapper"
+# 前処理クラスのパスを記述（後述のスクリプトで動的ロード）
+preprocessor_target: "src.preprocess.preprocess_tcn.TCNPreprocessor"
+model_target: "src.models.tcn_wrapper.TCNWrapper"
+# このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
+data_category: "timeseries"
+n_ensembles: 1
+window_size: 60
