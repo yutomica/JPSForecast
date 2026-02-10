@@ -1,0 +1,18 @@
+# config/hparams/tcn_default.yaml
+input_size: 26          # 特徴量数
+output_size: 2          # クラス数 (回帰なら1)
+n_layers: 3
+n_channels: 32 # チャンネル数と層の深さ
+sequence_length: 75    # <--- 【追加】 ここで時系列の長さを定義
+metric_direction: "maximize"  # "maximize" for balanced and aggressive, "minimize" for return
+kernel_size: 3
+dropout: 0.2
+
+epochs: 50
+batch_size: 1024
+learning_rate: 0.001
+weight_decay: 0.0001
+early_stopping_patience: 5
+min_delta: 0.0001
+n_ensemble: 3
+use_time_decay: true

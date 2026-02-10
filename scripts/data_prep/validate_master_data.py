@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import json
 import gc
+import time
 
 def verify_master_data(master_dir):
     print(f"--- Starting Data Validation for: {master_dir} ---")
@@ -56,7 +57,6 @@ def verify_master_data(master_dir):
                 print(f"  ⚠️ Warning: {target_nan_in_candidate} NaNs found in candidate rows!")
 
     # 7. 特徴量の異常値チェック (サンプルチェック)
-    # 8GB環境のため、全データをなめるのではなく先頭・中間・末尾からサンプリング
     print("\n--- Feature Quality (Sample check) ---")
     sample_indices = [0, total_rows // 2, total_rows - 1]
     for idx in sample_indices:
@@ -65,7 +65,45 @@ def verify_master_data(master_dir):
         num_infs = np.isinf(sample_row).sum()
         print(f"Row {idx:10}: NaNs={num_nans}, Infs={num_infs}")
 
-    # 8. 重複チェック
+    # --- [追加] 8. 全特徴量の欠損率チェック (全数抽出・高速版) ---
+    print("\n--- Global Feature Missing Rate Scan (Full Data) ---")
+    start_time = time.time()
+    # 8GB RAM を考慮したチャンクサイズ (約20万行 * 特徴量数 * float32)
+    chunk_size = 200000 
+    nan_counts = np.zeros(num_features, dtype=np.int64)
+    inf_counts = np.zeros(num_features, dtype=np.int64)
+    
+    for i in range(0, total_rows, chunk_size):
+        chunk = features_mmap[i : i + chunk_size]
+        nan_counts += np.isnan(chunk).sum(axis=0)
+        inf_counts += np.isinf(chunk).sum(axis=0)
+        
+        # 進捗表示
+        if (i // chunk_size) % 5 == 0:
+            progress = min((i + chunk_size) / total_rows * 100, 100.0)
+            print(f"  Scanning: {progress:.1f}% complete...")
+
+    elapsed = time.time() - start_time
+    print(f"✅ Scan completed in {elapsed:.1f} seconds.")
+
+    # 結果の集計
+    missing_df = pd.DataFrame({
+        'feature': feature_names,
+        'nan_count': nan_counts,
+        'inf_count': inf_counts,
+        'missing_rate_pct': (nan_counts / total_rows) * 100
+    }).sort_values(by='missing_rate_pct', ascending=False)
+
+    # 欠損率が高い上位10件を表示
+    print("\nTop 10 features with highest missing rates (NaN):")
+    print(missing_df.head(10)[['feature', 'nan_count', 'missing_rate_pct']].to_string(index=False))
+
+    # 全結果をCSV保存
+    report_path = os.path.join(master_dir, "feature_missing_report.csv")
+    missing_df.to_csv(report_path, index=False)
+    print(f"\n✅ Full missing rate report saved to: {report_path}")
+
+    # 9. 重複チェック
     dup_count = meta_df.duplicated(subset=['date', 'scode']).sum()
     if dup_count > 0:
         print(f"❌ FATAL: {dup_count} duplicated (date, scode) pairs found!")
@@ -79,6 +117,11 @@ def verify_master_data(master_dir):
 
 if __name__ == "__main__":
     # プロジェクト構造に合わせたパス指定
+    # scripts/validation/validate_master_data.py から見た data/master の相対パス
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     master_data_dir = os.path.join(base_dir, "data/master")
-    verify_master_data(master_data_dir)
+    
+    if os.path.exists(master_data_dir):
+        verify_master_data(master_data_dir)
+    else:
+        print(f"❌ Master data directory not found at: {master_data_dir}")

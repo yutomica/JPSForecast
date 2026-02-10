@@ -19,6 +19,7 @@ from src.cv.cpcv import SimpleCombinatorialPurgedKFold
 from src.cv.cv_viz import summarize_split_for_logging
 from src.preprocess.common import calculate_time_decay_weights
 from src.models.ensemble import EnsembleModel
+from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.evaluation import evaluate_metrics, calculate_bin_stats
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
@@ -66,15 +67,13 @@ def train(cfg: DictConfig):
         mlflow.log_params(params)
         mlflow.log_dict({"feature_cols": feature_cols}, "configs/feature_cols.json")
         print('Start training model ...')
-        print('Domain: '+cfg.domain.name)
-        print('Model: '+cfg.model.name)
-        print('Split: '+cfg.period.method)
 
         # --- データ分割ロジックの構築 ---
         master_dir = Path(cfg.data.path)
         meta_df = pd.read_parquet(master_dir / "index_meta.parquet")
         meta_df = meta_df.reset_index(drop=True)
         # ドメイン（戦術/戦略）に応じてフィルタフラグを選択
+        print('Domain: '+cfg.domain.name)
         if cfg.domain.name == 'TAC':
             mask = meta_df['is_candidate_tac'] == True
             meta_df = meta_df.rename(columns={
@@ -117,6 +116,7 @@ def train(cfg: DictConfig):
         embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
         
         # --- データ分割・CV ---
+        print('Split: '+cfg.period.method)
         if cv_method == "fixed":
             # 固定分割（Config指定の期間）
             test_start = pd.to_datetime(cfg.period.test_start_date)
@@ -174,8 +174,8 @@ def train(cfg: DictConfig):
         all_features = pd.read_json(master_dir / "feature_names.json", typ='series').tolist()
         # コンフィグから「今回使う特徴量」を取得 (指定がなければ全件)
         feature_cols = cfg.features.get('feature_cols', all_features)
-        print(f"Features: {len(feature_cols)}")
         cat_cols = cfg.features.get('cat_cols',[])
+        print(f"Features: {len(feature_cols)}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
         col_indices = [all_features.index(c) for c in feature_cols]
         features_mmap = np.memmap(
@@ -184,28 +184,18 @@ def train(cfg: DictConfig):
             mode='r', 
             shape=(len(meta_df), len(all_features))
         )
-        # プリプロセッサに「選定後の列名」を渡してインスタンス化
-        print(f"Executing preprocessor: {cfg.model.preprocessor_target}")
-        preprocessor_class = get_class(cfg.model.preprocessor_target)
-        preprocessor = preprocessor_class(save_dir="artifacts/preprocessor", feature_cols=feature_cols, cat_cols=cat_cols)
         
         # --- モデルの学習 ---
         print(f"Training model: {cfg.model.name}")
-        # 前処理オブジェクトからモデル定義に必要な情報を取得
-        model_meta_params = {}
-        if hasattr(preprocessor, 'cat_idx'): # TabNet
-            model_meta_params['cat_idx'] = preprocessor.cat_idx
-        if hasattr(preprocessor, 'cat_dims'): # TabNet
-            model_meta_params['cat_dims'] = preprocessor.cat_dims
-        # 静的なhparamsと動的なmeta_paramsを統合
-        # 既存のcfg.hparamsを壊さないようコピーを使用
-        full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
-        full_params.update(model_meta_params)
         target_col = cfg.target.column
         models = []
         all_results = []
+        fold_pipelines = []
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
             print(f"Starting Fold {i}...")
+            print(f"--- Fold {i} ---")
+            fold_dir = Path(f"fold_{i}")
+            fold_dir.mkdir(parents=True, exist_ok=True)
             if tr_pos is not None and val_pos is not None:
                 info = summarize_split_for_logging(
                     fold=i,
@@ -240,11 +230,42 @@ def train(cfg: DictConfig):
                     "valid_end": info["valid_end"],
                     "timeline": info["timeline"],
                 })
-            sample_data = features_mmap[:1000, col_indices]
-            preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
+            # プリプロセッサのインスタンス化
+            prep_params = {
+                "save_dir": str(fold_dir),
+                "feature_cols": feature_cols,
+                "cat_cols": cat_cols
+            }
+            if hasattr(cfg.model, "window_size") and cfg.model.window_size is not None:
+                prep_params["window_size"] = cfg.model.window_size
+            preprocessor_class = get_class(cfg.model.preprocessor_target)
+            preprocessor = preprocessor_class(**prep_params)
+            # fitパラメータのアップデート
+            model_meta_params = {}
+            if hasattr(preprocessor, 'cat_idx'): # TabNet
+                model_meta_params['cat_idx'] = preprocessor.cat_idx
+            if hasattr(preprocessor, 'cat_dims'): # TabNet
+                model_meta_params['cat_dims'] = preprocessor.cat_dims
+            full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
+            full_params.update(model_meta_params)
+            # preprocessor_fit
+            if hasattr(preprocessor, 'partial_fit'):
+                print(f" Fitting on fold {i} using partial_fit (Size: {len(train_idx)})")
+                chunk_size = 100000
+                for start_pos in range(0, len(train_idx), chunk_size):
+                    end_pos = min(start_pos + chunk_size, len(train_idx))
+                    batch_idx = train_idx[start_pos:end_pos]
+                    # memmap から該当行・列のみを抽出
+                    chunk_data = features_mmap[batch_idx, :][:, col_indices]
+                    preprocessor.partial_fit(pd.DataFrame(chunk_data, columns=feature_cols))
+            else:
+                # partial_fit がない場合の代替（サンプリング）
+                print(f" Warning: Preprocessor for Fold {i} has no partial_fit. Sampling 1k...")
+                sample_data = features_mmap[:1000, col_indices]
+                preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
             # 時間減衰ウェイトの計算 (common.py のロジックを使用)
             if cfg.hparams.use_time_decay:
-                print(f"Calculating time decay weights for Fold {i}...")
+                print(f" Calculating time decay weights for Fold {i}...")
                 # 学習セットの日付のみを抽出してウェイトを算出
                 # decay_rate は config から取得 (デフォルト: 0.9999)
                 decay_rate = cfg.hparams.get('time_decay_rate', 0.9999)
@@ -255,6 +276,7 @@ def train(cfg: DictConfig):
             else:
                 w_train = None
             # memmap から必要な行のみを読み出し
+            print(f" Transforming data for Fold {i}")
             X_train = preprocessor.transform(features_mmap, row_indices=train_idx, col_indices=col_indices)
             X_valid = preprocessor.transform(features_mmap, row_indices=valid_idx, col_indices=col_indices)
             y_train = meta_df.loc[train_idx, target_col].values
@@ -262,16 +284,15 @@ def train(cfg: DictConfig):
             if test_idx is None or len(test_idx) == 0:
                 X_test = None
                 y_test = None
-                print(f"Samples: Train={len(X_train)}, Valid={len(X_valid)}")
+                print(f" Samples: Train={len(X_train)}, Valid={len(X_valid)}")
             else:
                 X_test = preprocessor.transform(features_mmap, row_indices=test_idx, col_indices=col_indices)
                 y_test = meta_df.loc[test_idx, target_col].values
-                print(f"Samples: Train={len(X_train)}, Valid={len(X_valid)}, Test={len(X_test)}")
+                print(f" Samples: Train={len(X_train)}, Valid={len(X_valid)}, Test={len(X_test)}")
             # モデルのインスタンス化と学習
             model_class = get_class(cfg.model.model_target)
-            cfg.hparams['random_state'] = i + 42  # アンサンブルごとに異なる乱数シードを設定
             model = model_class(task_type=cfg.target.task_type, **full_params)
-            print(f"Training ensemble model {i+1}/{len(splits)}")
+            print(f" Training model ...")
             model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
             # 予測の実行
             preds = {
@@ -306,9 +327,12 @@ def train(cfg: DictConfig):
             del X_train, X_valid, X_test
             gc.collect()
             models.append(copy.deepcopy(model))
+            fold_pipelines.append(FoldPipeline(preprocessor, model))
         ensemble_model = EnsembleModel(models)
         
-        # --- 評価メトリクスの算出 ---
+
+        # --- 成果物（Artifacts）の保存 ---
+        # 評価メトリクス
         if all_results:
             full_res_df = pd.concat(all_results, ignore_index=True)
             # テストデータ全体でのビン分析
@@ -324,8 +348,7 @@ def train(cfg: DictConfig):
                 # 成果物として保存
                 bin_stats.to_csv("test_bin_analysis.csv")
                 mlflow.log_artifact("test_bin_analysis.csv")
-
-        # --- CVサマリをMLflow artifactとして保存 ---
+        # CVサマリー
         with tempfile.TemporaryDirectory() as d:
             json_path = os.path.join(d, "cv_splits.json")
             with open(json_path, "w", encoding="utf-8") as f:
@@ -334,18 +357,13 @@ def train(cfg: DictConfig):
             csv_path = os.path.join(d, "cv_splits.csv")
             pd.DataFrame(cv_summaries).to_csv(csv_path, index=False)
             mlflow.log_artifact(csv_path, artifact_path="cv")
-
-        # --- 成果物（Artifacts）の保存 ---
-        # 前処理でfitしたプリプロセッサ (StandardScalerなど)
-        preprocessor_path = "preprocessor.joblib"
-        joblib.dump(preprocessor, preprocessor_path)
-        mlflow.log_artifact(preprocessor_path, artifact_path="preprocessor")
-        # 学習済みモデル
-        mlflow.pyfunc.log_model(
-            name="ensemble_model",
-            python_model=ensemble_model,
-            # 依存ライブラリ（conda_env等）が必要な場合は追加指定
+        # パイプライン
+        final_pipeline = EnsembleInferencePipeline(
+            fold_pipelines=fold_pipelines,
+            col_indices=col_indices
         )
+        final_pipeline.save("ensemble_inference_pipeline.joblib")
+        mlflow.log_artifact("ensemble_inference_pipeline.joblib", artifact_path="model")
         # Hydraの最終的なconfigファイル自体も保存（完全な再現用）
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             OmegaConf.save(config=cfg, f=f.name)

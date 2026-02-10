@@ -1,0 +1,9 @@
+# config/features/tcn_p_a.yaml
+name: "pattern_a"
+feature_cols: [
+    'Dist_SMA25', 'RSI_14', 'Volume_Change',
+    'Lower_Shadow_Mean', 'Close_Open_Ratio', 'Log_Return', 
+    'Sin_DayOfWeek', 'Cos_DayOfWeek', 'Dist_SMA75', 'Dist_SMA5', 'RCI_26',
+    'Abnormal_Volume', 'MFI_14', 'Dist_High_60', 'Close_Position',
+    'MAE_5', 'Max_Gain_5', 'Volume_Slope_5', 'Vol_Ratio_HV', 'Downside_Run', 'Log_Trading_Cap',
+] 
