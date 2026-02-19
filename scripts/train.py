@@ -17,7 +17,7 @@ from hydra.utils import instantiate, get_class
 from src.cv.purged_kfold import SimplePurgedKFold
 from src.cv.cpcv import SimpleCombinatorialPurgedKFold
 from src.cv.cv_viz import summarize_split_for_logging
-from src.preprocess.common import calculate_time_decay_weights
+from preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.ensemble import EnsembleModel
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.evaluation import evaluate_metrics, calculate_bin_stats
@@ -261,18 +261,13 @@ def train(cfg: DictConfig):
                 print(f" Fitting on Fold {i} using fit (Sampling 1k)")
                 sample_data = features_mmap[:1000, col_indices]
                 preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
-            # 時間減衰ウェイトの計算 (common.py のロジックを使用)
+            # ウェイトの計算 (weights.py のロジックを使用)
+            w_train = np.ones(len(train_idx))
             if cfg.hparams.use_time_decay:
-                print(f" Calculating time decay weights for Fold {i}...")
-                # 学習セットの日付のみを抽出してウェイトを算出
-                # decay_rate は config から取得 (デフォルト: 0.9999)
+                # 学習セットの日付のみを抽出してウェイトを算出 decay_rate は config から取得 (デフォルト: 0.9999)
                 decay_rate = cfg.hparams.get('time_decay_rate', 0.9999)
-                w_train = calculate_time_decay_weights(
-                    meta_df.loc[train_idx, 'date'], 
-                    decay_rate=decay_rate
-                )
-            else:
-                w_train = None
+                w_train *= calculate_time_decay_weights(meta_df.loc[train_idx, 'date'], decay_rate=decay_rate)
+            w_train *= calculate_sample_weights(features_mmap[train_idx, feature_cols.index('log_market_cap')],cfg.domain.name)
             # memmap から必要な行のみを読み出し
             print(f" Transforming data for Fold {i}")
             X_train = preprocessor.transform(features_mmap, row_indices=train_idx, col_indices=col_indices)

@@ -3,6 +3,7 @@ mlruns/
 mlflow_runs/
 outputs/
 .hydra/
+mlflow.db
 
 # Python
 __pycache__/
