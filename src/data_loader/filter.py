@@ -2,16 +2,12 @@ import pandas as pd
 import numpy as np
 
 class RuleBasedFilter:
-    def apply(self, df, use_target_check=True):
+    def apply(self, df):
         if df.empty: return df
         c1 = df['volume_p_MA5'] > 300_000_000 
         c2 = df['SMA_25'] > df['SMA_75'] 
         c5 = df['ATR_Ratio'] > 0.01 
-        if use_target_check:
-            c_target = df['target_return'].notna() & df['target_balanced'].notna() & df['target_aggressive'].notna()
-            df['is_candidate_tac'] = c1 & c2 & c5 & c_target
-        else:
-            df['is_candidate_tac'] = c1 & c2 & c5
+        df['is_candidate_tac'] = c1 & c2 & c5
         return df
 
 

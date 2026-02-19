@@ -25,10 +25,17 @@ class DataLoader:
             raise
 
     def get_all_symbols(self):
-        query = f"SELECT DISTINCT scode FROM {TABLE_NAME} WHERE scode not in ('0001', '0002') and mcode = 'T' ORDER BY scode"
+        query = """
+            WITH t1 AS (SELECT DISTINCT scode FROM jps.sp_d WHERE market != 'TOKYO PRO MARKET'),
+            t2 AS (SELECT DISTINCT LEFT(Code,4) as scode,Sector33Code as sector33_code FROM org.listed_info)
+            SELECT t1.scode,t2.sector33_code
+            FROM t1 LEFT JOIN t2 ON t1.scode=t2.scode
+        """
         try:
             df = pd.read_sql(query, self.conn)
-            return df['scode'].tolist()
+            df = df.dropna(subset=['sector33_code'])
+            df['sector33_code'] = df['sector33_code'].astype(str)
+            return df
         except Exception as e:
             print(f"Error fetching symbols: {e}")
             return []
@@ -78,14 +85,13 @@ class DataLoader:
         if start_date is None:
             start_date = START_DATE
         query = f"""
-            SELECT date, close 
-            FROM {TABLE_NAME} 
-            WHERE scode = '0002' AND date >= '{START_DATE}'
+            SELECT Date as date, Close as close 
+            FROM org.indices_topix
+            WHERE Date >= '{START_DATE}'
             ORDER BY date
         """
         try:
             df = pd.read_sql(query, self.conn, parse_dates=['date'])
-            # 【修正箇所】Market_Return, Market_Trend_Idx, Market_HV_20 を計算して追加
             if not df.empty:
                 df['Market_Return'] = np.log(df['close'] / df['close'].shift(1))
                 df['Market_Trend_Idx'] = df['close'] / df['close'].rolling(25).mean()
@@ -93,6 +99,42 @@ class DataLoader:
             return df
         except Exception as e:
             print(f"Error fetching TOPIX data: {e}")
+            return pd.DataFrame()
+    
+    def fetch_sector_return(self, start_date=None):
+        if start_date is None:
+            start_date = START_DATE
+        query = f"""
+            SELECT * FROM jps.sector_return
+            WHERE date >= '{start_date}'
+        """
+        try:
+            df = pd.read_sql(query, self.conn, parse_dates=['date'])
+            df['sector33_code'] = df['sector33_code'].astype(str)
+            return df
+        except Exception as e:
+            print(f"Error fetching sector return data: {e}")
+            return pd.DataFrame()
+    
+    def fetch_n225_data(self, start_date=None):
+        if start_date is None:
+            start_date = START_DATE
+        query = f"""
+            SELECT Date as date, Close as close 
+            FROM jps.sp_d
+            WHERE Date >= '{START_DATE}' AND scode = '0001' AND mcode = 'T'
+            ORDER BY date
+        """
+        try:
+            df = pd.read_sql(query, self.conn, parse_dates=['date'])
+            if not df.empty:
+                nikkei_ret = df['close'].pct_change()
+                nikkei_hv = nikkei_ret.rolling(20).std()
+                # HVの変化トレンド (今のHV - 20日前のHV)
+                df['market_vol_change'] = nikkei_hv.diff()
+            return df[['date', 'market_vol_change']]
+        except Exception as e:
+            print(f"Error fetching N225 data: {e}")
             return pd.DataFrame()
 
     # predict_daily.py 用の銘柄情報取得メソッドを追加
@@ -155,6 +197,13 @@ class DataLoader:
                 # 直近の資金流入加速を検知するため
                 df_daily['Market_Foreign_Diff'] = df_daily['Market_Foreign_Z_60'].diff(5)
                 feature_cols.append('Market_Foreign_Diff')
+                # 海外投資家動向トレンド (4週移動平均)
+                df_daily['overseas_flow_trend'] = df_daily['Foreign_Net_Buy'].rolling(20).mean()
+                feature_cols.append('overseas_flow_trend')
+                # フロー加速度
+                flow = df_daily['overseas_flow_trend']
+                df_daily['flow_accel'] = flow - flow.rolling(5).mean()
+                feature_cols.append('flow_accel')
                 # DataFrameを整えて返す
                 df_daily.index.name = 'date'
                 return df_daily[feature_cols].reset_index()
@@ -210,6 +259,10 @@ class DataLoader:
             df['operating_cf'] = df.groupby('scode')['operating_cf'].fillna(method='ffill')
             # それでも欠損（上場直後など）の場合は 0 で埋める
             df['operating_cf'] = df['operating_cf'].fillna(0)
+            # ffill
+            df = df.sort_values(['scode','published_date']).set_index(['scode', 'published_date']).sort_index()
+            df = df.groupby(level='scode').ffill().reset_index()
+            df = df.drop_duplicates(subset=['scode', 'published_date'], keep='last')
             return df
         except Exception as e:
             print(f"Error fetching financial data: {e}")

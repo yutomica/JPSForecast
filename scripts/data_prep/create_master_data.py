@@ -10,7 +10,13 @@ import random
 import pyarrow.parquet as pq
 from pathlib import Path
 from src.features.engineer import FeatureEngineer
+from src.data_loader.loader import DataLoader
 from src.data_loader.filter import RuleBasedFilter, RuleBasedFilter_STR
+import logging
+
+# MLflow (alembic) のログを抑制
+logging.getLogger("alembic").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 INPUT_DIR = PROJECT_DIR / 'data/intermediate'
@@ -24,6 +30,7 @@ def create_sample_data(n_stocks=50):
     print(f"--- Creating Sample Data (Target: {n_stocks} stocks) ---")
     os.makedirs(SAMPLE_OUTPUT_DIR, exist_ok=True)
     
+    loader = DataLoader()
     engineer = FeatureEngineer()
     filter_tac = RuleBasedFilter()
     filter_str = RuleBasedFilter_STR()
@@ -43,7 +50,7 @@ def create_sample_data(n_stocks=50):
     pf = pq.ParquetFile(chunk_files[0])
     sample_df = pf.read_row_group(0).to_pandas().head(1)
     # ダミー実行で特徴量リストを確定
-    df_sector_indices = pd.read_parquet(INPUT_DIR / 'sector_return.parquet')
+    df_sector_indices = loader.fetch_sector_return()
     sample_df = sample_df.merge(df_sector_indices, on=['date', 'sector33_code'], how='left')
     _ = engineer.add_cross_sectional_features(sample_df)
     feature_cols = engineer.feature_list
@@ -64,17 +71,18 @@ def create_sample_data(n_stocks=50):
     # 4. データの抽出と書き込み
     current_row = 0
     meta_list = []
-    df_targets = pd.read_parquet(INPUT_DIR / 'orthogonalized_targets.parquet')
+    # df_targets = pd.read_parquet(INPUT_DIR / 'orthogonalized_targets.parquet')
 
     for f in tqdm(chunk_files, desc="Processing chunks for sample"):
         df = pd.read_parquet(f)
+        df['sector33_code'] = df['sector33_code'].astype('object')
         # 銘柄フィルタリング
         df = df[df['scode'].isin(selected_scodes)].reset_index(drop=True)
         if len(df) == 0: continue
 
         df = df.merge(df_sector_indices, on=['date', 'sector33_code'], how='left')
         df = engineer.add_cross_sectional_features(df)
-        df = df.merge(df_targets[['date', 'scode', 'target_reg', 'target_cls']], on=['date', 'scode'], how='left')
+        # df = df.merge(df_targets[['date', 'scode', 'target_reg', 'target_cls']], on=['date', 'scode'], how='left')
         df = filter_tac.apply(df)
         df = filter_str.apply(df)
         
@@ -86,7 +94,7 @@ def create_sample_data(n_stocks=50):
         data_to_write = df[feature_cols].values.astype('float32')
         mmap_array[current_row : current_row + len(df)] = data_to_write
         
-        meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str'] + future_cols + engineer.target_cols
+        meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str'] + engineer.target_cols
         meta_list.append(df[meta_cols])
         
         current_row += len(df)
@@ -101,13 +109,15 @@ def create_sample_data(n_stocks=50):
 
 
 def main():
+    loader = DataLoader()
     engineer = FeatureEngineer()
     filter_tac = RuleBasedFilter()
     filter_str = RuleBasedFilter_STR()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # load sector_return
-    df_sector_indices = pd.read_parquet(INPUT_DIR / 'sector_return.parquet')
+    df_sector_indices = loader.fetch_sector_return()
+    df_sector_indices['sector33_code'] = df_sector_indices['sector33_code'].astype(str)
     # load orthogonalized targets
     df_targets = pd.read_parquet(INPUT_DIR / 'orthogonalized_targets.parquet')
 
@@ -138,10 +148,16 @@ def main():
     # 3. チャンク処理と書き込み
     current_row = 0
     meta_list = []
+    # MLflowの初期設定
+    abs_path = os.path.expanduser("~/JPSForecast/mlflow_runs")
+    os.makedirs(abs_path, exist_ok=True)
+    mlflow_db_path = "sqlite:///mlflow.db"
+    mlflow.set_tracking_uri(mlflow_db_path)
     with mlflow.start_run(run_name="Create_Master_Data"):
         for f in chunk_files:
             print(f"Processing chunk: {os.path.basename(f)}")
             df = pd.read_parquet(f)
+            df['sector33_code'] = df['sector33_code'].astype(str)
             df = df.merge(df_sector_indices, on=['date', 'sector33_code'], how='left')
             
             # --- 横断的計算の実行 ---

@@ -30,20 +30,36 @@ class FeatureEngineer:
         self.horizon_str = 60   # 予測期間日数：戦略モデル
         self.initial_cols = [
             'scode', 'sector33_code', 'date', 'volume_p', 'close', 'shares_outstanding',
-            'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 
+            'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
             'Market_Foreign_Z_60', 'Market_Individual_Z_60', 'Market_Foreign_Z_250',
-            'Market_Individual_Z_250', 'Market_Foreign_Diff', 'selling_volume_ratio',
+            'Market_Individual_Z_250', 'Market_Foreign_Diff', 'overseas_flow_trend', 'flow_accel', 'selling_volume_ratio',
         ]
         # 辞書のキーとして格納（Python 3.7+ では挿入順が保持されます）
         self._feature_registry = dict()
-        self.meta_cols = ['scode', 'date', 'volume_p', 'close', 'shares_outstanding']
+        self.meta_cols = [
+            'scode', 'date', 'volume_p', 'close', 'shares_outstanding',
+            'Entry_Price','Future_High_Tac','Future_Low_Tac','Future_Close_Tac',
+            'Future_High_Str','Future_Low_Str','Future_Close_Str'
+        ]
         self.target_cols = [
-            'target_return', 'target_residual', 'target_risk_adjusted', 
-            'target_balanced', 'target_sector_relative', 'target_sharpe_filter',
-            'target_aggressive', 'target_low_drawdown',
-            'target_gauss_rank', 'target_top_percentile',
+            # --- 戦術モデル用推奨ターゲット (5日先) ---
+            # 1. Ranking系
+            'target_tac_rank',          # Era-wise Rank (0~1)
+            'target_tac_gauss_rank',    # Gauss Rank
+            # 2. Risk調整系
+            'target_tac_vol_scaled_residual', # Beta調整後 & Vol調整後
+            # 3. 実執行・Alpha系
+            'target_tac_smoothed_return',     # VWAP基準
+            'target_tac_linear_residual',     # 線形モデル残差
+            # 4. Triple Barrier (Dynamic)
+            'target_tac_tb_strategy_a',       # A: Balance (1.0σ / 1.0σ)
+            'target_tac_tb_strategy_b',       # B: Trend (1.5σ / 0.75σ)
+            'target_tac_tb_strategy_c',       # C: Reversion (0.5σ / 1.0σ)
+            # 戦略モデル用ターゲット
+            'target_str_risk_adj','target_str_consistency','target_str_vol_scale','target_str_triple_barrier',
+            'target_str_rank','target_str_peer_alpha',
             # 戦略モデル用ターゲット、別スクリプトで生成
-            'target_reg', 'target_cls'
+            # 'target_reg', 'target_cls',
         ]
 
     def _calc_rci(self, series, period):
@@ -114,10 +130,33 @@ class FeatureEngineer:
         feat['Close_log'] = np.log(df['close'])
         feat['MA_25_log'] = np.log(df['close'].rolling(25).mean())
         feat['MA_75_log'] = np.log(df['close'].rolling(75).mean())
+        # 長期価格位置 (120日)
+        roll_120 = df['close'].rolling(120)
+        max_120 = roll_120.max()
+        min_120 = roll_120.min()
+        feat['price_pos_120'] = (df['close'] - min_120) / (max_120 - min_120)
+        # 一目均衡表 (雲) 距離
+        # 先行スパンA: (転換線+基準線)/2 を 26日先にプロット
+        # 先行スパンB: (52日最高値+52日最安値)/2 を 26日先にプロット
+        # 当日(t)の雲の位置は、t-26日時点で計算された先行スパンA, Bの値
+        high_9 = df['high'].rolling(9).max()
+        low_9 = df['low'].rolling(9).min()
+        tenkan = (high_9 + low_9) / 2
+        high_26 = df['high'].rolling(26).max()
+        low_26 = df['low'].rolling(26).min()
+        kijun = (high_26 + low_26) / 2
+        high_52 = df['high'].rolling(52).max()
+        low_52 = df['low'].rolling(52).min()
+        span_b = (high_52 + low_52) / 2
+        # 26日前の値を参照して「当日の雲」とする
+        # span_a_curr = ((tenkan + kijun) / 2).shift(26) 
+        span_b_curr = span_b.shift(26)
+        # 雲の下限（あるいは上限、ここでは強力な抵抗帯であるスパンBを採用）との距離
+        feat['ichimoku_dist'] = (df['close'] - span_b_curr) / span_b_curr
         # セクター内相対指標用
         for window in [25, 75, 200]:
             # transformを使用して形状を維持
-            ma = df['close'].transform(lambda x: x.rolling(window).mean())
+            ma = df['close'].rolling(window=window).mean()
             feat[f'ma_dev_{window}'] = (df['close'] / ma) - 1
         return feat
     
@@ -182,6 +221,16 @@ class FeatureEngineer:
         upper, middle, lower = talib.BBANDS(df['close'], timeperiod=25, nbdevup=2.0, nbdevdn=2.0)
         feat['Upper_Band_2sig'] = np.log(upper)
         feat['Lower_Band_2sig'] = np.log(lower)
+        feat['momentum_12_1'] = df['close'].shift(20) / df['close'].shift(260) - 1
+        feat['ret_overnight'] = (df['open'] / df['close'].shift(1)) - 1.0
+        feat['ret_intraday'] = (df['close'] / df['open']) - 1.0
+        feat['gap_rate'] = (df['open'] - df['close'].shift(1)) / df['close'].shift(1)
+        range_len = (df['high'] - df['low']).replace(0, np.nan)
+        feat['candle_body_ratio'] = abs(df['close'] - df['open']) / range_len
+        feat['up_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / range_len
+        feat['win_rate_10d'] = (feat['Log_Return'] > 0).rolling(10).mean()
+        flow = df['overseas_flow_trend']
+        feat['flow_price_interaction'] = flow * feat['Log_Return']
         # セクター内相対指標用
         feat['Return_6m'] = df['close'].pct_change(120)
         feat['Return_12m'] = df['close'].pct_change(240)
@@ -204,14 +253,15 @@ class FeatureEngineer:
         feat['HV_Slope'] = feat['HV_30'].diff(5)
         feat['Realized_Skew_20'] = feat['Return_1d'].rolling(20).skew()
         feat['Ulcer_Index_14'] = df.ta.ui(length=14)
+        feat['atr_chg_rate'] = atr.pct_change()
         # セクター内相対指標用 
-        max_52w = df['close'].transform(lambda x: x.rolling(240).max())
+        max_52w = df['close'].rolling(window=240).max()
         feat['high_52w_dist'] = (df['close'] / max_52w) - 1
         def calc_downside_std(x, window=60):
             neg_ret = x.where(x < 0, 0)
             return neg_ret.rolling(window).std()
         feat['downside_dev_60'] = feat['Log_Return'].transform(lambda x: calc_downside_std(x))
-        feat['volatility_60'] = df['close'].pct_change().transform(lambda x: x.rolling(60).std())
+        feat['volatility_60'] = df['close'].pct_change().rolling(60).std()
         # ターゲット用
         feat['Vol_20d'] = feat['Log_Return'].rolling(20).std()
         return feat
@@ -243,6 +293,9 @@ class FeatureEngineer:
         vol_down = (df['volume'] * (1 - is_up)).rolling(20).sum()
         feat['Vol_Up_Down_Ratio'] = vol_up / (vol_down + 1e-9)
         feat['Volume_MA_25'] = feat['Volume_Log'].rolling(25).mean() 
+        feat['turnover_ratio'] = df['volume'] / df['shares_outstanding'].replace(0, np.nan)
+        trading_value = df['close'] * df['volume']
+        feat['amihud_illiq'] = feat['Log_Return'].abs() / (trading_value + 1e-9)
         # ルールベースフィルタ用
         feat['volume_p_MA5'] = df['volume_p'].rolling(5).mean()
         return feat
@@ -250,32 +303,48 @@ class FeatureEngineer:
     @register_block
     def _add_fundamental_features(self, feat, df):
         """財務情報系指標の一括作成"""
+        LAG_YEAR = 240 # サンプリング(interval)が1の場合。5の場合は 240/5 = 48 に調整が必要
+        epsilon = 1e-6
+        grouped_scode = df.groupby('scode')
         feat['EPS_Actual'] = df['eps'].ffill()
         feat['log_days_since_pub'] = np.log1p((df['date'] - df['published_date']).dt.days).fillna(0)
         feat['log_market_cap'] = np.log(df['close'] * df['shares_outstanding'])
         # 以下は全てセクター内相対指標用に作成
-        LAG_YEAR = 240
-        grouped_scode = df.groupby('scode')
-        feat['accruals'] = (df['net_income'] - df['operating_cf']) / df['total_assets'].replace(0, np.nan)
-        prev_eps = grouped_scode['eps'].shift(LAG_YEAR)
-        feat['eps_growth_yoy'] = (df['eps'] - prev_eps) / (prev_eps.abs() + 1e-6)
-        feat['equity_ratio'] = df['equity'] / df['total_assets'].replace(0, np.nan)
-        actual_bps = df['equity'] / df['shares_outstanding'].replace(0, np.nan)
-        actual_eps = df['net_income'] / df['shares_outstanding'].replace(0, np.nan)
-        feat['log_pbr'] = np.log(df['close'] / actual_bps.replace(0, np.nan))
+        # 資産・資本関連（分母を絶対値 + epsilon で保護） 負の資産や資本（債務超過）も計算可能になり、異常に大きな値は後で clip する
+        feat['accruals'] = (df['net_income'] - df['operating_cf']) / (df['total_assets'].abs() + epsilon)
+        feat['equity_ratio'] = df['equity'] / (df['total_assets'].abs() + epsilon)
+        # 1株当たり指標（分母の株式数は 0 になりにくいが念のため）
+        denom_shares = df['shares_outstanding'].abs() + epsilon
+        actual_bps = df['equity'] / denom_shares
+        actual_eps = df['net_income'] / denom_shares
+        feat['log_pbr'] = np.log(df['close'] / (actual_bps.clip(lower=0.01))) 
         filled_eps = df['eps'].combine_first(actual_eps)
-        feat['log_per'] = np.log(df['close'] / filled_eps.replace(0, np.nan))
-        if 'cfps' in df.columns:
-            feat['log_pcfr'] = np.log(df['close'] / df['cfps'].replace(0, np.nan))
-        if 'dps' in df.columns:
-            feat['div_yield'] = df['dps'] / df['close']
-        feat['op_growth_yoy'] = df['operating_profit'] / grouped_scode['operating_profit'].shift(LAG_YEAR).replace(0, np.nan) - 1
-        feat['op_margin'] = df['operating_profit'] / df['sales'].replace(0, np.nan)
-        feat['roe'] = df['net_income'] / df['equity'].replace(0, np.nan)
-        feat['roa'] = df['net_income'] / df['total_assets'].replace(0, np.nan)
-        feat['sales_growth_yoy'] = df['sales'] / grouped_scode['sales'].shift(LAG_YEAR).replace(0, np.nan) - 1
-        feat['revision_rate'] = (df['eps'] / grouped_scode['eps'].shift(20).replace(0, np.nan)) - 1
-        feat['progress_rate'] = df['operating_profit'] / df['operating_profit_forecast'].replace(0, np.nan)
+        feat['earnings_yield'] = filled_eps / (df['close'] + epsilon)
+        # 収益性指標
+        feat['op_margin'] = df['operating_profit'] / (df['sales'].abs() + epsilon)
+        feat['roe'] = df['net_income'] / (df['equity'].abs() + epsilon)
+        feat['roa'] = df['net_income'] / (df['total_assets'].abs() + epsilon)
+        v_t = df['eps']
+        v_prev = grouped_scode['eps'].shift(20) # 1ヶ月前
+        feat['revision_rate'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
+        feat['progress_rate'] = df['operating_profit'] / (df['operating_profit_forecast'].abs() + epsilon)
+        # --- 重要：最後に全特徴量をクリッピングする ---
+        # 分母が極小だった場合に出る巨大な値を、ニューラルネットが壊れない範囲（例: ±5.0）に収める
+        new_cols = [
+            'accruals', 'equity_ratio', 'log_pbr', 'earnings_yield', 
+            'op_margin', 'roe', 'roa', 'revision_rate', 'progress_rate'
+        ]
+        feat[new_cols] = feat[new_cols].clip(-5.0, 5.0)
+        # 成長率計算
+        fund_cols = ['operating_profit', 'sales', 'eps']
+        temp_df = df[fund_cols + ['scode']].copy()
+        temp_df[fund_cols] = temp_df.groupby('scode')[fund_cols].ffill()
+        grouped = temp_df.groupby('scode')
+        for col in fund_cols:
+            v_t = temp_df[col]
+            v_prev = grouped[col].shift(LAG_YEAR)
+            feat[f'{col}_growth_yoy'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
+            feat[f'{col}_growth_yoy'] = feat[f'{col}_growth_yoy'].clip(-3.0, 3.0)
         return feat
 
     @register_block
@@ -352,9 +421,7 @@ class FeatureEngineer:
         # 信用取引系
         # (1) 信用買い残インパクト倍率
         # 平均出来高 (60日)
-        df['avg_vol_60'] = df.groupby('scode')['volume'].transform(
-            lambda x: x.rolling(60).mean()
-        )
+        df['avg_vol_60'] = df['volume'].rolling(60).mean()
         feat['margin_buy_impact'] = (
             df['long_margin_trade_balance_share'] / 
             df['avg_vol_60'].replace(0, np.nan)
@@ -366,7 +433,7 @@ class FeatureEngineer:
             (df['short_margin_trade_balance_share'] + 1)
         )
         # 4週間前（約20営業日）との差分
-        feat['margin_ratio_delta_4w'] = feat.groupby('scode')['margin_ratio'].diff(20)
+        feat['margin_ratio_delta_4w'] = feat['margin_ratio'].diff(20)
         return feat
 
     @register_block
@@ -376,6 +443,10 @@ class FeatureEngineer:
         df['Sector_Rel'] = df['close'] / df['sector_return']
         df['Rel_Sector_Return_1d'] = df['Return_1d'] - df['sector_return']
         df['Rel_Sector_Return_5d'] = df['Return_1d'].rolling(5).sum() - df['sector_return'].rolling(5).sum()
+        sector_ret_60 = (1 + df['sector_return']).rolling(60).apply(np.prod, raw=True) - 1
+        market_ret_60 = (1 + df['Market_Return']).rolling(60).apply(np.prod, raw=True) - 1
+        df['sector_rel_strength_60'] = sector_ret_60 - market_ret_60
+        df['sector_short_sell_ratio'] = df['selling_volume_ratio']
         # ターゲット用
         indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
         df['Sector_Return_Future'] = df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
@@ -386,8 +457,8 @@ class FeatureEngineer:
         """Zスコア特徴量の追加"""
         z_targets = [
             'accruals','eps_growth_yoy','equity_ratio',
-            'log_pbr','log_pcfr','log_per',
-            'div_yield','op_growth_yoy','op_margin','roa','roe',
+            'log_pbr','log_pcfr','earnings_yield',
+            'div_yield','operating_profit_growth_yoy','op_margin','roa','roe',
             'sales_growth_yoy','revision_rate','progress_rate',
             'ATR_Ratio','ma_dev_25','ma_dev_75','ma_dev_200',
             'Return_20d','Return_6m','Return_12m','RSI_14',
@@ -397,7 +468,7 @@ class FeatureEngineer:
         # Zスコア計算後もキープする特徴量
         keep_cols = [
             'Return_20d','RSI_14','ATR_Ratio','RSI_14',
-            'margin_buy_impact','margin_ratio'
+            'margin_buy_impact','margin_ratio','sales_growth_yoy'
         ]
         for col in z_targets:
             if col in df.columns:
@@ -410,46 +481,146 @@ class FeatureEngineer:
                     self._feature_registry.pop(col, None)
         return df
 
+
+    @register_block
+    def _add_rank_features(self, df):
+        """
+        2段階ユニバースによるランク変換 (Cross-Sectional Rank)
+        Tier 1 (Broad Universe) で計算し、FFillで連続性を保つ
+        """
+        # 1. Broad Universe (Tier 1) 定義: 計算用
+        # 基準: 売買代金 1億円以上 & 株価 50円以上
+        # 投資対象(Strict)が一時的に落ちてもカバーできる広さ
+        tv = df['volume_p']
+        mask_broad = (tv >= 100_000_000) & (df['close'] >= 50)
+        # 2. ランク変換対象のカラム選定
+        # 除外リスト: メタデータ、ターゲット、カテゴリ、絶対値が必要な指標
+        exclude_cols = set(self.meta_cols + self.target_cols + [
+            # マーケット系
+            'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
+            'Market_Foreign_Z_60','Market_Individual_Z_60','Market_Foreign_Z_250','Market_Individual_Z_250','Market_Foreign_Diff',
+            'market_segment',
+            # 投資部門別情報
+            'overseas_flow_trend', 'flow_accel',
+            # カレンダー系
+            'Month', 'DayOfMonth', 'DayOfWeek', 'Sin_DayOfWeek', 'Cos_DayOfWeek',
+            'Is_Gotobi', 'Is_Month_End', 'Is_Quarter_End', 'Quarter', 'time_idx',
+            # --- 4. セクター全体指標 [MKT] (セクター内で共通) ---
+            'sector33_code',
+            'Sector_Momentum_5d',   # セクター勢い [No.123]
+            'sector_return',        # セクターリターン [No.124]
+            'sector_short_sell_ratio', # セクター別空売り比率 [No.130]
+            # --- 6. 絶対水準・規模・ショック [ABS] (ランク化で情報消失する項目) ---
+            'Volume_log',           # 対数出来高 (流動性の絶対サイズ) [No.81]
+            'Abnormal_Volume',      # 異常出来高比率 (ショックの大きさ) [No.82]
+            'Volume_Change',        # 出来高変化率 (変化のマグニチュード) [No.83]
+            'Volume_Slope_5',       # 出来高トレンド (傾きの絶対値) [No.84]
+            'Log_Trading_Cap',      # 対数売買代金 (経済規模) [No.85]
+            'log_vol_change',       # 対数出来高変化率 [No.86]
+            'Vol_Ratio_5d',         # 出来高比率(5日) (突発的な商いの大きさ) [No.90]
+            'Vol_Spike_Count_20',   # 出来高急増回数 (頻度) [No.92]
+            'EPS_Actual',           # EPS実数値 (株価未調整の生データ) [No.98]
+            'log_days_since_pub',   # 決算発表後経過日数 (情報の鮮度) [No.99]
+            # --- 条件付け特徴量 (絶対値を維持・既存カラムを使用) ---
+            'log_market_cap', 'turnover_ratio', 
+        ])
+        # 数値型のみ抽出
+        num_cols = df.select_dtypes(include=[np.number]).columns
+        rank_cols = [c for c in num_cols if c not in exclude_cols and not c.startswith('Market_')]
+        # gaussランク計算 (Broad Universe内のみ、全カラム一括)
+        df_masked = df.loc[mask_broad, rank_cols]
+        df_ranks_broad = df_masked.groupby(df.loc[mask_broad, 'date'])[rank_cols].rank(pct=True)
+        epsilon = 1e-6
+        df_ranks_broad = df_ranks_broad.clip(epsilon, 1 - epsilon)
+        df_ranks_broad = np.sqrt(2) * erfinv(2 * df_ranks_broad - 1)
+        df_ranks = pd.DataFrame(np.nan, index=df.index, columns=rank_cols)
+        df_ranks.loc[mask_broad] = df_ranks_broad
+        df_ranks['scode'] = df['scode']
+        df_ranks = df_ranks.groupby('scode').ffill()
+        df_ranks = df_ranks.drop(columns=['scode'], errors='ignore').fillna(0.0) 
+        df[rank_cols] = df_ranks
+        df = df.copy()
+        return df
+
+
     def _add_targets(self, feat, df):
         """ダーゲット作成"""
-        entry_price = df['open'].shift(-1)
-        # --- ターゲット作成：戦術モデル ---
+        # --- ターゲット作成：戦略モデル ---
+        entry_price = df['open'].shift(-1) # 翌日始値エントリー
+        # インデクサ作成
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
+        # 未来データの取得
         future_high_max = df['high'].shift(-1).rolling(window=indexer).max()
         future_low_min = df['low'].shift(-1).rolling(window=indexer).min()
         future_close_end = df['close'].shift(-self.horizon_tac)
+        # 基本情報格納
         feat['Entry_Price'] = entry_price
         feat['Future_High_Tac'] = future_high_max
         feat['Future_Low_Tac'] = future_low_min
         feat['Future_Close_Tac'] = future_close_end
-        # --- 1. Return戦略ターゲット ---
-        # target_return (単純リターン)
-        feat['target_return'] = (future_close_end / entry_price.replace(0, np.nan)) - 1.0
-        # target_residual (残差リターン)  target = Return_5d - Beta * Market_Return_5d
-        feat['target_residual'] = feat['target_return'] - (feat['Beta_60'] * feat['Market_Return_Future'])
-        # target_risk_adjusted (リスク調整後リターン) target = Return_5d / (Vol_20d + 1e-6)
-        feat['target_risk_adjusted'] = feat['target_return'] / (feat['Vol_20d'] + 1e-6)
-        # --- 2. Balanced戦略ターゲット ---
-        # target_balanced (Triple Barrier) Upper: +5%, Lower: -3% 
-        is_safe_bal = future_low_min > (entry_price * (1 - 0.03))
-        is_hit_tp_bal = future_high_max > (entry_price * (1 + 0.05))
-        is_positive_end = future_close_end > entry_price # 補完条件
-        feat['target_balanced'] = (is_safe_bal & (is_hit_tp_bal | is_positive_end)).astype(int)
-        # target_sharpe_filter (シャープレシオ閾値) target = (Sharpe_5d > 0.1)
-        future_daily_mean = feat['Return_1d'].shift(-1).rolling(window=indexer).mean()
-        future_daily_std = feat['Return_1d'].shift(-1).rolling(window=indexer).std()
-        future_sharpe = future_daily_mean / (future_daily_std + 1e-9)
-        feat['target_sharpe_filter'] = (future_sharpe > 0.1).astype(int)
-        # --- 3. Aggressive戦略ターゲット ---
-        # target_aggressive (Triple Barrier High) Upper: +10%, Lower: -5% (仕様書に合わせて修正)
-        is_safe_agg = future_low_min > (entry_price * (1 - 0.05))
-        is_hit_tp_agg = future_high_max > (entry_price * (1 + 0.10))
-        is_strong_end = future_close_end > (entry_price * 1.03) # 補完条件
-        feat['target_aggressive'] = (is_safe_agg & (is_hit_tp_agg | is_strong_end)).astype(int)
-        # target_low_drawdown (低ドローダウン急騰) High_5d > 1.05 & Low_5d > 0.98
-        is_high_gain = future_high_max > (entry_price * 1.05)
-        is_low_dd = future_low_min > (entry_price * 0.98)
-        feat['target_low_drawdown'] = (is_high_gain & is_low_dd).astype(int)
+        # --- 1. Smoothed Target (Category C) ---
+        # 翌日から5日間のVWAPを計算
+        # VWAP = Sum(Volume_P) / Sum(Volume)
+        future_pv_sum = df['volume_p'].shift(-1).rolling(window=indexer).sum()
+        future_v_sum = df['volume'].shift(-1).rolling(window=indexer).sum()
+        future_vwap = future_pv_sum / (future_v_sum + 1e-9)
+        # target = VWAP_5d / Entry_Price - 1
+        feat['target_tac_smoothed_return'] = (future_vwap / entry_price) - 1.0
+        # --- 2. Volatility-Scaled Residual (Category B) ---
+        feat['target_ret_5'] = (future_close_end / entry_price.replace(0, np.nan)) - 1.0
+        # Beta調整 (Market_Return_Futureは _add_market_features で作成済みと仮定)
+        # もし未作成なら簡易的に df['Market_Return'].shift(-1).rolling(window=indexer).sum() を使用
+        market_ret_future = df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        residual_ret = feat['target_ret_5'] - (feat['Beta_60'] * market_ret_future)
+        # Vol調整 (日次Vol * sqrt(5) で期間Volに換算)
+        vol_5d = feat['Vol_20d'] * np.sqrt(self.horizon_tac)
+        feat['target_tac_vol_scaled_residual'] = residual_ret / (vol_5d + 1e-6)
+        # 既存ターゲットの維持（後方互換性のため）
+        feat['target_tac_residual'] = residual_ret
+        # --- 3. Triple Barrier Methods (Category D) ---
+        # 期間ボラティリティに基づく動的閾値
+        # Vectorized implementation for speed (avoid loop)
+        def calc_triple_barrier(up_multiplier, down_multiplier):
+            """
+            ベクトル化されたトリプルバリア計算
+            return: 1(利確), -1(損切), 0(時間切れ)
+            """
+            barrier_up = entry_price * (1 + vol_5d * up_multiplier)
+            barrier_dn = entry_price * (1 - vol_5d * down_multiplier)
+            # 1日後～5日後の高値・安値を取得
+            h1 = df['high'].shift(-1); l1 = df['low'].shift(-1)
+            h2 = df['high'].shift(-2); l2 = df['low'].shift(-2)
+            h3 = df['high'].shift(-3); l3 = df['low'].shift(-3)
+            h4 = df['high'].shift(-4); l4 = df['low'].shift(-4)
+            h5 = df['high'].shift(-5); l5 = df['low'].shift(-5)
+            # 各日のヒット判定 (利確=1, 損切=-1, なし=0)
+            # 損切を優先判定（保守的）または同時なら損切とするロジック
+            def check_hit(h, l, b_up, b_dn):
+                # 損切ヒット
+                sl = (l < b_dn)
+                # 利確ヒット
+                tp = (h > b_up)
+                # 両方ヒットした場合(大きな足)は、損切(-1)とみなす（保守的運用）
+                # 利確のみ=1, 損切のみ=-1, 両方=-1, なし=0
+                res = np.where(sl, -1, np.where(tp, 1, 0))
+                return res
+            r1 = check_hit(h1, l1, barrier_up, barrier_dn)
+            r2 = check_hit(h2, l2, barrier_up, barrier_dn)
+            r3 = check_hit(h3, l3, barrier_up, barrier_dn)
+            r4 = check_hit(h4, l4, barrier_up, barrier_dn)
+            r5 = check_hit(h5, l5, barrier_up, barrier_dn)
+            # 最初のヒットを探す (r1から順に0以外があれば採用)
+            # np.select は条件の優先順位順に評価される
+            conds = [r1!=0, r2!=0, r3!=0, r4!=0, r5!=0]
+            choices = [r1, r2, r3, r4, r5]
+            return np.select(conds, choices, default=0)
+        # Strategy A: Balance (1.0σ / 1.0σ)
+        feat['target_tac_tb_strategy_a'] = calc_triple_barrier(1.0, 1.0)
+        # Strategy B: Trend (1.5σ / 0.75σ) - 損小利大
+        feat['target_tac_tb_strategy_b'] = calc_triple_barrier(1.5, 0.75)
+        # Strategy C: Reversion (0.5σ / 1.0σ) - 高勝率
+        feat['target_tac_tb_strategy_c'] = calc_triple_barrier(0.5, 1.0)
+        
         # --- ターゲット作成：戦略モデル ---
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_str)
         future_high_max = df['high'].shift(-1).rolling(window=indexer).max()
@@ -459,6 +630,66 @@ class FeatureEngineer:
         feat['Future_High_Str'] = future_high_max
         feat['Future_Low_Str'] = future_low_min
         feat['Future_Close_Str'] = future_close_end
+        # 60日累積リターン（基本値） RankやPeer Alphaの計算ベースとして後続のクロスセクション処理で使用
+        feat['target_ret_60'] = (df['close'].shift(-self.horizon_str) / entry_price.replace(0, np.nan)) - 1.0
+        # Risk-Adjusted Residual Momentum (60d) ベータ調整済みリターンをボラティリティで標準化
+        market_ret_60 = df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        residual_60 = feat['target_ret_60'] - (feat['Beta_60'] * market_ret_60)
+        feat['target_str_risk_adj'] = residual_60 / (feat['Vol_20d'] * np.sqrt(12) + 1e-6) # 20日Volを60日換算(sqrt(3)近似だが実務上Vol_20dで正規化も一般的)
+        # Return Consistency Score (60d) 60日間の累積リターン曲線の直線性をR2で算出
+        def _calc_consistency(window):
+            if np.isnan(window).any(): return np.nan
+            cum_ret = np.cumprod(1 + window)
+            x = np.arange(len(cum_ret))
+            return np.corrcoef(x, cum_ret)[0, 1]**2
+        fwd_ret_1d = df['close'].pct_change().shift(-1)
+        feat['target_str_consistency'] = fwd_ret_1d.rolling(window=indexer).apply(_calc_consistency, raw=True)
+        # Volatility Scaling Alpha (60d) 銘柄固有のボラティリティでスケーリング
+        feat['target_str_vol_scale'] = feat['target_ret_60'] / (feat['volatility_60'] + 1e-6)
+        # Triple Barrier Method 
+        # 3値分類ラベル: 1(利確), -1(損切), 0(時間切れ)
+        # バリア幅の設定: ボラティリティベース (De Prado流)
+        # 上値(PT) = 期間ボラティリティ * 1.0
+        # 下値(SL) = 期間ボラティリティ * 1.0 (損益比率1:1の設定)
+        vol_horizon = feat['Vol_20d'] * np.sqrt(self.horizon_str)
+        pt_width = vol_horizon * 1.0
+        sl_width = vol_horizon * 1.0
+        # 高速化のためのNumpy配列化
+        high_vals = df['high'].values
+        low_vals = df['low'].values
+        entry_vals = entry_price.values
+        pt_vals = pt_width.values
+        sl_vals = sl_width.values
+        labels = np.zeros(len(df)) # デフォルト0 (Time-out)
+        # 60日間のウィンドウ走査（ループ処理）
+        # ※PandasのRollingのみでの「First Touch」判定は困難なため、Numpyループを使用
+        horizon = self.horizon_str
+        n_samples = len(df)
+        for i in range(n_samples - horizon - 1):
+            if np.isnan(entry_vals[i]) or np.isnan(pt_vals[i]):
+                labels[i] = np.nan
+                continue
+            entry = entry_vals[i]
+            upper_barrier = entry * (1 + pt_vals[i])
+            lower_barrier = entry * (1 - sl_vals[i])
+            # 未来ウィンドウを取得 (i+1 ~ i+horizon)
+            # エントリーは i の次の足(i+1)のOpenなので、高安の参照は i+1 から
+            window_high = high_vals[i+1 : i+1+horizon]
+            window_low = low_vals[i+1 : i+1+horizon]
+            # バリアブレイク判定
+            # 上抜けした最初のインデックス
+            hit_upper = np.where(window_high > upper_barrier)[0]
+            # 下抜けした最初のインデックス
+            hit_lower = np.where(window_low < lower_barrier)[0]
+            first_upper = hit_upper[0] if len(hit_upper) > 0 else horizon + 1
+            first_lower = hit_lower[0] if len(hit_lower) > 0 else horizon + 1
+            if first_upper == horizon + 1 and first_lower == horizon + 1:
+                labels[i] = 0 # どちらにも触れず期限切れ
+            elif first_upper < first_lower:
+                labels[i] = 1 # 利確バリアに先に到達
+            else:
+                labels[i] = -1 # 損切バリアに先に到達（同時なら保守的に損切とみなす）
+        feat['target_str_triple_barrier'] = labels
         # 不要変数の削除
         feat.drop(columns=['Vol_20d','Market_Return_Future'], inplace=True)
         self._feature_registry.pop('Vol_20d', None)
@@ -467,28 +698,44 @@ class FeatureEngineer:
 
     def _add_cross_sectional_target(self, df):
         """クロスセクションターゲットの追加"""
-        # target_sector_relative (セクター相対) target = (Return_5d > Sector_Return_5d)
-        indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        sector_return_future = df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
-        df['target_sector_relative'] = (df['target_return'] > sector_return_future).astype(int)
+        # --- 1. Era-wise Rank (Category A) ---
+        # 単純なRank (0.0 ~ 1.0)
+        df['target_tac_rank'] = df.groupby('date')['target_ret_5'].rank(pct=True, method='average')
+        # 既存: Gauss Rank (正規分布化)
         for date, group in df.groupby('date'):
-            # Gauss Rank 0.0 < rank < 1.0
-            rank = group['target_return'].rank(pct=True, method='average')
-            # erfinvの入力範囲 (-1, 1) に収めるためのクリッピング
+            rank = group['target_ret_5'].rank(pct=True, method='average')
             epsilon = 1e-6
             rank = rank * (1 - 2 * epsilon) + epsilon
-            group['target_gauss_rank'] = erfinv(2 * rank - 1)
-            # Top Percentile 上位10%フラグ
-            threshold = group['target_return'].quantile(0.90)
-            group['target_top_percentile'] = (group['target_return'] >= threshold).astype(int)
-            # dfに結果を反映
-            df.loc[group.index, 'target_gauss_rank'] = group['target_gauss_rank']
-            df.loc[group.index, 'target_top_percentile'] = group['target_top_percentile']
-        # target_sector_relative (セクター相対) target = (Return_5d > Sector_Return_5d)
-        df['target_sector_relative'] = (df['target_return'] > df['Sector_Return_Future']).astype(int)
+            df.loc[group.index, 'target_tac_gauss_rank'] = erfinv(2 * rank - 1)
+        # --- 2. Linear Residual (Category C) ---
+        # 簡易的な実装: リターンを「セクター平均」と「市場平均」で説明する線形モデルの残差
+        # 本来はRidge回帰などが望ましいが、計算コストを考慮し
+        # Target = Return - (Beta_Market * Market_Ret + Beta_Sector * Sector_Ret) の簡易版とする
+        # ここではさらにシンプルに、「セクター相対リターン」の分布内偏差（Zスコア的なもの）を
+        # 線形モデルで説明しきれない固有リターンとみなす
+        # 手順:
+        # 1. セクターリターンは _add_sector_relative_features で 'Sector_Return_Future' として計算済みと仮定
+        #    (もしなければ計算する)
+        indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
+        sec_ret_fut = df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
+        mkt_ret_fut = df['Market_Return'].shift(-1).rolling(window=indexer_sec).sum()
+        # 2. 残差 = Target_Return - (0.5 * Market + 0.5 * Sector) ※係数は簡易
+        # より厳密には、日次で回帰係数を決めるのが良いが、ここでは
+        # 「市場とセクターの影響を引いたもの」をLinear Residualの代替とする
+        df['target_tac_linear_residual'] = df['target_ret_5'] - (0.5 * mkt_ret_fut + 0.5 * sec_ret_fut)
+        # セクター相対フラグ
+        df['target_tac_sector_relative'] = (df['target_ret_5'] > sec_ret_fut).astype(int)
+        # --- 戦略モデル用クロスセクション ---
+        # Relative Rank Change (60d)
+        df['target_str_rank'] = df.groupby('date')['target_ret_60'].rank(pct=True)
+        # Peer Group Neutralized Alpha (60d)
+        sector_mean_60 = df.groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
+        df['target_str_peer_alpha'] = df['target_ret_60'] - sector_mean_60
         # 不要変数の削除
         df.drop(columns=['Sector_Return_Future'], inplace=True)
         self._feature_registry.pop('Sector_Return_Future', None)
+        df.drop(columns=['target_ret_60'], inplace=True)
+        self._feature_registry.pop('target_ret_60', None)
         return df
 
     def add_time_series_features(self, df, output_target=True):
@@ -518,6 +765,7 @@ class FeatureEngineer:
         # 以下の処理は、入力データフレームのカラムに追加するのみであり、入力データフレームにあるカラムは全て出力する
         df = self._add_sector_relative_features(df)
         df = self._add_z_score_features(df)
+        df = self._add_rank_features(df)
         if output_target:
             df = self._add_cross_sectional_target(df)
         return df 
