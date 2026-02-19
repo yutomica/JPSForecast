@@ -306,6 +306,7 @@ class FeatureEngineer:
         LAG_YEAR = 240 # サンプリング(interval)が1の場合。5の場合は 240/5 = 48 に調整が必要
         epsilon = 1e-6
         grouped_scode = df.groupby('scode')
+        feat['is_missing_eps'] = df['eps'].isna().astype(int)
         feat['EPS_Actual'] = df['eps'].ffill()
         feat['log_days_since_pub'] = np.log1p((df['date'] - df['published_date']).dt.days).fillna(0)
         feat['log_market_cap'] = np.log(df['close'] * df['shares_outstanding'])
@@ -520,6 +521,7 @@ class FeatureEngineer:
             'Vol_Ratio_5d',         # 出来高比率(5日) (突発的な商いの大きさ) [No.90]
             'Vol_Spike_Count_20',   # 出来高急増回数 (頻度) [No.92]
             'EPS_Actual',           # EPS実数値 (株価未調整の生データ) [No.98]
+            'is_missing_eps',       # EPSが欠損している
             'log_days_since_pub',   # 決算発表後経過日数 (情報の鮮度) [No.99]
             # --- 条件付け特徴量 (絶対値を維持・既存カラムを使用) ---
             'log_market_cap', 'turnover_ratio', 
@@ -738,6 +740,16 @@ class FeatureEngineer:
         self._feature_registry.pop('target_ret_60', None)
         return df
 
+    def _fill_missing_values_with_sector_median(self, df):
+        """指定カラムの欠損を業種別中央値で埋める"""
+        target_cols = ['EPS_Actual', 'turnover_ratio', 'log_market_cap']
+        if 'sector33_code' in df.columns:
+            for col in target_cols:
+                if col in df.columns:
+                    sector_median = df.groupby(['date', 'sector33_code'])[col].transform('median')
+                    df[col] = df[col].fillna(sector_median)
+        return df
+
     def add_time_series_features(self, df, output_target=True):
         if len(df) < 250: return pd.DataFrame()
         self._feature_registry = {k: None for k in self.initial_cols}
@@ -762,6 +774,7 @@ class FeatureEngineer:
         initial_cols = [x for x in df_in.columns if x not in self.target_cols and x not in self.meta_cols]
         self._feature_registry = {k: None for k in initial_cols}
         df = df_in.copy()
+        df = self._fill_missing_values_with_sector_median(df)
         # 以下の処理は、入力データフレームのカラムに追加するのみであり、入力データフレームにあるカラムは全て出力する
         df = self._add_sector_relative_features(df)
         df = self._add_z_score_features(df)
