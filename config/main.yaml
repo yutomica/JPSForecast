@@ -1,9 +1,9 @@
 # config/main.yaml
 defaults:
   - domain: tac
-  - target: balanced
+  - target: tac_rank
   - data: sample
-  - period: standard
+  - period: tac_standard
   - features: tabular_p_a
   - model: lgbm
   - hparams: lgbm_default

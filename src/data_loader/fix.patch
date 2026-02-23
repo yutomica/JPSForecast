@@ -1,0 +1,11 @@
+--- filter.py
++++ filter.py
+@@ -5,5 +5,5 @@
+     def apply(self, df):
+         # トレンドフォローフィルタの修正
+-        c1 = df['Dist_SMA25'] > 0           # 終値 > SMA_25 と同義
+-        c2 = df['Dist_SMA25_75'] > 0        # SMA_25 > SMA_75 と同義
++        # 古い SMA_25 などの直接参照を、新設した乖離率指標に置き換え
++        c1 = df['Dist_SMA25'] > 0
++        c2 = df['Dist_SMA25_75'] > 0
+         return df[c1 & c2]

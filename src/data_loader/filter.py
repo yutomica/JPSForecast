@@ -4,10 +4,11 @@ import numpy as np
 class RuleBasedFilter:
     def apply(self, df):
         if df.empty: return df
-        c1 = df['volume_p_MA5'] > 300_000_000 
-        c2 = df['SMA_25'] > df['SMA_75'] 
+        c1 = df['volume_p_MA5'] > 300_000_000
+        c2 = df['Dist_SMA25'] > 0
+        c3 = df['Dist_SMA25_75'] > 0
         c5 = df['ATR_Ratio'] > 0.01 
-        df['is_candidate_tac'] = c1 & c2 & c5
+        df['is_candidate_tac'] = c1 & c2 & c3 & c5
         return df
 
 

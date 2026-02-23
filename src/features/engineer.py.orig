@@ -60,8 +60,6 @@ class FeatureEngineer:
             'target_str_rank','target_str_peer_alpha',
             # 戦略モデル用ターゲット、別スクリプトで生成
             # 'target_reg', 'target_cls',
-            # 比較用
-            'target_ret_5',
         ]
 
     def _calc_rci(self, series, period):
@@ -97,14 +95,13 @@ class FeatureEngineer:
         """トレンド系指標の一括作成"""
         feat['ADX_14'] = df.ta.adx(length=14).iloc[:, 0]
         # ルールベースフィルタ用にSMAを作成
-        sma5 = df.ta.sma(length=5)
-        sma25 = df.ta.sma(length=25)
-        sma75 = df.ta.sma(length=75)
-        feat['Dist_SMA5'] = (df['close'] / sma5) - 1.0
-        feat['Dist_SMA25'] = (df['close'] / sma25) - 1.0
-        feat['Dist_SMA75'] = (df['close'] / sma75) - 1.0
-        feat['Dist_SMA5_25'] = (sma5 / sma25) - 1.0
-        feat['Dist_SMA25_75'] = (sma25 / sma75) - 1.0
+        feat['SMA_5'] = df.ta.sma(length=5)
+        feat['SMA_25'] = df.ta.sma(length=25)
+        feat['SMA_75'] = df.ta.sma(length=75)
+        feat['Dist_SMA5'] = (df['close'] - feat['SMA_5']) / feat['SMA_5']
+        feat['Dist_SMA75'] = (df['close'] - feat['SMA_75']) / feat['SMA_75']
+        feat['Dist_SMA25'] = (df['close'] - feat['SMA_25']) / feat['SMA_25']
+        feat['MA_Diff_5'] = df['close'] / df['close'].rolling(5).mean()
         # VWAP関連
         typ_price = (df['high'] + df['low'] + df['close']) / 3
         pv_sum = (typ_price * df['volume']).rolling(5).sum()
@@ -130,7 +127,9 @@ class FeatureEngineer:
         feat['Dist_Kijun'] = (df['close'] - kijun_sen) / kijun_sen
         past_3d_high = df['high'].shift(1).rolling(3).max()
         feat['New_High_Flag_3'] = (df['close'] > past_3d_high).astype(int)
-        # Redundant absolute logs removed based on high correlation analysis
+        feat['Close_log'] = np.log(df['close'])
+        feat['MA_25_log'] = np.log(df['close'].rolling(25).mean())
+        feat['MA_75_log'] = np.log(df['close'].rolling(75).mean())
         # 長期価格位置 (120日)
         roll_120 = df['close'].rolling(120)
         max_120 = roll_120.max()
@@ -165,18 +164,20 @@ class FeatureEngineer:
     def _add_momentnum_features(self, feat, df):
         """モメンタム系指標の一括作成"""
         feat['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
+        feat['beta_proxy'] = feat['Log_Return'] - df['Market_Return']
         feat['Downside_Run'] = feat['Log_Return'].clip(upper=0).rolling(5).sum()       
-        feat['Return_Skewness_Diff'] = feat['Log_Return'].rolling(20).skew().diff()
+        feat['Return_Skewness'] = feat['Log_Return'].rolling(20).skew()
         feat['Return_Kurtosis'] = feat['Log_Return'].rolling(20).kurt()
-        # Return_1d removed (Redundant with Log_Return)
+        feat['Return_1d'] = df['close'].pct_change(1)
         feat['Return_3d'] = df['close'].pct_change(3)
         feat['Return_5d'] = df['close'].pct_change(5)
         feat['Return_10d'] = df['close'].pct_change(10)
         feat['Return_20d'] = df['close'].pct_change(20)
-        feat['Return_1d_Lag1'] = feat['Log_Return'].shift(1)
-        feat['Return_1d_Lag2'] = feat['Log_Return'].shift(2)
+        feat['Return_1d_Lag1'] = feat['Return_1d'].shift(1)
+        feat['Return_1d_Lag2'] = feat['Return_1d'].shift(2)
         feat['RSI_9'] = df.ta.rsi(length=9)
-        feat['RSI_9_14_Diff'] = feat['RSI_9'] - df.ta.rsi(length=14)
+        feat['RSI_14'] = df.ta.rsi(length=14)
+        feat['RSI_14_norm'] = (df.ta.rsi(length=14) - 50) / 50 # Normalize -1 to 1
         bb = df.ta.bbands(length=20, std=2)
         if bb is not None:
             bb_p_col = [c for c in bb.columns if c.startswith('BBP')][0]
@@ -194,7 +195,7 @@ class FeatureEngineer:
             feat['Lower_Shadow_Ratio'] = lower_shadow / range_len
             feat['Intraday_Strength'] = (df['close'] - df['open']) / range_len
             feat['Lower_Shadow_MA5'] = feat['Lower_Shadow_Ratio'].rolling(5).mean()
-            # Lower_Shadow_Mean removed (Redundant with Shadow MA5)
+            feat['Lower_Shadow_Mean'] = ((df[['open', 'close']].min(axis=1) - df['low']) / range_len).rolling(5).mean()
         diff = df['close'].diff()
         sign = np.sign(diff).fillna(0)
         is_change = sign != sign.shift(1)
@@ -207,7 +208,7 @@ class FeatureEngineer:
         prev_close = df['close'].shift(1)
         feat['Gap_Rate'] = (df['open'] / prev_close) - 1.0
         feat['Gap_Abs'] = feat['Gap_Rate'].abs()
-        # Gap_Ratio removed
+        feat['Gap_Ratio'] = feat['Gap_Rate']
         feat['Large_Move_Count'] = (feat['Log_Return'].abs() > 0.03).rolling(20).sum()
         range_len = df['high'] - df['low']
         feat['Range_Ratio_Long'] = range_len.rolling(5).mean() / range_len.rolling(20).mean()
@@ -217,14 +218,19 @@ class FeatureEngineer:
         feat['RCI_52'] = self._calc_rci(df['close'], 52)
         feat['RCI_9_Diff'] = feat['RCI_9'].diff(1)
         feat['RCI_26_Diff'] = feat['RCI_26'].diff(1)
-        upper, middle, lower = talib.BBANDS(df['close'], timeperiod=25, nbdevup=2.0)
-        feat['BB_Bandwidth_25'] = (upper - lower) / middle
-        feat['BB_Upper_Ratio'] = (upper / middle) - 1.0
+        upper, middle, lower = talib.BBANDS(df['close'], timeperiod=25, nbdevup=2.0, nbdevdn=2.0)
+        feat['Upper_Band_2sig'] = np.log(upper)
+        feat['Lower_Band_2sig'] = np.log(lower)
         feat['momentum_12_1'] = df['close'].shift(20) / df['close'].shift(260) - 1
+        feat['ret_overnight'] = (df['open'] / df['close'].shift(1)) - 1.0
         feat['ret_intraday'] = (df['close'] / df['open']) - 1.0
-        # Redundant gap and wick ratios removed
+        feat['gap_rate'] = (df['open'] - df['close'].shift(1)) / df['close'].shift(1)
+        range_len = (df['high'] - df['low']).replace(0, np.nan)
+        feat['candle_body_ratio'] = abs(df['close'] - df['open']) / range_len
+        feat['up_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / range_len
         feat['win_rate_10d'] = (feat['Log_Return'] > 0).rolling(10).mean()
-        # Flow interaction removed due to perfect correlation with Log_Return
+        flow = df['overseas_flow_trend']
+        feat['flow_price_interaction'] = flow * feat['Log_Return']
         # セクター内相対指標用
         feat['Return_6m'] = df['close'].pct_change(120)
         feat['Return_12m'] = df['close'].pct_change(240)
@@ -245,7 +251,7 @@ class FeatureEngineer:
         feat['hist_vol_20'] = feat['Log_Return'].rolling(20).std()
         feat['HV_30'] = feat['Log_Return'].rolling(30).std() * np.sqrt(250)
         feat['HV_Slope'] = feat['HV_30'].diff(5)
-        feat['Realized_Skew_20'] = feat['Log_Return'].rolling(20).skew()
+        feat['Realized_Skew_20'] = feat['Return_1d'].rolling(20).skew()
         feat['Ulcer_Index_14'] = df.ta.ui(length=14)
         feat['atr_chg_rate'] = atr.pct_change()
         # セクター内相対指標用 
@@ -268,7 +274,7 @@ class FeatureEngineer:
         feat['Volume_Change'] = df['volume'].pct_change()
         feat['Volume_Slope_5'] = ta.slope(np.log(df['volume'] + 1), length=5)
         feat['Log_Trading_Cap'] = np.log(df['close'] * df['volume'] + 1)
-        # log_vol_change removed
+        feat['log_vol_change'] = np.log(df['volume'] / df['volume'].shift(1).replace(0, 1))
         feat['MFI_14'] = df.ta.mfi(length=14)
         with np.errstate(divide='ignore', invalid='ignore'):
             hl_log_sq = np.log(df['high'] / df['low']) ** 2
@@ -346,8 +352,7 @@ class FeatureEngineer:
     def _add_calendar_feature(self, feat, df):
         """時間・カレンダー系指標の一括作成"""
         day_num = df['date'].dt.day
-        month = df['date'].dt.month
-        feat['Month_in_Quarter'] = df['date'].dt.month % 3
+        feat['Month'] = df['date'].dt.month
         feat['DayOfMonth'] = df['date'].dt.day
         feat['DayOfWeek'] = df['date'].dt.dayofweek
         feat['Sin_DayOfWeek'] = np.sin(2 * np.pi * feat['DayOfWeek'] / 6)
@@ -355,7 +360,7 @@ class FeatureEngineer:
         feat['Is_Gotobi'] = ((day_num % 5 == 0) | (day_num == 31)).astype(int)
         feat['Is_Month_End'] = df['date'].dt.is_month_end.astype(int)
         feat['Quarter'] = df['date'].dt.quarter
-        feat['Is_Quarter_End'] = month.isin([3, 6, 9, 12]).astype(int) # 簡易判定
+        feat['Is_Quarter_End'] = feat['Month'].isin([3, 6, 9, 12]).astype(int) # 簡易判定
         feat['time_idx'] = (df['date'] - df['date'].min()).dt.days
         return feat
 
@@ -437,8 +442,8 @@ class FeatureEngineer:
         """セクター相対特徴量の追加"""
         df['Sector_Momentum_5d'] = df['sector_return'].rolling(5).mean()
         df['Sector_Rel'] = df['close'] / df['sector_return']
-        df['Rel_Sector_Return_1d'] = df['Log_Return'] - df['sector_return']
-        df['Rel_Sector_Return_5d'] = df['Log_Return'].rolling(5).sum() - df['sector_return'].rolling(5).sum()
+        df['Rel_Sector_Return_1d'] = df['Return_1d'] - df['sector_return']
+        df['Rel_Sector_Return_5d'] = df['Return_1d'].rolling(5).sum() - df['sector_return'].rolling(5).sum()
         sector_ret_60 = (1 + df['sector_return']).rolling(60).apply(np.prod, raw=True) - 1
         market_ret_60 = (1 + df['Market_Return']).rolling(60).apply(np.prod, raw=True) - 1
         df['sector_rel_strength_60'] = sector_ret_60 - market_ret_60
