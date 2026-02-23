@@ -1,7 +1,7 @@
-method: "cpcv"          # "fixed", "purged_kfold", "cpcv" から選択
-n_splits: 10             # 分割数
+method: "purged_kfold"          # "fixed", "purged_kfold", "cpcv" から選択
+n_splits: 6             # 分割数
 n_test_chunks: 2        # CPCVでのテストチャンク数
-embargo_days: 7        # パージング後の追加の重なり禁止期間
+embargo_days: 40       # パージング後の追加の重なり禁止期間
 pct_embargo: 0.01       # データの長さに対するエンバーゴの割合
 # 学習・検証・テストの期間定義
 valid_start_date: "2024-01-01"

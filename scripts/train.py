@@ -14,7 +14,7 @@ import copy
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import instantiate, get_class
-from src.cv.purged_kfold import SimplePurgedKFold
+from src.cv.purged_kfold import SimplePurgedKFold, add_t1_column, prepare_purged_cv_input
 from src.cv.cpcv import SimpleCombinatorialPurgedKFold
 from src.cv.cv_viz import summarize_split_for_logging
 from preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
@@ -27,7 +27,6 @@ import logging
 logging.getLogger("alembic").setLevel(logging.WARNING)
 # ついでに sqlalchemy のログも抑制したい場合は以下も有効です
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
-import exchange_calendars as ecals
 
 def apply_sampling(df, interval):
     if interval <= 1:
@@ -93,22 +92,9 @@ def train(cfg: DictConfig):
         
         # --- Embargo期間の設定 ---
         # 必要な期間の取引日を生成
-        cal = ecals.get_calendar("XTKS")
-        start = pd.to_datetime(meta_df['date']).min()
-        end   = pd.to_datetime(meta_df['date']).max()
-        sessions = cal.sessions_in_range(start, end)  # DatetimeIndex (tz awareのことが多い)
-        if sessions.tz is not None:
-            sessions = sessions.tz_convert(None)
-        sessions = sessions.normalize()
-        date_to_pos = {d: i for i, d in enumerate(sessions)}
         train_val_meta = meta_df[mask].copy()
-        train_val_meta['date'] = pd.to_datetime(train_val_meta['date']).dt.normalize()
-        pos = train_val_meta['date'].map(date_to_pos)
-        t1_pos = pos + horizon
-        valid = t1_pos < len(sessions)
-        train_val_meta = train_val_meta.loc[valid].copy()
-        train_val_meta['t1'] = sessions[t1_pos.loc[valid].astype(int).to_numpy()]
-        train_val_meta = train_val_meta.dropna(subset=['t1']).copy()
+        train_val_meta = add_t1_column(train_val_meta, horizon)
+
         # サンプリングの実行 (configから interval を取得)
         sampling_interval = cfg.model.get('sampling_interval', 1)
         train_val_meta = apply_sampling(train_val_meta, sampling_interval)
@@ -130,23 +116,8 @@ def train(cfg: DictConfig):
             # 1つの分割としてリスト化
             splits = [(train_idx, valid_idx, test_idx, None, None)]
         elif cv_method in ["purged_kfold", "cpcv"]:
-            train_val_meta["date_floor"] = pd.to_datetime(train_val_meta["date"]).dt.normalize()
-            train_val_meta["t1_floor"]   = pd.to_datetime(train_val_meta["t1"]).dt.normalize()
-            t1_per_date = (
-                train_val_meta
-                .groupby("date_floor")["t1_floor"]
-                .max()
-                .sort_index()
-            )
-            dates = t1_per_date.index.to_numpy()     # 日付軸（ユニーク日）
-            t1_vals = t1_per_date.to_numpy()         # その日のt1（ユニーク日上に無い可能性あり）
-            start_pos = np.arange(len(dates), dtype=np.int64)
-            end_pos = np.searchsorted(dates, t1_vals, side="right") - 1
-            end_pos = np.clip(end_pos, 0, len(dates) - 1)
-            end_pos = np.maximum(end_pos, start_pos)
-            samples_info = pd.Series(end_pos, index=start_pos, name="t1")
+            samples_info, date_to_indices, dates = prepare_purged_cv_input(train_val_meta)
             pos_to_date  = pd.Series(dates, index=start_pos)  # pos->date
-            date_to_indices = train_val_meta.groupby("date_floor").groups
             if cv_method == "purged_kfold":
                 cv = SimplePurgedKFold(
                     n_splits=int(cfg.period.n_splits),
@@ -249,7 +220,7 @@ def train(cfg: DictConfig):
             # preprocessor_fit
             if hasattr(preprocessor, 'partial_fit'):
                 print(f" Fitting on fold {i} using partial_fit (Size: {len(train_idx)})")
-                chunk_size = 100000
+                chunk_size = 300000
                 for start_pos in range(0, len(train_idx), chunk_size):
                     end_pos = min(start_pos + chunk_size, len(train_idx))
                     batch_idx = train_idx[start_pos:end_pos]
