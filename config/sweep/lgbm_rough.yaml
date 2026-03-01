@@ -1,0 +1,27 @@
+# @package _global_
+hydra:
+  sweeper:
+    # Optunaの設定
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+    direction: maximize  # Sharpe Ratioなどを最大化
+    n_trials: 150         # 試行回数
+    params:
+      # 1. 学習率（まずは広めに探る）
+      hparams.learning_rate: tag(log, interval(0.001, 0.1))
+      # 2. 木の複雑さ（8GB RAMを考慮し、最大値を抑える）
+      hparams.num_leaves: int(range(16, 64))
+      hparams.max_depth: int(range(3, 8))
+      # 3. 過学習抑制（金融MLでは非常に重要）
+      # 1つの葉に必要な最小データ数。大きくすることでノイズへの適合を防ぐ。
+      hparams.min_child_samples: int(range(20, 500))
+      # 4. 特徴量・データのサブサンプリング
+      # ステップ1で厳選した特徴量からさらにランダムに選択。
+      hparams.feature_fraction: interval(0.5, 0.9)
+      hparams.bagging_fraction: interval(0.6, 0.9)
+      hparams.bagging_freq: int(range(1, 7))
+      # 5. 強力な正則化（L1/L2）
+      # 不要な特徴量の重みをゼロにする(L1)力と、重みを滑らかにする(L2)力を探る。
+      hparams.lambda_l1: tag(log, interval(1e-8, 10.0))
+      hparams.lambda_l2: tag(log, interval(1e-8, 10.0))

@@ -52,3 +52,7 @@ ipython
 
 # --- Model Explainability ---
 shap
+
+# --- High Performance Data Processing ---
+polars>=0.20.0
+pyarrow>=14.0.0  # pandasやMySQLとの高速変換に必要

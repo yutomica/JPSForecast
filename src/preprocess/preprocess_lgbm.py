@@ -48,8 +48,9 @@ class LGBMPreprocessor(BasePreprocessor):
         for col in self.cat_cols:
             if col in df_processed.columns:
                 df_processed[col] = df_processed[col].fillna(-1).astype(int).astype('category')
-        num_cols = [c for c in df_processed.columns if c not in self.cat_cols]
-        df_processed[num_cols] = df_processed[num_cols].astype('float32')
+        num_cols = list(dict.fromkeys([c for c in df_processed.columns if c not in self.cat_cols]))
+        if num_cols:
+            df_processed[num_cols] = df_processed[num_cols].astype('float32')
         return df_processed
 
     def save(self, filename='scaler.joblib'):

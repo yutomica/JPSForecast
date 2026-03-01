@@ -82,6 +82,9 @@ def add_t1_column(meta_df: pd.DataFrame, horizon: int, calendar_name: str = "XTK
     meta_df = meta_df.copy()
     meta_df['date'] = pd.to_datetime(meta_df['date']).dt.normalize()
     
+    if meta_df.empty:
+        return meta_df
+
     start_date = meta_df['date'].min()
     end_date = meta_df['date'].max()
     

@@ -18,7 +18,7 @@ def calculate_sample_weights(mcap_array, domain='STR'):
     if domain == 'TAC':
         # 短期: 全銘柄平等、または流動性に緩やかに比例
         # ノイズ除去のため、極端な低流動性株のウェイトを0にする手もある
-        return np.ones(len(mcap_array.shape[0]))
+        return np.ones(mcap_array.shape[0])
     elif domain == 'STR':
         # 中期: 時価総額が大きいほど重視 (シグモイド関数でS字カーブを作る)
         # 例: 時価総額100億円以下はウェイトほぼ0、1000億円以上はウェイト1

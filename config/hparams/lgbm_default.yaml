@@ -8,10 +8,10 @@ learning_rate: 0.05
 num_leaves: 31
 max_depth: 8
 min_child_samples: 100
-subsample: 0.8
-colsample_bytree: 0.5
-reg_alpha: 6.423
-reg_lambda: 9.948
+bagging_fraction: 0.8
+feature_fraction: 0.5
+lambda_l1: 0.001
+lambda_l2: 6.423
 is_unbalance: true
 use_time_decay: true
 time_decay_rate: 0.9999

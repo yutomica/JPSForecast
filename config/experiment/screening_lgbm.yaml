@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - override /model: lgbm
+  - override /hparams: lgbm_screening
+  - override /features: all
+
+# スクリーニング専用のフラグ
+mode: "feature_screening" 
+
+mlflow:
+  experiment_name: "Feature_Screening_LGBM"

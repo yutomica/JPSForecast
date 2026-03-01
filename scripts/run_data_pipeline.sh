@@ -11,9 +11,9 @@ echo "Starting JPSForecast Data Preparation Pipeline"
 echo "============================================================"
 
 # 1. 生データの標準化 (Standardize Raw Data)
-# echo ""
-# echo "[Step 1/3] Running standardize_raw_data..."
-# python -m scripts.data_prep.standardize_raw_data
+echo ""
+echo "[Step 1/3] Running standardize_raw_data..."
+python -m scripts.data_prep.standardize_raw_data
 
 # 2. マスターデータ作成 (Create Master Data)
 echo ""

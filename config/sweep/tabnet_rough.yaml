@@ -1,0 +1,30 @@
+# @package _global_
+hydra:
+  sweeper:
+    # Optunaの設定
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+    direction: maximize  # ランクICやシャープレシオの最大化
+    n_trials: 100         # DL系は学習時間が長いため、まずは100回程度
+    params:
+      # 1. 学習率（DLモデルの収束に最重要）
+      hparams.optimizer_params.lr: tag(log, interval(0.001, 0.05))
+      # 2. アーキテクチャの規模（8GB RAMを考慮し、幅n_d/n_aを抑制）
+      # n_d と n_a は通常同じ値を設定するのが定石
+      hparams.n_d: choice(8, 16, 24, 32)
+      hparams.n_a: choice(8, 16, 24, 32)
+      # 3. 決定ステップ数（木の深さに相当。多いほど複雑な関係を捉えるが重くなる）
+      hparams.n_steps: int(range(3, 8))
+      # 4. 特徴量再利用の係数（1.0〜1.5程度が実務的なスイートスポット）
+      hparams.gamma: interval(1.0, 1.5)
+      # 5. スパース性正則化（金融ノイズ対策の核。大きな値を許容して不要な情報を遮断）
+      hparams.lambda_sparse: tag(log, interval(1e-6, 0.01))
+      # 6. GLU（Gated Linear Unit）層の構成
+      hparams.n_independent: int(range(1, 4))
+      hparams.n_shared: int(range(1, 4))
+      # 7. バッチノーマライゼーションのモメンタム
+      # 金融データのような非定常データでは、小さめの値（0.01〜0.1）が安定しやすい
+      hparams.momentum: interval(0.01, 0.4)
+      hparams.max_epochs: 50
+      hparams.use_pretrain: False

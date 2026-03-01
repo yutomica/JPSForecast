@@ -29,7 +29,7 @@ class FeatureEngineer:
         self.horizon_tac = 5    # 予測期間日数：戦術モデル
         self.horizon_str = 60   # 予測期間日数：戦略モデル
         self.initial_cols = [
-            'scode', 'sector33_code', 'date', 'volume_p', 'close', 'shares_outstanding',
+            'scode', 'sector33_code', 'date', 'volume_p', 'open', 'high', 'low', 'close', 'volume', 'shares_outstanding',
             'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
             'Market_Foreign_Z_60', 'Market_Individual_Z_60', 'Market_Foreign_Z_250',
             'Market_Individual_Z_250', 'Market_Foreign_Diff', 'overseas_flow_trend', 'flow_accel', 'selling_volume_ratio',
@@ -37,7 +37,8 @@ class FeatureEngineer:
         # 辞書のキーとして格納（Python 3.7+ では挿入順が保持されます）
         self._feature_registry = dict()
         self.meta_cols = [
-            'scode', 'date', 'volume_p', 'close', 'shares_outstanding',
+            'scode', 'date', 'close',
+            # 検証用
             'Entry_Price','Future_High_Tac','Future_Low_Tac','Future_Close_Tac',
             'Future_High_Str','Future_Low_Str','Future_Close_Str'
         ]
@@ -61,7 +62,7 @@ class FeatureEngineer:
             # 戦略モデル用ターゲット、別スクリプトで生成
             # 'target_reg', 'target_cls',
             # 比較用
-            'target_ret_5',
+            'target_ret_5'#, 'target_ret_60'
         ]
 
     def _calc_rci(self, series, period):
@@ -202,7 +203,6 @@ class FeatureEngineer:
         count = df.groupby(group_id).cumcount() + 1
         feat['Streak'] = np.where(sign > 0, count, np.where(sign < 0, -count, 0))
         feat['Bullish_Ratio_20'] = (sign > 0).rolling(20).mean()
-        feat['Close_Open_Ratio'] = (df['close'] - df['open']) / df['close']
         feat['Close_Position'] = (df['close'] - df['low'].rolling(20).min()) / (df['high'].rolling(20).max() - df['low'].rolling(20).min())
         prev_close = df['close'].shift(1)
         feat['Gap_Rate'] = (df['open'] / prev_close) - 1.0
@@ -218,7 +218,6 @@ class FeatureEngineer:
         feat['RCI_9_Diff'] = feat['RCI_9'].diff(1)
         feat['RCI_26_Diff'] = feat['RCI_26'].diff(1)
         upper, middle, lower = talib.BBANDS(df['close'], timeperiod=25, nbdevup=2.0)
-        feat['BB_Bandwidth_25'] = (upper - lower) / middle
         feat['BB_Upper_Ratio'] = (upper / middle) - 1.0
         feat['momentum_12_1'] = df['close'].shift(20) / df['close'].shift(260) - 1
         feat['ret_intraday'] = (df['close'] / df['open']) - 1.0
@@ -459,7 +458,7 @@ class FeatureEngineer:
             'ATR_Ratio','ma_dev_25','ma_dev_75','ma_dev_200',
             'Return_20d','Return_6m','Return_12m','RSI_14',
             'high_52w_dist','downside_dev_60','volatility_60',
-            'margin_buy_chg','margin_ratio','margin_buy_impact',
+            'margin_ratio','margin_buy_impact',
         ]
         # Zスコア計算後もキープする特徴量
         keep_cols = [
@@ -507,7 +506,7 @@ class FeatureEngineer:
             'sector_return',        # セクターリターン [No.124]
             'sector_short_sell_ratio', # セクター別空売り比率 [No.130]
             # --- 6. 絶対水準・規模・ショック [ABS] (ランク化で情報消失する項目) ---
-            'Volume_log',           # 対数出来高 (流動性の絶対サイズ) [No.81]
+            'Volume_Log',           # 対数出来高 (流動性の絶対サイズ) [No.81]
             'Abnormal_Volume',      # 異常出来高比率 (ショックの大きさ) [No.82]
             'Volume_Change',        # 出来高変化率 (変化のマグニチュード) [No.83]
             'Volume_Slope_5',       # 出来高トレンド (傾きの絶対値) [No.84]
@@ -572,8 +571,6 @@ class FeatureEngineer:
         # Vol調整 (日次Vol * sqrt(5) で期間Volに換算)
         vol_5d = feat['Vol_20d'] * np.sqrt(self.horizon_tac)
         feat['target_tac_vol_scaled_residual'] = residual_ret / (vol_5d + 1e-6)
-        # 既存ターゲットの維持（後方互換性のため）
-        feat['target_tac_residual'] = residual_ret
         # --- 3. Triple Barrier Methods (Category D) ---
         # 期間ボラティリティに基づく動的閾値
         # Vectorized implementation for speed (avoid loop)
@@ -766,7 +763,7 @@ class FeatureEngineer:
     
     def add_cross_sectional_features(self, df_in, output_target=True):
         """銘柄横断特徴量の追加"""
-        initial_cols = [x for x in df_in.columns if x not in self.target_cols and x not in self.meta_cols]
+        initial_cols = [x for x in df_in.columns if x not in self.target_cols and x not in self.meta_cols and x.find('filt_')==-1]
         self._feature_registry = {k: None for k in initial_cols}
         df = df_in.copy()
         df = self._fill_missing_values_with_sector_median(df)

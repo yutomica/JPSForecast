@@ -66,19 +66,26 @@ def main(cfg: DictConfig):
                 target_col = 'target_reg'
             else:
                 raise ValueError(f"Target column '{target_col}' or 'target_reg' not found in metadata.")
-        y_all = meta_df[target_col]
-        # 欠損ターゲットの除外
-        valid_mask = y_all.notna()
+        
+        # ドメインに応じた候補フラグのフィルタリング
+        print(f"Domain: {cfg.domain.name}")
+        if cfg.domain.name == 'TAC':
+            candidate_mask = meta_df['is_candidate_tac'] == True
+        else:
+            candidate_mask = meta_df['is_candidate_str'] == True
+
+        # ターゲットの欠損チェックと候補フラグのAND条件
+        valid_mask = (meta_df[target_col].notna()) & candidate_mask
+
         mlflow.log_param("target_col", target_col)
         print(f"Target: {target_col}, Total rows: {len(meta_df)}, Valid rows: {valid_mask.sum()}")
         if valid_mask.sum() == 0:
             raise ValueError("No valid target data found.")
         # 有効なデータのみ抽出 (メモリ効率のため)
-        # 注意: データ量が非常に大きい場合、ここでメモリ不足になる可能性があります。
         subset_idx = meta_df.index[valid_mask].to_numpy()
         # 特徴量をメモリにロード
         X = X_mmap[subset_idx]
-        y = y_all.iloc[subset_idx].to_numpy()
+        y = meta_df.loc[subset_idx, target_col].to_numpy()
         meta_subset = meta_df.iloc[subset_idx].copy().reset_index(drop=True)
         
         # --- 2. Purged CVの準備 ---

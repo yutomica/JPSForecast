@@ -3,9 +3,13 @@ n_a: 24
 n_steps: 3
 gamma: 1.3
 lambda_sparse: 1.39e-06
+n_independent: 2  # 【追加】独立したGLU層数
+n_shared: 2       # 【追加】共有されたGLU層数
+momentum: 0.02    # 【追加】BNのモメンタム（金融向けに低めに設定）
 optimizer_fn: "adam"
 optimizer_params:
   lr: 0.002
+  weight_decay: 1e-5
 mask_type: "entmax"
 scheduler_params:
   step_size: 50

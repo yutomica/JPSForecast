@@ -3,6 +3,7 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import pandas as pd
 import mlflow
+import optuna
 from .base import BaseModelWrapper
 
 class LGBMWrapper(BaseModelWrapper):

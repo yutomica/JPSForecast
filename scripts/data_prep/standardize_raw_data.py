@@ -9,6 +9,7 @@ import glob
 import gc
 from src.data_loader.loader import DataLoader
 from src.features.engineer import FeatureEngineer
+from src.data_loader.filter import FinancialUniverseEngine
 import warnings
 from tqdm import tqdm
 # pandas_ta等の警告抑制
@@ -28,6 +29,7 @@ def standardize_raw_data():
 
     loader = DataLoader()
     engineer = FeatureEngineer()
+    filter = FinancialUniverseEngine()
     all_symbols = loader.get_all_symbols()
     df_topix = loader.fetch_topix_data()
     df_n225 = loader.fetch_n225_data()
@@ -95,9 +97,8 @@ def standardize_raw_data():
             df_feat = df_feat.dropna(subset='Dist_SMA75')
             # 直近データの除外、Future_X_Str基準で
             df_feat = df_feat.dropna(subset='Future_High_Str')
-            # 最低限のフィルタリング　平均売買代金が5千万未満を除外
-            if df_feat['volume_p_MA5'].mean() < 50_000_000:
-                continue
+            # filter
+            df_feat = filter.calc_intrinsic_metrics(df_feat)
             # 一時保存
             df_feat.to_parquet(f"{TEMP_DIR}/{symbol}.parquet")
 
