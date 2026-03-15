@@ -41,13 +41,40 @@ class TemporalBlock(nn.Module):
         return self.relu(out + res)
 
 class TCN(nn.Module):
-    def __init__(self, input_size, output_size, num_channels, kernel_size=2, dropout=0.2):
+    def __init__(self, input_size, output_size, n_layers, num_channel, kernel_size=2, dropout=0.2, embedding_info=None):
+        """
+        Args:
+            input_size (int): 連続変数の特徴量数
+            output_size (int): 出力次元数
+            n_layers (int): レイヤ層数
+            num_channel (int): 各レイヤのチャネル数
+            kernel_size (int): カーネルサイズ
+            dropout (float): ドロップアウト率
+            embedding_info (list of dict): 各カテゴリ変数の設定 
+                             例: [{'num_categories': 33, 'embedding_dim': 8}, ...]
+        """
         super(TCN, self).__init__()
+        
+        # レイヤ層数とチャネル数からリストを生成
+        num_channels = [num_channel] * n_layers
+            
+        # カテゴリ変数のためのEmbedding層の構築
+        self.embeddings = nn.ModuleList()
+        total_emb_dim = 0
+        if embedding_info:
+            for info in embedding_info:
+                emb = nn.Embedding(info['num_categories'], info['embedding_dim'])
+                # 金融データはスパースになりやすいため、正規分布で初期化
+                nn.init.normal_(emb.weight, std=0.01)
+                self.embeddings.append(emb)
+                total_emb_dim += info['embedding_dim']
+        # TCNバックボーンへの最終的な入力次元数
+        self.total_input_size = input_size + total_emb_dim
         layers = []
         num_levels = len(num_channels)
         for i in range(num_levels):
             dilation_size = 2 ** i
-            in_channels = input_size if i == 0 else num_channels[i-1]
+            in_channels = self.total_input_size if i == 0 else num_channels[i-1]
             out_channels = num_channels[i]
             padding = (kernel_size - 1) * dilation_size
             layers += [TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
@@ -55,7 +82,23 @@ class TCN(nn.Module):
         self.network = nn.Sequential(*layers)
         self.fc = nn.Linear(num_channels[-1], output_size)
 
-    def forward(self, x):
+    def forward(self, x_cont, x_cat=None):
+        """
+        Args:
+            x_cont: 連続変数テンソル [Batch, SeqLen, InputSize]
+            x_cat: カテゴリ変数テンソル [Batch, SeqLen, NumCatFeatures] (整数型)
+        """
+        # カテゴリ変数の処理と結合
+        if x_cat is not None and len(self.embeddings) > 0:
+            emb_outs = []
+            for i, emb in enumerate(self.embeddings):
+                # 各カテゴリ変数をembeddingし、[Batch, SeqLen, EmbDim]を得る
+                emb_outs.append(emb(x_cat[:, :, i]))
+            # 全ての入力を特徴量方向に結合
+            x = torch.cat([x_cont] + emb_outs, dim=-1)
+        else:
+            x = x_cont
+        # TCNの入力形式 [Batch, Channels, SeqLen] に変換
         x = x.permute(0, 2, 1)
         y = self.network(x)
         return self.fc(y[:, :, -1])

@@ -6,4 +6,3 @@ preprocessor_target: "src.preprocess.preprocess_tabnet.TabNetPreprocessor"
 model_target: "src.models.tabnet_wrapper.TabNetWrapper"
 # このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
 data_category: "tabular"
-n_ensembles: 5

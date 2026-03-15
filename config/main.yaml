@@ -4,7 +4,7 @@ defaults:
   - target: tac_rank
   - data: master
   - period: tac_standard
-  - features: tabular_p_a
+  - features: tac_candidates
   - model: lgbm
   - hparams: lgbm_default
   - _self_

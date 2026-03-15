@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import MySQLdb
+from scipy.special import erfinv
 
 TABLE_NAME = 'jps.sp_d'      
 START_DATE = '2015-01-01' 
@@ -132,7 +133,8 @@ class DataLoader:
                 nikkei_hv = nikkei_ret.rolling(20).std()
                 # HVの変化トレンド (今のHV - 20日前のHV)
                 df['market_vol_change'] = nikkei_hv.diff()
-            return df[['date', 'market_vol_change']]
+            ret_cols = ['date', 'market_vol_change']
+            return df[ret_cols]
         except Exception as e:
             print(f"Error fetching N225 data: {e}")
             return pd.DataFrame()
@@ -159,15 +161,11 @@ class DataLoader:
         """
         try:
             df_trends = pd.read_sql(query, self.conn, parse_dates=['PubDate'])
-            # 【修正箇所】Market_Return, Market_Trend_Idx, Market_HV_20 を計算して追加
             if not df_trends.empty:
-                # マージ用のキーをセット
-                # 株価データ(df_stock)の日付と突き合わせるのは「対象期間(Date)」ではなく「公開日(PublishedDate)」
+                # -- preprocess --
                 df_trends = df_trends.set_index('PubDate').sort_index()
-                # 2. 必要なカラムのみ抽出
-                # PublishedDateがIndexになっている
                 df_trends = df_trends[['Foreign_Net_Buy', 'Individual_Net_Buy']]
-                # 3. 日次カレンダーへのリサンプリングと前方埋め (ffill)
+                # 日次カレンダーへのリサンプリングと前方埋め (ffill)
                 # これにより、ある公開日から次の公開日まで、同じ値が継続する
                 # 実際のバックテスト期間に合わせてreindexする
                 # 例: 2018-01-01 から直近まで
@@ -176,37 +174,9 @@ class DataLoader:
                 # 日次データに合わせてリインデックスし、値を前方埋めする
                 # 例: 木曜(Pub) -> 金曜(穴埋め) -> 月曜(穴埋め) ... -> 次の木曜(新データ)
                 df_daily = df_trends.reindex(full_range, method='ffill')
-                # 期間設定: 短期トレンド(60日) と 長期水準(250日) の2つを採用
-                windows = [60, 250]
-                feature_cols = []
-                for window in windows:
-                    suffix = f"_{window}" # カラム名の接尾辞 (例: _60, _250)
-                    # 海外投資家 Zスコア
-                    mean_f = df_daily['Foreign_Net_Buy'].rolling(window).mean()
-                    std_f = df_daily['Foreign_Net_Buy'].rolling(window).std()
-                    col_name_f = f'Market_Foreign_Z{suffix}'
-                    df_daily[col_name_f] = (df_daily['Foreign_Net_Buy'] - mean_f) / std_f
-                    feature_cols.append(col_name_f)
-                    # 個人投資家 Zスコア
-                    mean_i = df_daily['Individual_Net_Buy'].rolling(window).mean()
-                    std_i = df_daily['Individual_Net_Buy'].rolling(window).std()
-                    col_name_i = f'Market_Individual_Z{suffix}'
-                    df_daily[col_name_i] = (df_daily['Individual_Net_Buy'] - mean_i) / std_i
-                    feature_cols.append(col_name_i)
-                # Momentum（勢いの変化）は「短期(60)」のZスコアの変化を見るのが最も有効
-                # 直近の資金流入加速を検知するため
-                df_daily['Market_Foreign_Diff'] = df_daily['Market_Foreign_Z_60'].diff(5)
-                feature_cols.append('Market_Foreign_Diff')
-                # 海外投資家動向トレンド (4週移動平均)
-                df_daily['overseas_flow_trend'] = df_daily['Foreign_Net_Buy'].rolling(20).mean()
-                feature_cols.append('overseas_flow_trend')
-                # フロー加速度
-                flow = df_daily['overseas_flow_trend']
-                df_daily['flow_accel'] = flow - flow.rolling(5).mean()
-                feature_cols.append('flow_accel')
                 # DataFrameを整えて返す
                 df_daily.index.name = 'date'
-                return df_daily[feature_cols].reset_index()
+                return df_daily.reset_index()
         except Exception as e:
             print(f"Error fetching investor types data: {e}")
             return pd.DataFrame()
@@ -304,7 +274,6 @@ class DataLoader:
         """
         業種別空売り比率データを取得する
         J-Quants API: /markets/short_selling 対応
-        
         Returns:
             pd.DataFrame: [date, sector33_code, selling_volume_ratio]
         """
@@ -330,7 +299,8 @@ class DataLoader:
             df['selling_volume_ratio'] = [None if z is None or z == 0 else (x + y) / z for x, y, z in zip(df['ShrtWithResVa'], df['ShrtNoResVa'], df['SellExShortVa'])]
             # sector33_codeを文字列型に統一（結合時のキー不一致防止）
             df['sector33_code'] = df['sector33_code'].astype(str)
-            return df[['date', 'sector33_code', 'selling_volume_ratio']]
+            ret_cols = ['date', 'sector33_code', 'selling_volume_ratio']
+            return df[ret_cols]
         except Exception as e:
             print(f"Error fetching Short Selling data: {e}")
             return pd.DataFrame()

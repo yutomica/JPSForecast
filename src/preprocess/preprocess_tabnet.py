@@ -28,7 +28,8 @@ class TabNetPreprocessor(BasePreprocessor):
         """
         df = pd.DataFrame(data,columns=self.feature_cols)
         # カテゴリ変数のLabelEncodingを実行
-        for col in self.cat_cols:
+        valid_cat_cols = [c for c in self.cat_cols if c in df.columns]
+        for col in valid_cat_cols:
             le = LabelEncoder()
             # 欠損値は 'Unknown' として扱うか、事前に埋める必要がある
             # ここでは簡易的に文字型にして欠損を埋めてからFit
@@ -42,7 +43,7 @@ class TabNetPreprocessor(BasePreprocessor):
         # カテゴリ変数はエンコード済みとして扱うため、ここでは数値列のみ対象にしたいが、
         # 簡易化のため全体に対してfitする（カテゴリ列は後で上書きされるので無視される前提）
         # ただし数値列のみ抽出してfitする方が安全
-        num_cols = [c for c in df.columns if c not in self.cat_cols]
+        num_cols = [c for c in df.columns if c not in valid_cat_cols]
         if num_cols:
             self.imputer.fit(df[num_cols])
         

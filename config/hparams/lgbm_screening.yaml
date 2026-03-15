@@ -2,6 +2,7 @@
 objective: "regression"
 metric: "rmse"
 boosting_type: "gbdt"
+importance_type: "gain"
 n_jobs: -1
 random_state: 42
 learning_rate: 0.01
@@ -9,6 +10,8 @@ num_leaves: 31
 max_depth: 8
 min_child_samples: 100
 subsample: 0.8
+subsample_freq: 5
 colsample_bytree: 0.5
+lambda_l1: 1.0
 use_time_decay: false
 n_estimators: 10000

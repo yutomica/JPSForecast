@@ -20,15 +20,27 @@ for TARGET in "${TARGET_TYPES[@]}"; do
         case "${TARGET}_${MODEL}" in
             "tac_lgbm")
                 TRAIN_TARGET="tac_rank"
+                FEATURES="features_tac_LGBM_rough"
                 ;;
             "str_lgbm")
                 TRAIN_TARGET="str_risk_adj"
+                FEATURES="features_str_LGBM_rough"
                 ;;
             "tac_tabnet")
                 TRAIN_TARGET="tac_rank"
+                FEATURES="features_tac_TabNet_rough"
                 ;;
             "str_tabnet")
                 TRAIN_TARGET="str_rank"
+                FEATURES="features_str_TabNet_rough"
+                ;;
+            "tac_tcn")
+                TRAIN_TARGET="tac_vol_scaled_residual"
+                FEATURES="features_tac_TimeSeries_rough"
+                ;;
+            "str_tcn")
+                TRAIN_TARGET="str_risk_adj"
+                FEATURES="features_str_TimeSeries_rough"
                 ;;
             *)
                 echo "Skipping unknown combination: ${TARGET} ${MODEL}"
@@ -64,7 +76,7 @@ print(run.info.run_id)
             domain=${TARGET} \
             model=${MODEL} \
             period=${TARGET}_standard \
-            features=${TARGET}_candidates \
+            features=${FEATURES} \
             target=${TRAIN_TARGET} \
             hparams=${MODEL}_default \
             hydra/sweeper=optuna \

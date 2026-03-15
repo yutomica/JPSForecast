@@ -1,7 +1,3 @@
-"""
-市場データや財務データを読み込み、基本的なデータ型（float32等）の整理、欠損値の最小限の処理、ターゲット変数の算出を行い、
-「ドメインに依存しないベースライン・データ」として保存
-"""
 import os
 import pandas as pd
 from pathlib import Path
@@ -28,10 +24,12 @@ def standardize_raw_data():
     os.makedirs(OUTPUT_PATH, exist_ok=True)
 
     loader = DataLoader()
-    engineer = FeatureEngineer()
     filter = FinancialUniverseEngine()
+    print("Fetching reference data for all symbols...")
     all_symbols = loader.get_all_symbols()
+    print(f"Total unique symbols to process: {len(all_symbols)}")
     df_topix = loader.fetch_topix_data()
+    print("Fetching additional market and financial data...")
     df_n225 = loader.fetch_n225_data()
     df_fins = loader.fetch_financial()
     df_investor_types = loader.fetch_investor_types()
@@ -41,8 +39,10 @@ def standardize_raw_data():
     df_margin = df_margin_weekly.copy()
     df_margin['available_date'] = pd.to_datetime(df_margin['date']) + pd.Timedelta(days=4)
     df_shrt_sector = loader.fetch_short_selling_sector()
+    df_sector_indices = loader.fetch_sector_return()
+    df_sector_indices['sector33_code'] = df_sector_indices['sector33_code'].astype(str)
 
-    # --- A. 銘柄別ループ (時系列計算) ---
+    # --- 銘柄別ループ (時系列計算) ---
     for i in tqdm(range(0, all_symbols.shape[0], BATCH_SIZE), desc="Processing Batches"):
         batch_symbols = list(all_symbols.iloc[i : i + BATCH_SIZE,0]) # scode_list
         df_batch = loader.fetch_batch_data(batch_symbols) # 銘柄別OHLCVデータ
@@ -84,17 +84,35 @@ def standardize_raw_data():
             by='sector33_code',
             direction='backward'
         )
+        # セクターインデックスの結合
+        df_batch = pd.merge(df_batch,df_sector_indices,on=['date', 'sector33_code'],how='left')
         for symbol, df_stock in df_batch.groupby('scode'):
             df_stock = df_stock.sort_values('date').reset_index(drop=True)
-            df_feat = engineer.add_time_series_features(
-                df_stock, 
-                output_target=True
+            engine = FeatureEngineer(df_stock)
+            pipe = (
+                engine
+                .apply_momentum_block()
+                .apply_volatility_block()
+                .apply_liquidity_block()
+                .apply_value_block()
+                .apply_quality_block()
+                .apply_size_block()
+                .apply_supplydemand_bloc()
+                .apply_beta_block()
+                .apply_seasonality_block()
+                .apply_event_block()
+                .apply_consensus_block()
+                .apply_governance_block()
+                .apply_tempfeat()
+                .apply_bulk_time_series()
+                .apply_timeseries_targets()
             )
+            df_feat = pipe.get_df()
             if df_feat.empty: continue
             # 過去データの除外、momentum_12_1基準で
-            df_feat = df_feat.dropna(subset='momentum_12_1')
+            df_feat = df_feat.dropna(subset='MOM_Momentum12-1_RAW')
             # 上場間も無い銘柄を除外、Dist_SMA75基準で
-            df_feat = df_feat.dropna(subset='Dist_SMA75')
+            df_feat = df_feat.dropna(subset='MOM_DistSMA75_RAW')
             # 直近データの除外、Future_X_Str基準で
             df_feat = df_feat.dropna(subset='Future_High_Str')
             # filter
@@ -102,10 +120,10 @@ def standardize_raw_data():
             # 一時保存
             df_feat.to_parquet(f"{TEMP_DIR}/{symbol}.parquet")
 
-    del df_topix, df_fins, df_investor_types, df_margin_weekly, df_margin, df_shrt_sector
+    del df_topix, df_fins, df_investor_types, df_margin_weekly, df_margin, df_shrt_sector, df_sector_indices
     gc.collect()
 
-    # --- B. 日付別ループ (チャンク化) ---
+    # --- 日付別ループ (チャンク化) ---
     # 全銘柄の「MA_250計算済みデータ」を日付でまとめて保存し直す
     print("Regrouping data into date chunks...")
     all_temp_files = glob.glob(f"{TEMP_DIR}/*.parquet")

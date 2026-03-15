@@ -54,6 +54,20 @@ def verify_master_data(master_dir):
     # ターゲット列の特定
     target_cols = [c for c in meta_df.columns if c.startswith('target_')]
     
+    print("\n--- Checking for missing Targets ---")
+    for tgt in target_cols:
+        # 数値型であることを前提にNaN/Infチェック
+        is_numeric = pd.api.types.is_numeric_dtype(meta_df[tgt])
+        missing_mask = (meta_df[tgt].isna() | np.isinf(meta_df[tgt])) if is_numeric else meta_df[tgt].isna()
+        missing_count = missing_mask.sum()
+        
+        if missing_count > 0:
+            print(f"Found {missing_count} records with missing {tgt}.")
+            missing_rows = meta_df.loc[missing_mask, ['date', 'scode']]
+            out_path = os.path.join(master_dir, f"missing_{tgt}_records.csv")
+            missing_rows.to_csv(out_path, index=False)
+            print(f"✅ Exported missing {tgt} records to: {out_path}")
+
     # 年カラムの作成
     meta_df['year'] = pd.to_datetime(meta_df['date']).dt.year
 
@@ -114,7 +128,7 @@ def verify_master_data(master_dir):
         gc.collect()
 
     # 8. 年別・全項目の欠損率チェック
-    print("\n--- Global Missing Rate Scan by Year (Features & Targets) ---")
+    print("\n--- Missing Rate Scan by Year (Target: is_candidate_str=True) ---")
     start_time = time.time()
     
     years = sorted(meta_df['year'].unique())
@@ -124,7 +138,7 @@ def verify_master_data(master_dir):
 
     for year in years:
         print(f"  Processing Year: {year}...")
-        year_mask = meta_df['year'] == year
+        year_mask = (meta_df['year'] == year) & (meta_df['is_candidate_str'] == True)
         # 物理的な行番号(0, 1, 2...)を取得
         year_pos = np.where(year_mask)[0]
         year_total_rows = len(year_pos)

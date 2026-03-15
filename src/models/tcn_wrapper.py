@@ -31,7 +31,8 @@ class TCNWrapper(BaseModelWrapper):
         self.model = TCN(
             input_size=input_size,
             output_size=1 if self.task_type == "regression" else 1, # 分類も1出力(BCE)
-            num_channels=self.params.get('num_channels', [64, 64]),
+            n_layers=self.params.get('n_layers', 2),
+            num_channel=self.params.get('num_channel', 64),
             kernel_size=self.params.get('kernel_size', 3),
             dropout=self.params.get('dropout', 0.2)
         ).to(self.device)
@@ -150,7 +151,8 @@ class TCNWrapper(BaseModelWrapper):
             self.model = TCN(
                 input_size=input_size,
                 output_size=1, # 課題に合わせて調整
-                num_channels=self.params.get('num_channels', [64, 64]),
+                n_layers=self.params.get('n_layers', 2),
+                num_channel=self.params.get('num_channel', 64),
                 kernel_size=self.params.get('kernel_size', 3),
                 dropout=self.params.get('dropout', 0.2)
             ).to(self.device)

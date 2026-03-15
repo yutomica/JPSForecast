@@ -5,6 +5,7 @@ import gc
 import shap
 import hydra
 import mlflow
+from mlflow.tracking import MlflowClient
 import json
 import pandas as pd
 import joblib
@@ -56,8 +57,17 @@ def apply_sampling(df, interval):
 
 def train(cfg: DictConfig) -> float:
     # 1. MLflowの初期設定
-    mlflow_db_path = "sqlite:///mlflow.db"
+    # Hydraがカレントディレクトリを変更するため、絶対パスでDBを指定する
+    root_dir = Path(__file__).resolve().parent
+    mlflow_db_path = f"sqlite:///{root_dir}/mlflow.db"
     mlflow.set_tracking_uri(mlflow_db_path)
+    # 実験が削除済み(deleted)の場合は復元してからセットする
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name(cfg.mlflow.experiment_name)
+    if experiment and experiment.lifecycle_stage == 'deleted':
+        print(f"Restoring deleted experiment: {cfg.mlflow.experiment_name}")
+        client.restore_experiment(experiment.experiment_id)
+
     mlflow.set_experiment(cfg.mlflow.experiment_name)
 
     # 環境変数から親Run IDを取得
@@ -67,8 +77,11 @@ def train(cfg: DictConfig) -> float:
     # 2. 親ランのコンテキストを開始し、その中で子ラン（Nested Run）を開始
     # contextlib.ExitStackを使ってインデントレベルを維持する
     stack = contextlib.ExitStack()
-    stack.enter_context(mlflow.start_run(run_id=parent_run_id))
-    stack.enter_context(mlflow.start_run(run_name=trial_name, nested=True))
+    if parent_run_id:
+        stack.enter_context(mlflow.start_run(run_id=parent_run_id))
+        stack.enter_context(mlflow.start_run(run_name=trial_name, nested=True))
+    else:
+        stack.enter_context(mlflow.start_run(run_name=trial_name))
 
     with stack:
         mlflow.log_param("model_group", cfg.model.get("group", "unknown"))
@@ -114,20 +127,19 @@ def train(cfg: DictConfig) -> float:
             horizon = 60 # 60日間の予測期間
             interval = 20
         
-        # --- Embargo期間の設定 ---
-        # 必要な期間の取引日を生成
+        # --- サンプリング ---
+        # ユニバース選定
         train_val_meta = meta_df[mask].copy()
-        
         if train_val_meta.empty:
             print(f"WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score -999.0.")
             return -999.0
+        # 日付間引き
         train_val_meta = add_t1_column(train_val_meta, horizon)
-        # サンプリングの実行 (configから interval を取得)
         train_val_meta = apply_sampling(train_val_meta, interval)
-        # エンバーゴ（Embargo）日数の設定
-        embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
         
         # --- データ分割・CV ---
+        # エンバーゴ（Embargo）日数の設定
+        embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
         print('Split: '+cfg.period.method)
         if cv_method == "fixed":
             # 固定分割（Config指定の期間）
@@ -169,14 +181,14 @@ def train(cfg: DictConfig) -> float:
         # --- データロード＆前処理 ---
         # 全特徴量名のロード
         all_features = pd.read_json(master_dir / "feature_names.json", typ='series').tolist()
-        # コンフィグから「今回使う特徴量」を取得 (指定がなければ全件)
+        # 特徴量の指定
         feature_cols = cfg.features.get('feature_cols', all_features)
-        # 特徴量の重複排除 (順序保持)
-        feature_cols = list(dict.fromkeys(feature_cols))
+        feature_cols = list(dict.fromkeys(feature_cols)) # 特徴量の重複排除 (順序保持)
+        col_indices = [all_features.index(c) for c in feature_cols]
         cat_cols = cfg.features.get('cat_cols',[])
         print(f"Features: {len(feature_cols)}")
+        print(f"Cat Features: {len(cat_cols)}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
-        col_indices = [all_features.index(c) for c in feature_cols]
         features_mmap = np.memmap(
             master_dir / "features.npy", 
             dtype='float32', 
@@ -236,8 +248,8 @@ def train(cfg: DictConfig) -> float:
                 "feature_cols": feature_cols,
                 "cat_cols": cat_cols
             }
-            if hasattr(cfg.model, "window_size") and cfg.model.window_size is not None:
-                prep_params["window_size"] = cfg.model.window_size
+            if cfg.model.data_category == 'timeseries':
+                prep_params['window_size'] = cfg.model.window_size.tac if cfg.domain.name == 'TAC' else cfg.model.window_size.str
             preprocessor_class = get_class(cfg.model.preprocessor_target)
             preprocessor = preprocessor_class(**prep_params)
             # fitパラメータのアップデート
@@ -248,21 +260,9 @@ def train(cfg: DictConfig) -> float:
                 model_meta_params['cat_dims'] = preprocessor.cat_dims
             full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
             full_params.update(model_meta_params)
-            # preprocessor_fit
-            if hasattr(preprocessor, 'partial_fit'):
-                print(f" Fitting on fold {i} using partial_fit (Size: {len(train_idx)})")
-                chunk_size = 300000
-                for start_pos in range(0, len(train_idx), chunk_size):
-                    end_pos = min(start_pos + chunk_size, len(train_idx))
-                    batch_idx = train_idx[start_pos:end_pos]
-                    # memmap から該当行・列のみを抽出
-                    chunk_data = features_mmap[batch_idx, :][:, col_indices]
-                    preprocessor.partial_fit(pd.DataFrame(chunk_data, columns=feature_cols))
-            else:
-                # partial_fit がない場合の代替（サンプリング）
-                print(f" Fitting on Fold {i} using fit (Sampling 1k)")
-                sample_data = features_mmap[:1000, col_indices]
-                preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
+            print(f" Fitting on Fold {i} using fit (Sampling 100k)")
+            sample_data = features_mmap[:100000, col_indices]
+            preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
             # ウェイトの計算 (weights.py のロジックを使用)
             w_train = np.ones(len(train_idx))
             if cfg.hparams.use_time_decay:
@@ -364,39 +364,36 @@ def train(cfg: DictConfig) -> float:
         mlflow.log_metric("avg_valid_metrics", avg_valid_metrics)
         
 
+        # --- ビン分析 ---
+        full_res_df = pd.concat(all_results, ignore_index=True)
+        if cv_method in ["purged_kfold", "cpcv"]:
+            test_res = full_res_df[full_res_df['phase'] == 'valid']
+        else: 
+            test_res = full_res_df[full_res_df['phase'] == 'test']
+        bin_stats = calculate_bin_stats(
+            test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
+            metadata_cols=['Future_High', 'Future_Low', 'Future_Close']
+        )
+
         # --- 成果物（Artifacts）の保存 ---
-        # 評価メトリクス
-        if all_results:
-            full_res_df = pd.concat(all_results, ignore_index=True)
-            # テストデータ全体でのビン分析
-            if cv_method in ["purged_kfold", "cpcv"]:
-                test_res = full_res_df[full_res_df['phase'] == 'valid']
-            else: 
-                test_res = full_res_df[full_res_df['phase'] == 'test']
-            if not test_res.empty:
-                bin_stats = calculate_bin_stats(
-                    test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
-                    metadata_cols=['Future_High', 'Future_Low', 'Future_Close']
-                )
-                # 成果物として保存
-                bin_stats.to_csv("test_bin_analysis.csv")
-                mlflow.log_artifact("test_bin_analysis.csv")
-        # CVサマリー
         with tempfile.TemporaryDirectory() as d:
+            # CVサマリー
             json_path = os.path.join(d, "cv_splits.json")
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(cv_summaries, f, ensure_ascii=False, indent=2)
             mlflow.log_artifact(json_path, artifact_path="cv")
-            csv_path = os.path.join(d, "cv_splits.csv")
-            pd.DataFrame(cv_summaries).to_csv(csv_path, index=False)
-            mlflow.log_artifact(csv_path, artifact_path="cv")
-        # パイプライン
-        final_pipeline = EnsembleInferencePipeline(
-            fold_pipelines=fold_pipelines,
-            col_indices=col_indices
-        )
-        final_pipeline.save("ensemble_inference_pipeline.joblib")
-        mlflow.log_artifact("ensemble_inference_pipeline.joblib", artifact_path="model")
+            # パイプライン
+            final_pipeline = EnsembleInferencePipeline(
+                fold_pipelines=fold_pipelines,
+                col_indices=col_indices
+            )
+            pipeline_save_path = os.path.join(d, "ensemble_inference_pipeline.joblib")
+            final_pipeline.save(pipeline_save_path)
+            mlflow.log_artifact(pipeline_save_path, artifact_path="model")
+            # ビン分析
+            bin_stats_path = os.path.join(d, "test_bin_analysis.csv")
+            bin_stats.to_csv(bin_stats_path)
+            mlflow.log_artifact(bin_stats_path)
         # Hydraの最終的なconfigファイル自体も保存（完全な再現用）
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             OmegaConf.save(config=cfg, f=f.name)

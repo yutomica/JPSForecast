@@ -26,5 +26,6 @@ hydra:
       # 7. バッチノーマライゼーションのモメンタム
       # 金融データのような非定常データでは、小さめの値（0.01〜0.1）が安定しやすい
       hparams.momentum: interval(0.01, 0.4)
-      hparams.max_epochs: 50
+      hparams.max_epochs: 15
+      hparams.patience: 5
       hparams.use_pretrain: False

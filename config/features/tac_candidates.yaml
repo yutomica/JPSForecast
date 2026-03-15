@@ -71,7 +71,6 @@ feature_cols: [
   'sector33_code',
   'Sector_Rel',
   'Rel_Sector_Return_5d',
-  'sector_short_sell_ratio',
   'log_pbr_sector_z',
   'revision_rate_sector_z',
   'ATR_Ratio_sector_z',
@@ -81,11 +80,6 @@ feature_cols: [
   'downside_dev_60_sector_z',
   'volatility_60_sector_z',
   'margin_buy_impact_sector_z',
-  'Market_Foreign_Z_250',
-  'Market_Foreign_Z_60',
-  'Market_Individual_Z_250',
-  'Market_Individual_Z_60',
-  'Market_Foreign_Diff',
   'overseas_flow_trend',
   'flow_accel',
 ]
@@ -98,4 +92,31 @@ cat_cols: [
   'Is_Quarter_End',
   'market_segment',
   'sector33_code',
+]
+# 時系列モデル用、feature_colsの中から指定する
+ts_market_cols: [
+  'Market_Return',
+  'Market_Trend_Idx',
+  'Market_HV_20',
+  'market_segment',
+  'market_vol_change',
+  'Market_Foreign_Z_250',
+  'Market_Foreign_Z_60',
+  'Market_Individual_Z_250',
+  'Market_Individual_Z_60',
+  'Market_Foreign_Diff',
+  'overseas_flow_trend',
+  'flow_accel',
+]
+ts_vol_cols: [
+  'Volume_Log',
+  'Log_Trading_Cap',
+  'turnover_ratio',
+  'EPS_Actual',
+  'log_days_since_pub',
+  'log_market_cap',
+  'Sector_Momentum_5d',
+  'sector_return',
+  'sector33_code',
+  'sector_short_sell_ratio',
 ]

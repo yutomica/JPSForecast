@@ -1,18 +1,24 @@
 # config/hparams/tcn_default.yaml
-input_size: 26          # 特徴量数
-output_size: 2          # クラス数 (回帰なら1)
-n_layers: 3
-n_channels: 32 # チャンネル数と層の深さ
-sequence_length: 75    # <--- 【追加】 ここで時系列の長さを定義
-metric_direction: "maximize"  # "maximize" for balanced and aggressive, "minimize" for return
-kernel_size: 3
-dropout: 0.2
+# --- ネットワーク構造 ---
+n_layers: 4            # 【更新】受容野と計算負荷のバランス
+num_channel: 32       # 1層あたりのチャネル数（8GB RAMでの安全圏）
+sequence_length: 60    # 【推奨】STRの60日ターゲットに合わせた参照期間
+kernel_size: 3         # 局所的な時間変化を捉える標準的なサイズ
+dilation_base: 2       # 【追加】指数的な受容野拡大のベース
+dropout: 0.3           # 【更新】金融データのノイズ対策として0.2から引き上げ
 
-epochs: 50
-batch_size: 1024
-learning_rate: 0.001
-weight_decay: 0.0001
-early_stopping_patience: 5
+# --- 学習制御 ---
+learning_rate: 0.001   # Adamの標準的な初期値
+weight_decay: 0.001    # 【更新】1e-4から引き上げ。過学習抑制を強化
+gradient_clip_val: 0.5 # 【追加】TCNの勾配爆発を防ぎ、学習を安定化
+batch_size: 512        # 【更新】8GB RAMでのOOM回避と勾配の安定性のバランス
+
+# --- 最適化・評価 ---
+epochs: 100            # 最大エポック。Early Stoppingがあるため多めに設定
+early_stopping_patience: 5 # 【更新】TabNetの設定と合わせ、収束を見極める
 min_delta: 0.0001
-n_ensemble: 3
-use_time_decay: true
+metric_direction: "maximize" # ランクIC等のスコアを最大化
+n_ensemble: 3          # シード値を変えたアンサンブル数
+use_time_decay: true   # 直近データの重みを重視
+random_state: 42
+device_name: "cpu"     # Mac M2環境。必要に応じて "mps" への対応を検討

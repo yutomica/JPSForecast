@@ -1,70 +1,66 @@
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
+from tqdm import tqdm
 import talib
 from functools import wraps
 from scipy.special import erfinv
 import gc
+from typing import List, Optional, Dict
+import warnings
 
-def register_block(func):
-    """ブロック内で生成された全ての新規カラムを自動登録するデコレータ"""
-    @wraps(func)
-    def wrapper(self, df, *args, **kwargs):
-        cols_before = set(df.columns)
-        df = func(self, df, *args, **kwargs)
-        cols_after = set(df.columns)
-        new_features = list(cols_after - cols_before)
-        if new_features:
-            # 異常値置換と型変換
-            df[new_features] = df[new_features].replace([np.inf, -np.inf], np.nan).astype('float32')
-            # 重複を排除しつつ、挿入順を維持して登録
-            for col in new_features:
-                if col not in self._feature_registry:
-                    self._feature_registry[col] = None # 辞書のキーとして登録
-        return df
-    return wrapper
+# メモリ最適化（逐次代入）によるDataFrame断片化警告を抑制
+warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 class FeatureEngineer:
-    def __init__(self):
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+        self.new_cols = list()
         self.horizon_tac = 5    # 予測期間日数：戦術モデル
         self.horizon_str = 60   # 予測期間日数：戦略モデル
-        self.initial_cols = [
-            'scode', 'sector33_code', 'date', 'volume_p', 'open', 'high', 'low', 'close', 'volume', 'shares_outstanding',
-            'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
-            'Market_Foreign_Z_60', 'Market_Individual_Z_60', 'Market_Foreign_Z_250',
-            'Market_Individual_Z_250', 'Market_Foreign_Diff', 'overseas_flow_trend', 'flow_accel', 'selling_volume_ratio',
-        ]
-        # 辞書のキーとして格納（Python 3.7+ では挿入順が保持されます）
-        self._feature_registry = dict()
-        self.meta_cols = [
-            'scode', 'date', 'close',
-            # 検証用
-            'Entry_Price','Future_High_Tac','Future_Low_Tac','Future_Close_Tac',
-            'Future_High_Str','Future_Low_Str','Future_Close_Str'
-        ]
-        self.target_cols = [
-            # --- 戦術モデル用推奨ターゲット (5日先) ---
-            # 1. Ranking系
-            'target_tac_rank',          # Era-wise Rank (0~1)
-            'target_tac_gauss_rank',    # Gauss Rank
-            # 2. Risk調整系
-            'target_tac_vol_scaled_residual', # Beta調整後 & Vol調整後
-            # 3. 実執行・Alpha系
-            'target_tac_smoothed_return',     # VWAP基準
-            'target_tac_linear_residual',     # 線形モデル残差
-            # 4. Triple Barrier (Dynamic)
-            'target_tac_tb_strategy_a',       # A: Balance (1.0σ / 1.0σ)
-            'target_tac_tb_strategy_b',       # B: Trend (1.5σ / 0.75σ)
-            'target_tac_tb_strategy_c',       # C: Reversion (0.5σ / 1.0σ)
-            # 戦略モデル用ターゲット
-            'target_str_risk_adj','target_str_consistency','target_str_vol_scale','target_str_triple_barrier',
-            'target_str_rank','target_str_peer_alpha',
-            # 戦略モデル用ターゲット、別スクリプトで生成
-            # 'target_reg', 'target_cls',
-            # 比較用
-            'target_ret_5'#, 'target_ret_60'
-        ]
-
+        # self.initial_cols = [
+        #     'scode', 'sector33_code', 'date', 'volume_p', 'open', 'high', 'low', 'close', 'volume', 'shares_outstanding',
+        #     # -- maket系
+        #     'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
+        #     'Market_Return_GR_126', 'Market_Trend_Idx_GR_126', 'Market_HV_20_GR_126', 'market_vol_change_GR_126',
+        #     'Market_Return_GR_252', 'Market_Trend_Idx_GR_252', 'Market_HV_20_GR_252', 'market_vol_change_GR_252',
+        #     'Market_Foreign_GR_63', 'Market_Individual_GR_63', 'Market_Foreign_GR_252', 'Market_Individual_GR_252',
+        #     'Market_Foreign_Diff', 'overseas_flow_trend', 'flow_accel', 
+        #     # -- セクター別空売り比率
+        #     'selling_volume_ratio',
+        #     'selling_volume_ratio_GR_126', 'selling_volume_ratio_GR_252',
+        # ]
+        # # 辞書のキーとして格納（Python 3.7+ では挿入順が保持されます）
+        # self._feature_registry = dict()
+        # self.meta_cols = [
+        #     'scode', 'date', 'close',
+        #     # 検証用
+        #     'Entry_Price','Future_High_Tac','Future_Low_Tac','Future_Close_Tac',
+        #     'Future_High_Str','Future_Low_Str','Future_Close_Str'
+        # ]
+        # self.target_cols = [
+        #     # --- 戦術モデル用推奨ターゲット (5日先) ---
+        #     # 1. Ranking系
+        #     'target_tac_rank',          # Era-wise Rank (0~1)
+        #     'target_tac_gauss_rank',    # Gauss Rank
+        #     # 2. Risk調整系
+        #     'target_tac_vol_scaled_residual', # Beta調整後 & Vol調整後
+        #     # 3. 実執行・Alpha系
+        #     'target_tac_smoothed_return',     # VWAP基準
+        #     'target_tac_linear_residual',     # 線形モデル残差
+        #     # 4. Triple Barrier (Dynamic)
+        #     'target_tac_tb_strategy_a',       # A: Balance (1.0σ / 1.0σ)
+        #     'target_tac_tb_strategy_b',       # B: Trend (1.5σ / 0.75σ)
+        #     'target_tac_tb_strategy_c',       # C: Reversion (0.5σ / 1.0σ)
+        #     # 戦略モデル用ターゲット
+        #     'target_str_risk_adj','target_str_consistency','target_str_vol_scale','target_str_triple_barrier',
+        #     'target_str_rank','target_str_peer_alpha',
+        #     # 戦略モデル用ターゲット、別スクリプトで生成
+        #     # 'target_reg', 'target_cls',
+        #     # 比較用
+        #     'target_ret_5'#, 'target_ret_60'
+        # ]
+    
     def _calc_rci(self, series, period):
         time_ranks = np.arange(1, period + 1)
         def rci_func(window):
@@ -74,299 +70,762 @@ class FeatureEngineer:
             return rci
         return series.rolling(window=period).apply(rci_func, raw=True)
 
-    def _z_score(self, x):
-        """
-        Z-Score計算用関数
-        単一銘柄のみの場合(len<=1)や、標準偏差が0の場合は 0.0 を返す
-        """
-        if len(x) <= 1:
-            return 0.0
-        std = x.std()
-        if std == 0: 
-            return 0.0
-        return (x - x.mean()) / std
-
-    def calculate_sector_z_score(self, df, feature_col, group_cols=['date', 'sector33_code']):
-        """指定されたカラムを日次・セクターごとにZ-Score化する"""
-        # 単一銘柄の場合、group_colsでグルーピングすると各グループのサイズが1になるため
-        # _z_scoreメソッド側で 0.0 を返す処理が必須となる
-        z_values = df.groupby(group_cols)[feature_col].transform(self._z_score)
-        return z_values.clip(-3, 3)
+    def _generate_name(self, cat: str, col: str, proc: str, param: Optional[str] = None) -> str:
+        """命名規則に基づきカラム名を生成"""
+        name = f"{cat}_{col}_{proc}"
+        if param:
+            name += f"_{param}"
+        return name
     
-    @register_block
-    def _add_trend_features(self, feat, df):
-        """トレンド系指標の一括作成"""
-        feat['ADX_14'] = df.ta.adx(length=14).iloc[:, 0]
-        # ルールベースフィルタ用にSMAを作成
-        sma5 = df.ta.sma(length=5)
-        sma25 = df.ta.sma(length=25)
-        sma75 = df.ta.sma(length=75)
-        feat['Dist_SMA5'] = (df['close'] / sma5) - 1.0
-        feat['Dist_SMA25'] = (df['close'] / sma25) - 1.0
-        feat['Dist_SMA75'] = (df['close'] / sma75) - 1.0
-        feat['Dist_SMA5_25'] = (sma5 / sma25) - 1.0
-        feat['Dist_SMA25_75'] = (sma25 / sma75) - 1.0
-        # VWAP関連
-        typ_price = (df['high'] + df['low'] + df['close']) / 3
-        pv_sum = (typ_price * df['volume']).rolling(5).sum()
-        v_sum = df['volume'].rolling(5).sum()
-        rolling_vwap = pv_sum / v_sum
-        feat['Dist_VWAP_5'] = (df['close'] - rolling_vwap) / rolling_vwap
-        feat['Dist_VWAP_Slope'] = feat['Dist_VWAP_5'].diff()
-        vwap = df['volume_p'] / df['volume'].replace(0, 1)
-        feat['vwap_dev'] = (df['close'] / vwap) - 1
-        feat['Efficiency_Ratio_10'] = df.ta.er(length=10)
-        feat['LinReg_Slope_10'] = df.ta.slope(length=10)
-        macd = df.ta.macd(fast=12, slow=26, signal=9)
+
+    # --- 横断面加工 (Cross-Sectional) ---
+    def cs_rank(self, cat: str, col: str, store: dict = None):
+        """日別全銘柄G-Rank化"""
+        new_col = col.split('_')[1]
+        new_col = self._generate_name(cat, new_col, "CSR")
+        def to_gaussian(x):
+            n = x.count()
+            if n > 0:
+                r = x.rank(method='average')
+                pct = (r - 0.5) / n
+                return (np.sqrt(2) * erfinv(2 * pct - 1)).astype('float32')
+            return x
+        with np.errstate(invalid='ignore'):
+            res = self.df.groupby('date')[col].transform(to_gaussian)
+        if store is not None:
+            store[new_col] = res
+        else:
+            self.df[new_col] = res
+        return self
+
+    def cs_zscore(self, cat, col, p=0.01, store: dict = None):
+        """日別全銘柄Zスコア"""
+        # Winsorization
+        with np.errstate(invalid='ignore'):
+            lower = self.df.groupby('date')[col].transform(lambda x: x.quantile(p))
+            upper = self.df.groupby('date')[col].transform(lambda x: x.quantile(1-p))
+            self.df[col] = self.df[col].clip(lower, upper)
+            new_col = col.split('_')[1]
+            new_col = self._generate_name(cat, new_col, "CSZ")
+            res = self.df.groupby('date')[col].transform(lambda x: (x - x.mean()) / (x.std() + 1e-8))
+        res = res.astype('float32')
+        if store is not None:
+            store[new_col] = res
+        else:
+            self.df[new_col] = res
+        return self
+
+    def sn_zscore(self, cat: str, col: str, store: dict = None):
+        """セクター別Zスコア (Sector Neutral)"""
+        new_col = col.split('_')[1]
+        new_col = self._generate_name(cat, new_col, "SNZ")
+        with np.errstate(invalid='ignore'):
+            res = self.df.groupby(['date', 'sector33_code'])[col].transform(
+                lambda x: (x - x.mean()) / (x.std() + 1e-8)
+            )
+        res = res.astype('float32')
+        if store is not None:
+            store[new_col] = res
+        else:
+            self.df[new_col] = res
+        return self
+
+    # --- 時系列加工 (Time-Series) ---
+    def ts_zscore(self, cat: str, col: str, w_window: int = 252, z_window: int = 20, p: float = 0.01, store: dict = None):
+        """時系列Zスコア"""
+        # Winsorization
+        with np.errstate(invalid='ignore'):
+            rolled = self.df.groupby('scode')[col].rolling(window=w_window, min_periods=1)
+            lower = rolled.quantile(p).reset_index(level=0, drop=True)
+            upper = rolled.quantile(1-p).reset_index(level=0, drop=True)
+            self.df[col] = self.df[col].clip(lower, upper)
+            new_col = col.split('_')[1]
+            new_col = self._generate_name(cat, new_col, "TSZ", f"{z_window}D")
+            res = self.df.groupby('scode')[col].transform(
+                lambda x: (x - x.rolling(window=z_window, min_periods=1).mean()) / (x.rolling(window=z_window, min_periods=1).std() + 1e-8)
+            )
+        res = res.astype('float32')
+        if store is not None:
+            store[new_col] = res
+        else:
+            self.df[new_col] = res
+        return self
+
+    def ts_rank(self, cat, col, window=252, store: dict = None):
+        """時系列G-Rank化"""
+        new_col = col.split('_')[1]
+        new_col = self._generate_name(cat, new_col, "TSR", f"{window}D")
+        def rolling_gaussian(x):
+            r = x.rolling(window, min_periods=1).rank(method='average')
+            n = x.rolling(window, min_periods=1).count()
+            pct = (r - 0.5) / n
+            return (np.sqrt(2) * erfinv(2 * pct - 1)).astype('float32')
+        with np.errstate(invalid='ignore'):
+            res = self.df.groupby('scode')[col].transform(rolling_gaussian)
+        
+        if store is not None:
+            store[new_col] = res
+        else:
+            self.df[new_col] = res
+        return self
+
+    # --- 高度な加工: 直交化 (Orthogonalization) ---
+    def orthogonalize(self, cat: str, target_col: str, base_col: str):
+        """直交化 (target_col から base_col の影響を除去)"""
+        from sklearn.linear_model import LinearRegression
+        
+        new_col = self._generate_name(cat, target_col, "ORT", base_col)
+        
+        def _get_residual(group):
+            if len(group) < 10: return group[target_col] * np.nan
+            model = LinearRegression()
+            X = group[[base_col]].values
+            y = group[target_col].values
+            model.fit(X, y)
+            return y - model.predict(X)
+
+        self.df[new_col] = self.df.groupby('Date').apply(
+            lambda x: pd.Series(_get_residual(x), index=x.index)
+        ).reset_index(level=0, drop=True)
+        return self
+
+    
+    # --- 特徴量加工 ---
+    def apply_bulk_time_series(self):
+        # メモリ節約のため、辞書に貯めずに直接dfに代入する方式に変更
+        columns = list(self.df.columns)
+        for col in columns:
+            if col.startswith("MOM_") and col.endswith("_RAW"):
+                self.ts_zscore("MOM", col, store=None)
+                self.ts_rank("MOM", col, store=None)
+            elif col.startswith("VOL_") and col.endswith("_RAW"):
+                self.ts_zscore("VOL", col, store=None)
+                self.ts_rank("VOL", col, store=None)
+            elif col.startswith("LIQ_") and col.endswith("_RAW"):
+                self.ts_zscore("LIQ", col, store=None)
+                self.ts_rank("LIQ", col, store=None)
+            elif col.startswith("VAL_") and col.endswith("_RAW"):
+                self.ts_zscore("VAL", col, store=None)
+                self.ts_rank("VAL", col, store=None)
+            elif col.startswith("QLT_") and col.endswith("_RAW"):
+                self.ts_zscore("QLT", col, store=None)
+                self.ts_rank("QLT", col, store=None)
+            elif col.startswith("SPD_") and col.endswith("_RAW"):
+                self.ts_zscore("SPD", col, store=None)
+                self.ts_rank("SPD", col, store=None)
+            elif col.startswith("BET_") and col.endswith("_RAW"):
+                self.ts_zscore("BET", col, store=None)
+                self.ts_rank("BET", col, store=None)
+            elif col.startswith("CON_") and col.endswith("_RAW"):
+                self.ts_zscore("CON", col, store=None)
+                self.ts_rank("CON", col, store=None)
+            # ループごとにGCを実行してメモリピークを抑える
+            gc.collect()
+        return self
+
+    def apply_bulk_cross_sectional(self):
+        # メモリ節約のため、辞書に貯めずに直接dfに代入する方式に変更
+        print(f"Applying Cross-Sectional Transformations to {len(self.df.columns)} columns...")
+        columns = list(self.df.columns)
+        for col in tqdm(columns):
+            if col.startswith("MOM_") and col.endswith("_RAW"):
+                self.cs_rank("MOM", col, store=None)
+                self.cs_zscore("MOM", col, store=None)
+                self.sn_zscore("MOM", col, store=None)
+            elif col.startswith("VOL_") and col.endswith("_RAW"):
+                self.cs_rank("VOL", col, store=None)
+                self.cs_zscore("VOL", col, store=None)
+                self.sn_zscore("VOL", col, store=None)
+            elif col.startswith("LIQ_") and col.endswith("_RAW"):
+                self.cs_rank("LIQ", col, store=None)
+                self.cs_zscore("LIQ", col, store=None)
+            elif col.startswith("VAL_") and col.endswith("_RAW"):
+                self.cs_rank("VAL", col, store=None)
+                self.cs_zscore("VAL", col, store=None)
+                self.sn_zscore("VAL", col, store=None)
+            elif col.startswith("QLT_") and col.endswith("_RAW"):
+                self.cs_rank("QLT", col, store=None)
+                self.cs_zscore("QLT", col, store=None)
+                self.sn_zscore("QLT", col, store=None)
+            elif col.startswith("SIZ_") and col.endswith("_RAW"):
+                self.cs_rank("SIZ", col, store=None)
+                self.cs_zscore("SIZ", col, store=None)
+            elif col.startswith("SPD_") and col.endswith("_RAW"):
+                self.cs_rank("SPD", col, store=None)
+                self.cs_zscore("SPD", col, store=None)
+            elif col.startswith("BET_") and col.endswith("_RAW"):
+                self.cs_rank("BET", col, store=None)
+                self.cs_zscore("BET", col, store=None)
+                self.sn_zscore("BET", col, store=None)
+            elif col.startswith("EVT_") and col.endswith("_RAW"):
+                self.cs_rank("EVT", col, store=None)
+                self.cs_zscore("EVT", col, store=None)
+                self.sn_zscore("EVT", col, store=None)
+            elif col.startswith("CON_") and col.endswith("_RAW"):
+                self.cs_rank("CON", col, store=None)
+                self.cs_zscore("CON", col, store=None)
+                self.sn_zscore("CON", col, store=None)
+            elif col.startswith("GOV_") and col.endswith("_RAW"):
+                if "Sector33Code" in col:
+                    continue
+                self.cs_rank("GOV", col, store=None)
+                self.cs_zscore("GOV", col, store=None)
+                self.sn_zscore("GOV", col, store=None)
+            # ループごとにGCを実行してメモリピークを抑える
+            gc.collect()
+        return self
+
+    
+    # --- RAW特徴量作成 ---
+    def apply_momentum_block(self):
+        col_name = self._generate_name("MOM", "ADX14", "RAW")
+        adx = ta.adx(self.df['high'], self.df['low'], self.df['close'], length=14)
+        self.df[col_name] = adx.iloc[:, 0].values if adx is not None else np.nan
+        self.new_cols.append(col_name)
+        for w in [5, 25, 75]:
+            col_name = self._generate_name("MOM", f"DistSMA{w}", "RAW")
+            sma = ta.sma(self.df['close'], length=w)
+            self.df[col_name] = (self.df['close'].values / sma.values) - 1 if sma is not None else np.nan
+            self.new_cols.append(col_name)
+        sma5 = ta.sma(self.df['close'], length=5)
+        sma25 = ta.sma(self.df['close'], length=25)
+        sma75 = ta.sma(self.df['close'], length=75)
+        col_name = self._generate_name("MOM", "DistSMA5-25", "RAW")
+        self.df[col_name] = (sma5.values / sma25.values) - 1 if (sma5 is not None and sma25 is not None) else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "DistSMA25-75", "RAW")
+        self.df[col_name] = (sma25.values / sma75.values) - 1 if (sma25 is not None and sma75 is not None) else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "EfficiencyRatio10", "RAW")
+        er = ta.er(self.df['close'], length=10)
+        self.df[col_name] = er.values if er is not None else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "LinRegSlope10", "RAW")
+        slope = ta.slope(self.df['close'], length=10)
+        self.df[col_name] = slope.values if slope is not None else np.nan
+        self.new_cols.append(col_name)
+        macd = ta.macd(self.df['close'], fast=12, slow=26, signal=9)
+        col_name = self._generate_name("MOM", "MACDHistNorm", "RAW")
         if macd is not None:
-            feat['MACD_Hist_Norm'] = macd['MACDh_12_26_9'] / df['close']
-            feat['MACD_Hist_Diff'] = feat['MACD_Hist_Norm'].diff(1)
-        feat['MAE_5'] = (df['low'].rolling(5).min() / df['close']) - 1.0
-        feat['MAE_10'] = (df['low'].rolling(10).min() / df['close']) - 1.0
-        feat['Dist_High_60'] = df['close'] / df['high'].rolling(60).max()
-        feat['Dist_High_250'] = df['close'] / df['high'].rolling(250).max()
-        high_26 = df['high'].rolling(26).max()
-        low_26 = df['low'].rolling(26).min()
+            macd_hist = macd['MACDh_12_26_9'].values / self.df['close'].values
+        else:
+            macd_hist = np.full(len(self.df), np.nan)
+        self.df[col_name] = macd_hist
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "MACDHistDiff", "RAW")
+        self.df[col_name] = pd.Series(macd_hist).diff(1).values
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "DistHigh60", "RAW")
+        self.df[col_name] = self.df['close'] / self.df['high'].rolling(60).max()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "DistHigh250", "RAW")
+        self.df[col_name] = self.df['close'] / self.df['high'].rolling(250).max()
+        self.new_cols.append(col_name)
+        high_26 = self.df['high'].rolling(26).max()
+        low_26 = self.df['low'].rolling(26).min()
         kijun_sen = (high_26 + low_26) / 2
-        feat['Dist_Kijun'] = (df['close'] - kijun_sen) / kijun_sen
-        past_3d_high = df['high'].shift(1).rolling(3).max()
-        feat['New_High_Flag_3'] = (df['close'] > past_3d_high).astype(int)
-        # Redundant absolute logs removed based on high correlation analysis
-        # 長期価格位置 (120日)
-        roll_120 = df['close'].rolling(120)
+        col_name = self._generate_name("MOM", "DistKijun", "RAW")
+        self.df[col_name] = (self.df['close'] - kijun_sen) / kijun_sen
+        self.new_cols.append(col_name)
+        past_3d_high = self.df['high'].shift(1).rolling(3).max()
+        col_name = self._generate_name("MOM", "NewHighFlag3", "RAW")
+        self.df[col_name] = (self.df['close'] > past_3d_high).astype(int)
+        self.new_cols.append(col_name)
+        roll_120 = self.df['close'].rolling(120)
         max_120 = roll_120.max()
         min_120 = roll_120.min()
-        feat['price_pos_120'] = (df['close'] - min_120) / (max_120 - min_120)
-        # 一目均衡表 (雲) 距離
-        # 先行スパンA: (転換線+基準線)/2 を 26日先にプロット
-        # 先行スパンB: (52日最高値+52日最安値)/2 を 26日先にプロット
-        # 当日(t)の雲の位置は、t-26日時点で計算された先行スパンA, Bの値
-        high_9 = df['high'].rolling(9).max()
-        low_9 = df['low'].rolling(9).min()
-        tenkan = (high_9 + low_9) / 2
-        high_26 = df['high'].rolling(26).max()
-        low_26 = df['low'].rolling(26).min()
-        kijun = (high_26 + low_26) / 2
-        high_52 = df['high'].rolling(52).max()
-        low_52 = df['low'].rolling(52).min()
+        col_name = self._generate_name("MOM", "PricePos120", "RAW")
+        self.df[col_name] = (self.df['close'] - min_120) / (max_120 - min_120)
+        self.new_cols.append(col_name)
+        high_9 = self.df['high'].rolling(9).max()
+        low_9 = self.df['low'].rolling(9).min()
+        tenkan_sen = (high_9 + low_9) / 2
+        high_26 = self.df['high'].rolling(26).max()
+        low_26 = self.df['low'].rolling(26).min()
+        kijun_sen = (high_26 + low_26) / 2
+        high_52 = self.df['high'].rolling(52).max()
+        low_52 = self.df['low'].rolling(52).min()
         span_b = (high_52 + low_52) / 2
-        # 26日前の値を参照して「当日の雲」とする
-        # span_a_curr = ((tenkan + kijun) / 2).shift(26) 
         span_b_curr = span_b.shift(26)
-        # 雲の下限（あるいは上限、ここでは強力な抵抗帯であるスパンBを採用）との距離
-        feat['ichimoku_dist'] = (df['close'] - span_b_curr) / span_b_curr
-        # セクター内相対指標用
-        for window in [25, 75, 200]:
-            # transformを使用して形状を維持
-            ma = df['close'].rolling(window=window).mean()
-            feat[f'ma_dev_{window}'] = (df['close'] / ma) - 1
-        return feat
-    
-    @register_block
-    def _add_momentnum_features(self, feat, df):
-        """モメンタム系指標の一括作成"""
-        feat['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
-        feat['Downside_Run'] = feat['Log_Return'].clip(upper=0).rolling(5).sum()       
-        feat['Return_Skewness_Diff'] = feat['Log_Return'].rolling(20).skew().diff()
-        feat['Return_Kurtosis'] = feat['Log_Return'].rolling(20).kurt()
-        # Return_1d removed (Redundant with Log_Return)
-        feat['Return_3d'] = df['close'].pct_change(3)
-        feat['Return_5d'] = df['close'].pct_change(5)
-        feat['Return_10d'] = df['close'].pct_change(10)
-        feat['Return_20d'] = df['close'].pct_change(20)
-        feat['Return_1d_Lag1'] = feat['Log_Return'].shift(1)
-        feat['Return_1d_Lag2'] = feat['Log_Return'].shift(2)
-        feat['RSI_9'] = df.ta.rsi(length=9)
-        feat['RSI_9_14_Diff'] = feat['RSI_9'] - df.ta.rsi(length=14)
-        bb = df.ta.bbands(length=20, std=2)
+        col_name = self._generate_name("MOM", "IchimokuDist", "RAW")
+        self.df[col_name] = (self.df['close'] - span_b_curr) / span_b_curr
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "LogReturn", "RAW")
+        self.df[col_name] = np.log(self.df['close'] / self.df['close'].shift(1))
+        self.new_cols.append(col_name)
+        for w in [3,5,10,20]:
+            col_name = self._generate_name("MOM", f"Return{w}d", "RAW")
+            self.df[col_name] = self.df['close'].pct_change(w)
+            self.new_cols.append(col_name)
+        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        for w in [1,2]:
+            col_name = self._generate_name("MOM", f"Return1dLag{w}", "RAW")
+            self.df[col_name] = log_return.shift(w)
+            self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RSI9", "RAW")
+        rsi9 = ta.rsi(self.df['close'], length=9)
+        self.df[col_name] = rsi9.values if rsi9 is not None else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RSI9-14Diff", "RAW")
+        rsi14 = ta.rsi(self.df['close'], length=14)
+        self.df[col_name] = (rsi9.values - rsi14.values) if (rsi9 is not None and rsi14 is not None) else np.nan
+        self.new_cols.append(col_name)
+        bb = ta.bbands(self.df['close'], length=20, std=2)
+        col_name = self._generate_name("MOM", "BBPercentB", "RAW")
         if bb is not None:
             bb_p_col = [c for c in bb.columns if c.startswith('BBP')][0]
-            bb_w_col = [c for c in bb.columns if c.startswith('BBB')][0]
-            feat['BB_Percent_B'] = bb[bb_p_col]
-            feat['BB_Bandwidth'] = bb[bb_w_col]
-        # range_len は上で計算済み
-        range_len = df['high'] - df['low']
-        body_size = np.abs(df['close'] - df['open'])
-        upper_shadow = df['high'] - df[['close', 'open']].max(axis=1)
-        lower_shadow = df[['close', 'open']].min(axis=1) - df['low']
+            self.df[col_name] = bb[bb_p_col].values
+        else:
+            self.df[col_name] = np.nan
+        self.new_cols.append(col_name)
+        range_len = self.df['high'] - self.df['low']
+        body_size = np.abs(self.df['close'] - self.df['open'])
+        upper_shadow = self.df['high'] - self.df[['close', 'open']].max(axis=1)
+        lower_shadow = self.df[['close', 'open']].min(axis=1) - self.df['low']
         with np.errstate(divide='ignore', invalid='ignore'):
-            feat['Body_Ratio'] = body_size / range_len
-            feat['Upper_Shadow_Ratio'] = upper_shadow / range_len
-            feat['Lower_Shadow_Ratio'] = lower_shadow / range_len
-            feat['Intraday_Strength'] = (df['close'] - df['open']) / range_len
-            feat['Lower_Shadow_MA5'] = feat['Lower_Shadow_Ratio'].rolling(5).mean()
-            # Lower_Shadow_Mean removed (Redundant with Shadow MA5)
-        diff = df['close'].diff()
+            col_name = self._generate_name("MOM", "BodyRatio", "RAW")
+            self.df[col_name] = body_size / range_len
+            self.new_cols.append(col_name)
+            col_name = self._generate_name("MOM", "UpperShadowRatio", "RAW")
+            self.df[col_name] = upper_shadow / range_len
+            self.new_cols.append(col_name)
+            col_name = self._generate_name("MOM", "LowerShadowRatio", "RAW")
+            lower_shadow_ratio = lower_shadow / range_len
+            self.df[col_name] = lower_shadow_ratio
+            self.new_cols.append(col_name)
+            col_name = self._generate_name("MOM", "IntradayStrength", "RAW")
+            self.df[col_name] = (self.df['close'] - self.df['open']) / range_len
+            self.new_cols.append(col_name)
+            col_name = self._generate_name("MOM", "LowerShadowMA5", "RAW")
+            self.df[col_name] = lower_shadow_ratio.rolling(5).mean()
+        diff = self.df['close'].diff()
         sign = np.sign(diff).fillna(0)
         is_change = sign != sign.shift(1)
         group_id = is_change.cumsum()
-        count = df.groupby(group_id).cumcount() + 1
-        feat['Streak'] = np.where(sign > 0, count, np.where(sign < 0, -count, 0))
-        feat['Bullish_Ratio_20'] = (sign > 0).rolling(20).mean()
-        feat['Close_Position'] = (df['close'] - df['low'].rolling(20).min()) / (df['high'].rolling(20).max() - df['low'].rolling(20).min())
-        prev_close = df['close'].shift(1)
-        feat['Gap_Rate'] = (df['open'] / prev_close) - 1.0
-        feat['Gap_Abs'] = feat['Gap_Rate'].abs()
-        # Gap_Ratio removed
-        feat['Large_Move_Count'] = (feat['Log_Return'].abs() > 0.03).rolling(20).sum()
-        range_len = df['high'] - df['low']
-        feat['Range_Ratio_Long'] = range_len.rolling(5).mean() / range_len.rolling(20).mean()
-        feat['Max_Gain_5'] = (df['high'].rolling(5).max() / df['close']) - 1.0
-        feat['RCI_9'] = self._calc_rci(df['close'], 9)
-        feat['RCI_26'] = self._calc_rci(df['close'], 26)
-        feat['RCI_52'] = self._calc_rci(df['close'], 52)
-        feat['RCI_9_Diff'] = feat['RCI_9'].diff(1)
-        feat['RCI_26_Diff'] = feat['RCI_26'].diff(1)
-        upper, middle, lower = talib.BBANDS(df['close'], timeperiod=25, nbdevup=2.0)
-        feat['BB_Upper_Ratio'] = (upper / middle) - 1.0
-        feat['momentum_12_1'] = df['close'].shift(20) / df['close'].shift(260) - 1
-        feat['ret_intraday'] = (df['close'] / df['open']) - 1.0
-        # Redundant gap and wick ratios removed
-        feat['win_rate_10d'] = (feat['Log_Return'] > 0).rolling(10).mean()
-        # Flow interaction removed due to perfect correlation with Log_Return
-        # セクター内相対指標用
-        feat['Return_6m'] = df['close'].pct_change(120)
-        feat['Return_12m'] = df['close'].pct_change(240)
-        return feat
+        count = self.df.groupby(group_id).cumcount() + 1
+        col_name = self._generate_name("MOM", "Streak", "RAW")
+        self.df[col_name] = np.where(sign > 0, count, np.where(sign < 0, -count, 0))
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "BullishRatio20", "RAW")
+        self.df[col_name] = (sign > 0).rolling(20).mean()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "ClosePosition", "RAW")
+        self.df[col_name] = (self.df['close'] - self.df['low'].rolling(20).min()) / (self.df['high'].rolling(20).max() - self.df['low'].rolling(20).min())
+        self.new_cols.append(col_name)
+        prev_close = self.df['close'].shift(1)
+        col_name = self._generate_name("MOM", "GapRate", "RAW")
+        self.df[col_name] = (self.df['open'] / prev_close) - 1.0
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "MaxGain5", "RAW")
+        self.df[col_name] = (self.df['high'].rolling(5).max() / self.df['close']) - 1.0
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RCI9", "RAW")
+        rci_9 = self._calc_rci(self.df['close'], 9)
+        self.df[col_name] = rci_9
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RCI9Diff", "RAW")
+        self.df[col_name] = rci_9.diff(1)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RCI26", "RAW")
+        rci_26 = self._calc_rci(self.df['close'], 26)
+        self.df[col_name] = rci_26
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RCI26Diff", "RAW")
+        self.df[col_name] = rci_26.diff(1)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RCI52", "RAW")
+        self.df[col_name] = self._calc_rci(self.df['close'], 52)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "Momentum12-1", "RAW")
+        self.df[col_name] = self.df['close'].shift(20) / self.df['close'].shift(260) - 1
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "RetIntraday", "RAW")
+        self.df[col_name] = (self.df['close'] / self.df['open']) - 1.0
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "WinRate10d", "RAW")
+        self.df[col_name] = (log_return > 0).rolling(10).mean()
+        self.new_cols.append(col_name)
+        for window in [25, 75, 200]:
+            ma = self.df['close'].rolling(window=window).mean()
+            col_name = self._generate_name("MOM", f"MADev{window}", "RAW")
+            self.df[col_name] = (self.df['close'] / ma) - 1
+            self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "Return20d", "RAW")
+        self.df[col_name] = self.df['close'].pct_change(20)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "Return6m", "RAW")
+        self.df[col_name] = self.df['close'].pct_change(120)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("MOM", "Return12m", "RAW")
+        self.df[col_name] = self.df['close'].pct_change(240)
+        self.new_cols.append(col_name)
+        max_52w = self.df['close'].rolling(window=240).max()
+        col_name = self._generate_name("MOM", "High52wDist", "RAW")
+        self.df[col_name] = (self.df['close'] / max_52w) - 1
+        self.new_cols.append(col_name)
+        return self
 
-    @register_block
-    def _add_volatility_features(self, feat, df):
-        """ボラティリティ系指標の一括作成"""
-        atr = df.ta.atr(length=14)
-        feat['ATR_Ratio'] = atr / df['close']
-        atr_short = df.ta.atr(length=5)
-        atr_mid = df.ta.atr(length=20)
-        feat['ATR_Squeeze'] = atr_short / atr_mid
-        bb = df.ta.bbands(length=20, std=2)
+    def apply_volatility_block(self):
+        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        return_1d = self.df['close'].pct_change(1)
+        col_name = self._generate_name("VOL", "MAE5", "RAW")
+        self.df[col_name] = (self.df['low'].rolling(5).min() / self.df['close']) - 1.0
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "MAE10", "RAW")
+        self.df[col_name] = (self.df['low'].rolling(10).min() / self.df['close']) - 1.0
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "DownsideRun", "RAW")
+        self.df[col_name] = log_return.clip(lower=0).rolling(5).sum()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "ReturnSkewnessDiff", "RAW")
+        self.df[col_name] = log_return.rolling(20).skew().diff()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "ReturnKurtosis", "RAW")
+        self.df[col_name] = log_return.rolling(20).kurt()
+        self.new_cols.append(col_name)
+        bb = ta.bbands(self.df['close'], length=20, std=2)
         if bb is not None:
-            bb_bandwidth = (bb['BBU_20_2.0'] - bb['BBL_20_2.0']) / (bb['BBM_20_2.0'] + 1e-9)
-            feat['ATR_Squeeze_bb'] = bb_bandwidth / (atr + 1e-9)
-        feat['hist_vol_20'] = feat['Log_Return'].rolling(20).std()
-        feat['HV_30'] = feat['Log_Return'].rolling(30).std() * np.sqrt(250)
-        feat['HV_Slope'] = feat['HV_30'].diff(5)
-        feat['Realized_Skew_20'] = feat['Log_Return'].rolling(20).skew()
-        feat['Ulcer_Index_14'] = df.ta.ui(length=14)
-        feat['atr_chg_rate'] = atr.pct_change()
-        # セクター内相対指標用 
-        max_52w = df['close'].rolling(window=240).max()
-        feat['high_52w_dist'] = (df['close'] / max_52w) - 1
+            # pandas_taのBandwidthは通常'BBB'プレフィックス
+            bb_w_cols = [c for c in bb.columns if c.startswith('BBB')]
+            if bb_w_cols:
+                col_name = self._generate_name("VOL", "BBWidth", "RAW")
+                self.df[col_name] = bb[bb_w_cols[0]].values
+                self.new_cols.append(col_name)
+        gap_rate = (self.df['open'] / self.df['close'].shift(1)) - 1.0
+        col_name = self._generate_name("VOL", "GapAbs", "RAW")
+        self.df[col_name] = gap_rate.abs()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "LargeMoveCount", "RAW")
+        self.df[col_name] = (return_1d.abs() > 0.03).rolling(20).sum()
+        self.new_cols.append(col_name)
+        range_len = self.df['high'] - self.df['low']
+        col_name = self._generate_name("VOL", "RangeRatioLong", "RAW")
+        self.df[col_name] = range_len.rolling(5).mean() / range_len.rolling(20).mean()
+        self.new_cols.append(col_name)
+        atr = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=14)
+        col_name = self._generate_name("VOL", "ATRRatio", "RAW")
+        self.df[col_name] = (atr.values / self.df['close'].values) if atr is not None else np.nan
+        self.new_cols.append(col_name)
+        atr_mid = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=20)
+        atr_short = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=5)
+        col_name = self._generate_name("VOL", "ATRSqueeze", "RAW")
+        self.df[col_name] = (atr_short.values / atr_mid.values) if (atr_short is not None and atr_mid is not None) else np.nan
+        self.new_cols.append(col_name)
+        bb = ta.bbands(self.df['close'], length=20, std=2)
+        if bb is not None:
+            col_name = self._generate_name("VOL", "ATRSqueezeBB", "RAW")
+            self.df[col_name] = (bb['BBU_20_2.0'].values - bb['BBL_20_2.0'].values) / (bb['BBM_20_2.0'].values + 1e-9)
+            self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "HistVol20", "RAW")
+        self.df[col_name] = log_return.rolling(20).std()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "HV30", "RAW")
+        hv30 = log_return.rolling(30).std() * np.sqrt(250)
+        self.df[col_name] = hv30
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "HVSlope", "RAW")
+        self.df[col_name] = hv30.diff(5)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "RealizedSkew20", "RAW")
+        self.df[col_name] = log_return.rolling(20).skew()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "UlcerIndex14", "RAW")
+        ui = ta.ui(self.df['close'], length=14)
+        self.df[col_name] = ui.values if ui is not None else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "ATRChgRate", "RAW")
+        self.df[col_name] = atr.pct_change().values if atr is not None else np.nan
+        self.new_cols.append(col_name)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            hl_log_sq = np.log(self.df['high'] / self.df['low']) ** 2
+            const_factor = 4 * np.log(2)
+            col_name = self._generate_name("VOL", "VolatilityParkinson", "RAW")
+            self.df[col_name] = np.sqrt(hl_log_sq.rolling(14).mean() / const_factor)
+            self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "ReturnVolatility", "RAW")
+        self.df[col_name] = log_return.rolling(10).std()
+        self.new_cols.append(col_name)
+        hv5 = log_return.rolling(5).std() * np.sqrt(250)
+        col_name = self._generate_name("VOL", "VolRatioHV", "RAW")
+        self.df[col_name] = hv5 / hv30
+        self.new_cols.append(col_name)
+        self.new_cols.append(col_name)
         def calc_downside_std(x, window=60):
             neg_ret = x.where(x < 0, 0)
             return neg_ret.rolling(window).std()
-        feat['downside_dev_60'] = feat['Log_Return'].transform(lambda x: calc_downside_std(x))
-        feat['volatility_60'] = df['close'].pct_change().rolling(60).std()
-        # ターゲット用
-        feat['Vol_20d'] = feat['Log_Return'].rolling(20).std()
-        return feat
-
-    @register_block
-    def _add_volume_features(self, feat, df):
-        """ボリューム系指標の一括作成"""
-        feat['Volume_Log'] = np.log(df['volume'] + 1)
-        feat['Abnormal_Volume'] = df['volume_p'] / df['volume_p'].rolling(20).mean()
-        feat['Volume_Change'] = df['volume'].pct_change()
-        feat['Volume_Slope_5'] = ta.slope(np.log(df['volume'] + 1), length=5)
-        feat['Log_Trading_Cap'] = np.log(df['close'] * df['volume'] + 1)
-        # log_vol_change removed
-        feat['MFI_14'] = df.ta.mfi(length=14)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            hl_log_sq = np.log(df['high'] / df['low']) ** 2
-            const_factor = 4 * np.log(2)
-            feat['Volatility_Parkinson'] = np.sqrt(hl_log_sq.rolling(14).mean() / const_factor)
-        feat['Return_Volatility'] = feat['Log_Return'].rolling(10).std()
-        vol_ma5 = df['volume'].rolling(5).mean()
-        feat['Vol_Ratio_5d'] = df['volume'] / vol_ma5.replace(0, np.nan)
-        hv_5 = feat['Log_Return'].rolling(5).std() * np.sqrt(250)
-        feat['Vol_Ratio_HV'] = hv_5 / feat['HV_30']
-        vol_median_20 = df['volume'].rolling(20).median()
-        is_spike = (df['volume'] > (vol_median_20 * 3)).astype(int)
-        feat['Vol_Spike_Count_20'] = is_spike.rolling(20).sum()
-        is_up = (df['close'] > df['open']).astype(int)
-        vol_up = (df['volume'] * is_up).rolling(20).sum()
-        vol_down = (df['volume'] * (1 - is_up)).rolling(20).sum()
-        feat['Vol_Up_Down_Ratio'] = vol_up / (vol_down + 1e-9)
-        feat['Volume_MA_25'] = feat['Volume_Log'].rolling(25).mean() 
-        feat['turnover_ratio'] = df['volume'] / df['shares_outstanding'].replace(0, np.nan)
-        trading_value = df['close'] * df['volume']
-        feat['amihud_illiq'] = feat['Log_Return'].abs() / (trading_value + 1e-9)
-        # ルールベースフィルタ用
-        feat['volume_p_MA5'] = df['volume_p'].rolling(5).mean()
-        return feat
-
-    @register_block
-    def _add_fundamental_features(self, feat, df):
-        """財務情報系指標の一括作成"""
-        LAG_YEAR = 240 # サンプリング(interval)が1の場合。5の場合は 240/5 = 48 に調整が必要
+        col_name = self._generate_name("VOL", "DownsideDev60", "RAW")
+        self.df[col_name] = log_return.transform(lambda x: calc_downside_std(x))
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "Volatility60", "RAW")
+        self.df[col_name] = self.df['close'].pct_change().rolling(60).std()
+        self.new_cols.append(col_name)
+        return self
+        
+    def apply_liquidity_block(self):
+        volume_log = np.log(self.df['volume'] + 1)
+        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        col_name = self._generate_name("LIQ", "VolumeLog", "RAW")
+        self.df[col_name] = volume_log
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "AbnormalVolume", "RAW")
+        self.df[col_name] = self.df['volume_p'] / self.df['volume_p'].rolling(20).mean()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "VolumeChange", "RAW")
+        self.df[col_name] = self.df['volume'].pct_change()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "VolumeSlope5", "RAW")
+        slope = ta.slope(np.log(self.df['volume'] + 1), length=5)
+        self.df[col_name] = slope.values if slope is not None else np.nan
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "LogTradingCap", "RAW")
+        self.df[col_name] = np.log(self.df['close'] * self.df['volume'] + 1)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "MFI14", "RAW")
+        mfi = ta.mfi(self.df['high'], self.df['low'], self.df['close'], self.df['volume'], length=14)
+        self.df[col_name] = mfi.values if mfi is not None else np.nan
+        self.new_cols.append(col_name)
+        vol_ma5 = self.df['volume'].rolling(5).mean()
+        col_name = self._generate_name("LIQ", "VolRatio5d", "RAW")
+        self.df[col_name] = self.df['volume'] / vol_ma5.replace(0, np.nan)
+        self.new_cols.append(col_name)
+        vol_median_20 = self.df['volume'].rolling(20).median()
+        is_spike = (self.df['volume'] > (vol_median_20 * 3)).astype(int)
+        col_name = self._generate_name("LIQ", "VolSpikeCount20", "RAW")
+        self.df[col_name] = is_spike.rolling(20).sum()
+        self.new_cols.append(col_name)
+        is_up = (self.df['close'] > self.df['open']).astype(int)
+        vol_up = (self.df['volume'] * is_up).rolling(20).sum()
+        vol_down = (self.df['volume'] * (1 - is_up)).rolling(20).sum()
+        col_name = self._generate_name("LIQ", "VolUpDownRatio", "RAW")
+        self.df[col_name] = vol_up / (vol_down + 1e-9)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VOL", "VolumeMA25", "RAW")
+        self.df[col_name] = volume_log.rolling(25).mean()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "TurnoverRatio", "RAW")
+        self.df[col_name] = self.df['volume'] / self.df['shares_outstanding'].replace(0, np.nan)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("LIQ", "AmihudIlliq", "RAW")
+        self.df[col_name] = log_return.abs() / (self.df['close'] * self.df['volume'] + 1e-9)
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_value_block(self):
         epsilon = 1e-6
-        grouped_scode = df.groupby('scode')
-        feat['is_missing_eps'] = df['eps'].isna().astype(int)
-        feat['EPS_Actual'] = df['eps'].ffill()
-        feat['log_days_since_pub'] = np.log1p((df['date'] - df['published_date']).dt.days).fillna(0)
-        feat['log_market_cap'] = np.log(df['close'] * df['shares_outstanding'])
-        # 以下は全てセクター内相対指標用に作成
-        # 資産・資本関連（分母を絶対値 + epsilon で保護） 負の資産や資本（債務超過）も計算可能になり、異常に大きな値は後で clip する
-        feat['accruals'] = (df['net_income'] - df['operating_cf']) / (df['total_assets'].abs() + epsilon)
-        feat['equity_ratio'] = df['equity'] / (df['total_assets'].abs() + epsilon)
-        # 1株当たり指標（分母の株式数は 0 になりにくいが念のため）
-        denom_shares = df['shares_outstanding'].abs() + epsilon
-        actual_bps = df['equity'] / denom_shares
-        actual_eps = df['net_income'] / denom_shares
-        feat['log_pbr'] = np.log(df['close'] / (actual_bps.clip(lower=0.01))) 
-        filled_eps = df['eps'].combine_first(actual_eps)
-        feat['earnings_yield'] = filled_eps / (df['close'] + epsilon)
-        # 収益性指標
-        feat['op_margin'] = df['operating_profit'] / (df['sales'].abs() + epsilon)
-        feat['roe'] = df['net_income'] / (df['equity'].abs() + epsilon)
-        feat['roa'] = df['net_income'] / (df['total_assets'].abs() + epsilon)
-        v_t = df['eps']
-        v_prev = grouped_scode['eps'].shift(20) # 1ヶ月前
-        feat['revision_rate'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
-        feat['progress_rate'] = df['operating_profit'] / (df['operating_profit_forecast'].abs() + epsilon)
-        # --- 重要：最後に全特徴量をクリッピングする ---
-        # 分母が極小だった場合に出る巨大な値を、ニューラルネットが壊れない範囲（例: ±5.0）に収める
-        new_cols = [
-            'accruals', 'equity_ratio', 'log_pbr', 'earnings_yield', 
-            'op_margin', 'roe', 'roa', 'revision_rate', 'progress_rate'
-        ]
-        feat[new_cols] = feat[new_cols].clip(-5.0, 5.0)
+        denom_shares = self.df['shares_outstanding'].abs() + epsilon
+        actual_bps = self.df['equity'] / denom_shares
+        actual_eps = self.df['net_income'] / denom_shares
+        filled_eps = self.df['eps'].combine_first(actual_eps)
+        col_name = self._generate_name("VAL", "LogPBR", "RAW")
+        self.df[col_name] = np.log(self.df['close'] / (actual_bps.clip(lower=0.01))) 
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("VAL", "EarningsYield", "RAW")
+        self.df[col_name] = filled_eps / (self.df['close'] + epsilon)
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_quality_block(self):
+        epsilon = 1e-6
+        LAG_YEAR = 240
+        col_name = self._generate_name("QLT", "Accruals", "RAW")
+        self.df[col_name] = (self.df['net_income'] - self.df['operating_cf']) / (self.df['total_assets'].abs() + epsilon)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "EquityRatio", "RAW")
+        self.df[col_name] = self.df['equity'] / (self.df['total_assets'].abs() + epsilon)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "OPMargin", "RAW")
+        self.df[col_name] = self.df['operating_profit'] / (self.df['sales'].abs() + epsilon)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "ROA", "RAW")
+        self.df[col_name] = self.df['net_income'] / (self.df['total_assets'].abs() + epsilon)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "ROE", "RAW")
+        self.df[col_name] = self.df['net_income'] / (self.df['equity'].abs() + epsilon)
+        self.new_cols.append(col_name) 
         # 成長率計算
         fund_cols = ['operating_profit', 'sales', 'eps']
-        temp_df = df[fund_cols + ['scode']].copy()
+        temp_df = self.df[fund_cols + ['scode']].copy()
         temp_df[fund_cols] = temp_df.groupby('scode')[fund_cols].ffill()
         grouped = temp_df.groupby('scode')
         for col in fund_cols:
             v_t = temp_df[col]
             v_prev = grouped[col].shift(LAG_YEAR)
-            feat[f'{col}_growth_yoy'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
-            feat[f'{col}_growth_yoy'] = feat[f'{col}_growth_yoy'].clip(-3.0, 3.0)
-        return feat
-
-    @register_block
-    def _add_calendar_feature(self, feat, df):
-        """時間・カレンダー系指標の一括作成"""
-        day_num = df['date'].dt.day
-        month = df['date'].dt.month
-        feat['Month_in_Quarter'] = df['date'].dt.month % 3
-        feat['DayOfMonth'] = df['date'].dt.day
-        feat['DayOfWeek'] = df['date'].dt.dayofweek
-        feat['Sin_DayOfWeek'] = np.sin(2 * np.pi * feat['DayOfWeek'] / 6)
-        feat['Cos_DayOfWeek'] = np.cos(2 * np.pi * feat['DayOfWeek'] / 6)
-        feat['Is_Gotobi'] = ((day_num % 5 == 0) | (day_num == 31)).astype(int)
-        feat['Is_Month_End'] = df['date'].dt.is_month_end.astype(int)
-        feat['Quarter'] = df['date'].dt.quarter
-        feat['Is_Quarter_End'] = month.isin([3, 6, 9, 12]).astype(int) # 簡易判定
-        feat['time_idx'] = (df['date'] - df['date'].min()).dt.days
-        return feat
-
-    @register_block
-    def _add_market_features(self, feat, df):
-        """マーケット指標の一括作成"""
-        ret_stock = df['close'].pct_change()
-        ret_market = df['Market_Return']
+            self.df[f'{col}_growth_yoy'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
+            self.df[f'{col}_growth_yoy'] = self.df[f'{col}_growth_yoy'].clip(-3.0, 3.0)
+        col_name = self._generate_name("QLT", "OperatingProfitGrowthYOY", "RAW")
+        self.df[col_name] = self.df['operating_profit_growth_yoy']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "SalesGrowthYOY", "RAW")
+        self.df[col_name] = self.df['sales_growth_yoy']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("QLT", "EPSGrowthYOY", "RAW")
+        self.df[col_name] = self.df['eps_growth_yoy']
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_size_block(self):
+        col_name = self._generate_name("SIZ", "LogMarketCap", "RAW")
+        self.df[col_name] = np.log(self.df['close'] * self.df['shares_outstanding'])
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_supplydemand_bloc(self):
+        typ_price = (self.df['high'] + self.df['low'] + self.df['close']) / 3
+        pv_sum = (typ_price * self.df['volume']).rolling(5).sum()
+        v_sum = self.df['volume'].rolling(5).sum()
+        rolling_vwap = pv_sum / v_sum
+        col_name = self._generate_name("SPD", "DistVWAP5", "RAW")
+        dist_vwap_5 = (self.df['close'] - rolling_vwap) / rolling_vwap
+        self.df[col_name] = dist_vwap_5
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "DistVWAPSlope", "RAW")
+        self.df[col_name] = dist_vwap_5.diff()
+        self.new_cols.append(col_name)
+        vwap = self.df['volume_p'] / self.df['volume'].replace(0, 1)
+        col_name = self._generate_name("SPD", "VWAPDev", "RAW")
+        self.df[col_name] = (self.df['close'] / vwap) - 1
+        self.new_cols.append(col_name)
+        avg_vol_60 = self.df['volume'].rolling(60).mean()
+        col_name = self._generate_name("SPD", "MarginBuyImpact", "RAW")
+        self.df[col_name] = (
+            self.df['long_margin_trade_balance_share'] / avg_vol_60.replace(0, np.nan)
+        )
+        self.new_cols.append(col_name)
+        margin_ratio = np.log(
+            (self.df['long_margin_trade_balance_share'] + 1) / 
+            (self.df['short_margin_trade_balance_share'] + 1)
+        )
+        col_name = self._generate_name("SPD", "MarginRatio", "RAW")
+        self.df[col_name] = margin_ratio
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "MarginRatioDelta4w", "RAW")
+        self.df[col_name] = margin_ratio.diff(20)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "MarketForeignBuy", "RAW")
+        self.df[col_name] = self.df['Foreign_Net_Buy']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "MarketIndividualBuy", "RAW")
+        self.df[col_name] = self.df['Individual_Net_Buy']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "OverseaFlowTrend", "RAW")
+        flow = self.df['Foreign_Net_Buy'].rolling(20).mean()
+        self.df[col_name] = flow
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SPD", "FlowAccel", "RAW")
+        self.df[col_name] = flow - flow.rolling(5).mean()
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_beta_block(self):
+        ret_stock = self.df['close'].pct_change()
+        ret_market = self.df['Market_Return']
         rolling_cov = ret_stock.rolling(60).cov(ret_market)
         rolling_var = ret_market.rolling(60).var()
-        feat['Beta_60'] = rolling_cov / rolling_var
-        feat['RS_25'] = df['close'].pct_change(25) - df['close_mkt'].pct_change(25)
+        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        col_name = self._generate_name("BET", "Beta60", "RAW")
+        self.df[col_name] = rolling_cov / rolling_var
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "RS25", "RAW")
+        self.df[col_name] = self.df['close'].pct_change(25) - self.df['close_mkt'].pct_change(25)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "MarketReturn", "RAW")
+        self.df[col_name] = ret_market
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "MarketTrendIdx", "RAW")
+        self.df[col_name] = self.df['Market_Trend_Idx']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "MarketHV20", "RAW")
+        self.df[col_name] = self.df['Market_HV_20']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "MarketVolChange", "RAW")
+        self.df[col_name] = self.df['market_vol_change']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "SectorMomentum5d", "RAW")
+        self.df[col_name] = self.df['sector_return'].rolling(5).mean()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "SectorReturn", "RAW")
+        self.df[col_name] = self.df['sector_return']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "SectorRel", "RAW")
+        self.df[col_name] = self.df['close'] / self.df['sector_return']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "RelSectorReturn1d", "RAW")
+        self.df[col_name] = log_return - self.df['sector_return']
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("BET", "RelSectorReturn5d", "RAW")
+        self.df[col_name] = log_return.rolling(5).sum() - self.df['sector_return'].rolling(5).sum()
+        self.new_cols.append(col_name)
+        sector_ret_60 = (1 + self.df['sector_return']).rolling(60).apply(np.prod, raw=True) - 1
+        market_ret_60 = (1 + self.df['Market_Return']).rolling(60).apply(np.prod, raw=True) - 1
+        col_name = self._generate_name("BET", "SectorRelStrength60", "RAW")
+        self.df[col_name] = sector_ret_60 - market_ret_60
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_seasonality_block(self):
+        day_num = self.df['date'].dt.day
+        month = self.df['date'].dt.month
+        col_name = self._generate_name("SEA", "MonthInQuarter", "RAW")
+        self.df[col_name] = self.df['date'].dt.month % 3
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "DayOfMonth", "RAW")
+        self.df[col_name] = self.df['date'].dt.day
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "DayOfWeek", "RAW")
+        day_of_week = self.df['date'].dt.dayofweek
+        self.df[col_name] = day_of_week
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "SinDayOfWeek", "RAW")
+        self.df[col_name] = np.sin(2 * np.pi * day_of_week / 6)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "CosDayOfWeek", "RAW")
+        self.df[col_name] = np.cos(2 * np.pi * day_of_week / 6)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "IsGotobi", "RAW")
+        self.df[col_name] = ((day_num % 5 == 0) | (day_num == 31)).astype(int)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "IsMonthEnd", "RAW")
+        self.df[col_name] = self.df['date'].dt.is_month_end.astype(int)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "Quarter", "RAW")
+        self.df[col_name] = self.df['date'].dt.quarter
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "IsQuarterEnd", "RAW")
+        self.df[col_name] = month.isin([3, 6, 9, 12]).astype(int) # 簡易判定
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("SEA", "TimeIdx", "RAW")
+        self.df[col_name] = (self.df['date'] - self.df['date'].min()).dt.days
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_event_block(self):
+        col_name = self._generate_name("EVT", "EPSActual", "RAW")
+        self.df[col_name] = self.df['eps'].ffill()
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("EVT", "IsMissingEPS", "RAW")
+        self.df[col_name] = self.df['eps'].isna().astype(int)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("EVT", "LogDaysSincePub", "RAW")
+        self.df[col_name] = np.log1p((self.df['date'] - self.df['published_date']).dt.days).fillna(0)
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_consensus_block(self):
+        LAG_YEAR = 240 
+        epsilon = 1e-6
+        grouped_scode = self.df.groupby('scode')
+        v_t = self.df['eps']
+        v_prev = grouped_scode['eps'].shift(20) # 1ヶ月前
+        col_name = self._generate_name("CON", "RevisionRate", "RAW")
+        self.df[col_name] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("CON", "ProgressRate", "RAW")
+        self.df[col_name] = self.df['operating_profit'] / (self.df['operating_profit_forecast'].abs() + epsilon)
+        self.new_cols.append(col_name)
+        return self
+    
+    def apply_governance_block(self):
+        """マーケット指標の一括作成"""
         def map_market_segment(market_name):
             """
             市場名称を3つの主要セグメントに統合する関数
@@ -404,173 +863,59 @@ class FeatureEngineer:
             # --- 0. Others (ID: 0) ---
             # TOKYO PRO MARKET や その他
             return 0
-        feat['market_segment'] = df['market'].apply(map_market_segment)
-        # ターゲット用
-        indexer_mkt = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        feat['Market_Return_Future'] = df['Market_Return'].shift(-1).rolling(window=indexer_mkt).sum()
-        return feat
-
-    @register_block
-    def _add_margin_features(self, feat, df):
-        """信用取引情報系指標の一括作成"""
-        # 信用取引系
-        # (1) 信用買い残インパクト倍率
-        # 平均出来高 (60日)
-        df['avg_vol_60'] = df['volume'].rolling(60).mean()
-        feat['margin_buy_impact'] = (
-            df['long_margin_trade_balance_share'] / 
-            df['avg_vol_60'].replace(0, np.nan)
-        )
-        # (2) 信用倍率の変化 (対数)
-        # 0除算回避のために +1
-        feat['margin_ratio'] = np.log(
-            (df['long_margin_trade_balance_share'] + 1) / 
-            (df['short_margin_trade_balance_share'] + 1)
-        )
-        # 4週間前（約20営業日）との差分
-        feat['margin_ratio_delta_4w'] = feat['margin_ratio'].diff(20)
-        return feat
-
-    @register_block
-    def _add_sector_relative_features(self, df):
-        """セクター相対特徴量の追加"""
-        df['Sector_Momentum_5d'] = df['sector_return'].rolling(5).mean()
-        df['Sector_Rel'] = df['close'] / df['sector_return']
-        df['Rel_Sector_Return_1d'] = df['Log_Return'] - df['sector_return']
-        df['Rel_Sector_Return_5d'] = df['Log_Return'].rolling(5).sum() - df['sector_return'].rolling(5).sum()
-        sector_ret_60 = (1 + df['sector_return']).rolling(60).apply(np.prod, raw=True) - 1
-        market_ret_60 = (1 + df['Market_Return']).rolling(60).apply(np.prod, raw=True) - 1
-        df['sector_rel_strength_60'] = sector_ret_60 - market_ret_60
-        df['sector_short_sell_ratio'] = df['selling_volume_ratio']
-        # ターゲット用
-        indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        df['Sector_Return_Future'] = df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
-        return df
+        col_name = self._generate_name("GOV", "MarketSegment", "RAW")
+        self.df[col_name] = self.df['market'].apply(map_market_segment)
+        self.new_cols.append(col_name)
+        col_name = self._generate_name("GOV", "Sector33Code", "RAW")
+        self.df[col_name] = self.df['sector33_code']
+        self.new_cols.append(col_name)
+        return self
     
-    @register_block
-    def _add_z_score_features(self, df):
-        """Zスコア特徴量の追加"""
-        z_targets = [
-            'accruals','eps_growth_yoy','equity_ratio',
-            'log_pbr','log_pcfr','earnings_yield',
-            'div_yield','operating_profit_growth_yoy','op_margin','roa','roe',
-            'sales_growth_yoy','revision_rate','progress_rate',
-            'ATR_Ratio','ma_dev_25','ma_dev_75','ma_dev_200',
-            'Return_20d','Return_6m','Return_12m','RSI_14',
-            'high_52w_dist','downside_dev_60','volatility_60',
-            'margin_ratio','margin_buy_impact',
-        ]
-        # Zスコア計算後もキープする特徴量
-        keep_cols = [
-            'Return_20d','RSI_14','ATR_Ratio','RSI_14',
-            'margin_buy_impact','margin_ratio','sales_growth_yoy'
-        ]
-        for col in z_targets:
-            if col in df.columns:
-                target_name = f"{col}_sector_z"
-                df[target_name] = self.calculate_sector_z_score(df, col)
-                if col not in keep_cols:
-                    # オリジナル変数の削除 (DataFrame)
-                    df.drop(columns=[col], inplace=True)
-                    # オリジナル変数の削除 (Registry)
-                    self._feature_registry.pop(col, None)
-        return df
+    def apply_tempfeat(self):
+        # ターゲットやフィルタリングフラグ作成用一次変数
+        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        self.df['Vol_20d'] = log_return.rolling(20).std()
+        self.df['volume_p_MA5'] = self.df['volume_p'].rolling(5).mean()
+        self.df['log_market_cap'] = np.log(self.df['close'] * self.df['shares_outstanding'])
+        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
+        self.df['Market_Return_Future'] = self.df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        self.df['Sector_Return_Future'] = self.df['sector_return'].shift(-1).rolling(window=indexer).sum()
+        return self
 
-
-    @register_block
-    def _add_rank_features(self, df):
-        """
-        2段階ユニバースによるランク変換 (Cross-Sectional Rank)
-        Tier 1 (Broad Universe) で計算し、FFillで連続性を保つ
-        """
-        # 1. Broad Universe (Tier 1) 定義: 計算用
-        # 基準: 売買代金 1億円以上 & 株価 50円以上
-        # 投資対象(Strict)が一時的に落ちてもカバーできる広さ
-        tv = df['volume_p']
-        mask_broad = (tv >= 100_000_000) & (df['close'] >= 50)
-        # 2. ランク変換対象のカラム選定
-        # 除外リスト: メタデータ、ターゲット、カテゴリ、絶対値が必要な指標
-        exclude_cols = set(self.meta_cols + self.target_cols + [
-            # マーケット系
-            'Market_Return', 'Market_Trend_Idx', 'Market_HV_20', 'market_vol_change',
-            'Market_Foreign_Z_60','Market_Individual_Z_60','Market_Foreign_Z_250','Market_Individual_Z_250','Market_Foreign_Diff',
-            'market_segment',
-            # 投資部門別情報
-            'overseas_flow_trend', 'flow_accel',
-            # カレンダー系
-            'Month', 'DayOfMonth', 'DayOfWeek', 'Sin_DayOfWeek', 'Cos_DayOfWeek',
-            'Is_Gotobi', 'Is_Month_End', 'Is_Quarter_End', 'Quarter', 'time_idx',
-            # --- 4. セクター全体指標 [MKT] (セクター内で共通) ---
-            'sector33_code',
-            'Sector_Momentum_5d',   # セクター勢い [No.123]
-            'sector_return',        # セクターリターン [No.124]
-            'sector_short_sell_ratio', # セクター別空売り比率 [No.130]
-            # --- 6. 絶対水準・規模・ショック [ABS] (ランク化で情報消失する項目) ---
-            'Volume_Log',           # 対数出来高 (流動性の絶対サイズ) [No.81]
-            'Abnormal_Volume',      # 異常出来高比率 (ショックの大きさ) [No.82]
-            'Volume_Change',        # 出来高変化率 (変化のマグニチュード) [No.83]
-            'Volume_Slope_5',       # 出来高トレンド (傾きの絶対値) [No.84]
-            'Log_Trading_Cap',      # 対数売買代金 (経済規模) [No.85]
-            'log_vol_change',       # 対数出来高変化率 [No.86]
-            'Vol_Ratio_5d',         # 出来高比率(5日) (突発的な商いの大きさ) [No.90]
-            'Vol_Spike_Count_20',   # 出来高急増回数 (頻度) [No.92]
-            'EPS_Actual',           # EPS実数値 (株価未調整の生データ) [No.98]
-            'is_missing_eps',       # EPSが欠損している
-            'log_days_since_pub',   # 決算発表後経過日数 (情報の鮮度) [No.99]
-            # --- 条件付け特徴量 (絶対値を維持・既存カラムを使用) ---
-            'log_market_cap', 'turnover_ratio', 
-        ])
-        # 数値型のみ抽出
-        num_cols = df.select_dtypes(include=[np.number]).columns
-        rank_cols = [c for c in num_cols if c not in exclude_cols and not c.startswith('Market_')]
-        # gaussランク計算 (Broad Universe内のみ、全カラム一括)
-        df_masked = df.loc[mask_broad, rank_cols]
-        df_ranks_broad = df_masked.groupby(df.loc[mask_broad, 'date'])[rank_cols].rank(pct=True)
-        epsilon = 1e-6
-        df_ranks_broad = df_ranks_broad.clip(epsilon, 1 - epsilon)
-        df_ranks_broad = np.sqrt(2) * erfinv(2 * df_ranks_broad - 1)
-        df_ranks = pd.DataFrame(np.nan, index=df.index, columns=rank_cols)
-        df_ranks.loc[mask_broad] = df_ranks_broad
-        df_ranks['scode'] = df['scode']
-        df_ranks = df_ranks.groupby('scode').ffill()
-        df_ranks = df_ranks.drop(columns=['scode'], errors='ignore').fillna(0.0) 
-        df[rank_cols] = df_ranks
-        df = df.copy()
-        return df
-
-
-    def _add_targets(self, feat, df):
+    
+    # --- ターゲット作成 ---
+    def apply_timeseries_targets(self):
         """ダーゲット作成"""
         # --- ターゲット作成：戦略モデル ---
-        entry_price = df['open'].shift(-1) # 翌日始値エントリー
+        entry_price = self.df['open'].shift(-1) # 翌日始値エントリー
         # インデクサ作成
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
         # 未来データの取得
-        future_high_max = df['high'].shift(-1).rolling(window=indexer).max()
-        future_low_min = df['low'].shift(-1).rolling(window=indexer).min()
-        future_close_end = df['close'].shift(-self.horizon_tac)
+        future_high_max = self.df['high'].shift(-1).rolling(window=indexer).max()
+        future_low_min = self.df['low'].shift(-1).rolling(window=indexer).min()
+        future_close_end = self.df['close'].shift(-self.horizon_tac)
         # 基本情報格納
-        feat['Entry_Price'] = entry_price
-        feat['Future_High_Tac'] = future_high_max
-        feat['Future_Low_Tac'] = future_low_min
-        feat['Future_Close_Tac'] = future_close_end
+        self.df['Entry_Price'] = entry_price
+        self.df['Future_High_Tac'] = future_high_max
+        self.df['Future_Low_Tac'] = future_low_min
+        self.df['Future_Close_Tac'] = future_close_end
         # --- 1. Smoothed Target (Category C) ---
         # 翌日から5日間のVWAPを計算
         # VWAP = Sum(Volume_P) / Sum(Volume)
-        future_pv_sum = df['volume_p'].shift(-1).rolling(window=indexer).sum()
-        future_v_sum = df['volume'].shift(-1).rolling(window=indexer).sum()
+        future_pv_sum = self.df['volume_p'].shift(-1).rolling(window=indexer).sum()
+        future_v_sum = self.df['volume'].shift(-1).rolling(window=indexer).sum()
         future_vwap = future_pv_sum / (future_v_sum + 1e-9)
         # target = VWAP_5d / Entry_Price - 1
-        feat['target_tac_smoothed_return'] = (future_vwap / entry_price) - 1.0
+        self.df['target_tac_smoothed_return'] = (future_vwap / entry_price) - 1.0
         # --- 2. Volatility-Scaled Residual (Category B) ---
-        feat['target_ret_5'] = (future_close_end / entry_price.replace(0, np.nan)) - 1.0
-        # Beta調整 (Market_Return_Futureは _add_market_features で作成済みと仮定)
-        # もし未作成なら簡易的に df['Market_Return'].shift(-1).rolling(window=indexer).sum() を使用
-        market_ret_future = df['Market_Return'].shift(-1).rolling(window=indexer).sum()
-        residual_ret = feat['target_ret_5'] - (feat['Beta_60'] * market_ret_future)
+        self.df['target_ret_5'] = (future_close_end / entry_price.replace(0, np.nan)) - 1.0
+        # Beta調整 (Market_Return_Futureは _add_market_self.dfures で作成済みと仮定)
+        # もし未作成なら簡易的に self.df['Market_Return'].shift(-1).rolling(window=indexer).sum() を使用
+        market_ret_future = self.df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        residual_ret = self.df['target_ret_5'] - (self.df['BET_Beta60_RAW'] * market_ret_future)
         # Vol調整 (日次Vol * sqrt(5) で期間Volに換算)
-        vol_5d = feat['Vol_20d'] * np.sqrt(self.horizon_tac)
-        feat['target_tac_vol_scaled_residual'] = residual_ret / (vol_5d + 1e-6)
+        vol_5d = self.df['Vol_20d'] * np.sqrt(self.horizon_tac)
+        self.df['target_tac_vol_scaled_residual'] = residual_ret / (vol_5d + 1e-6)
         # --- 3. Triple Barrier Methods (Category D) ---
         # 期間ボラティリティに基づく動的閾値
         # Vectorized implementation for speed (avoid loop)
@@ -582,11 +927,11 @@ class FeatureEngineer:
             barrier_up = entry_price * (1 + vol_5d * up_multiplier)
             barrier_dn = entry_price * (1 - vol_5d * down_multiplier)
             # 1日後～5日後の高値・安値を取得
-            h1 = df['high'].shift(-1); l1 = df['low'].shift(-1)
-            h2 = df['high'].shift(-2); l2 = df['low'].shift(-2)
-            h3 = df['high'].shift(-3); l3 = df['low'].shift(-3)
-            h4 = df['high'].shift(-4); l4 = df['low'].shift(-4)
-            h5 = df['high'].shift(-5); l5 = df['low'].shift(-5)
+            h1 = self.df['high'].shift(-1); l1 = self.df['low'].shift(-1)
+            h2 = self.df['high'].shift(-2); l2 = self.df['low'].shift(-2)
+            h3 = self.df['high'].shift(-3); l3 = self.df['low'].shift(-3)
+            h4 = self.df['high'].shift(-4); l4 = self.df['low'].shift(-4)
+            h5 = self.df['high'].shift(-5); l5 = self.df['low'].shift(-5)
             # 各日のヒット判定 (利確=1, 損切=-1, なし=0)
             # 損切を優先判定（保守的）または同時なら損切とするロジック
             def check_hit(h, l, b_up, b_dn):
@@ -609,56 +954,56 @@ class FeatureEngineer:
             choices = [r1, r2, r3, r4, r5]
             return np.select(conds, choices, default=0)
         # Strategy A: Balance (1.0σ / 1.0σ)
-        feat['target_tac_tb_strategy_a'] = calc_triple_barrier(1.0, 1.0)
+        self.df['target_tac_tb_strategy_a'] = calc_triple_barrier(1.0, 1.0)
         # Strategy B: Trend (1.5σ / 0.75σ) - 損小利大
-        feat['target_tac_tb_strategy_b'] = calc_triple_barrier(1.5, 0.75)
+        self.df['target_tac_tb_strategy_b'] = calc_triple_barrier(1.5, 0.75)
         # Strategy C: Reversion (0.5σ / 1.0σ) - 高勝率
-        feat['target_tac_tb_strategy_c'] = calc_triple_barrier(0.5, 1.0)
+        self.df['target_tac_tb_strategy_c'] = calc_triple_barrier(0.5, 1.0)
         
         # --- ターゲット作成：戦略モデル ---
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_str)
-        future_high_max = df['high'].shift(-1).rolling(window=indexer).max()
-        future_low_min = df['low'].shift(-1).rolling(window=indexer).min()
-        future_close_end = df['close'].shift(-self.horizon_str)
-        feat['Entry_Price'] = entry_price
-        feat['Future_High_Str'] = future_high_max
-        feat['Future_Low_Str'] = future_low_min
-        feat['Future_Close_Str'] = future_close_end
+        future_high_max = self.df['high'].shift(-1).rolling(window=indexer).max()
+        future_low_min = self.df['low'].shift(-1).rolling(window=indexer).min()
+        future_close_end = self.df['close'].shift(-self.horizon_str)
+        self.df['Entry_Price'] = entry_price
+        self.df['Future_High_Str'] = future_high_max
+        self.df['Future_Low_Str'] = future_low_min
+        self.df['Future_Close_Str'] = future_close_end
         # 60日累積リターン（基本値） RankやPeer Alphaの計算ベースとして後続のクロスセクション処理で使用
-        feat['target_ret_60'] = (df['close'].shift(-self.horizon_str) / entry_price.replace(0, np.nan)) - 1.0
+        self.df['target_ret_60'] = (self.df['close'].shift(-self.horizon_str) / entry_price.replace(0, np.nan)) - 1.0
         # Risk-Adjusted Residual Momentum (60d) ベータ調整済みリターンをボラティリティで標準化
-        market_ret_60 = df['Market_Return'].shift(-1).rolling(window=indexer).sum()
-        residual_60 = feat['target_ret_60'] - (feat['Beta_60'] * market_ret_60)
-        feat['target_str_risk_adj'] = residual_60 / (feat['Vol_20d'] * np.sqrt(12) + 1e-6) # 20日Volを60日換算(sqrt(3)近似だが実務上Vol_20dで正規化も一般的)
+        market_ret_60 = self.df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        residual_60 = self.df['target_ret_60'] - (self.df['BET_Beta60_RAW'] * market_ret_60)
+        self.df['target_str_risk_adj'] = residual_60 / (self.df['Vol_20d'] * np.sqrt(12) + 1e-6) # 20日Volを60日換算(sqrt(3)近似だが実務上Vol_20dで正規化も一般的)
         # Return Consistency Score (60d) 60日間の累積リターン曲線の直線性をR2で算出
         def _calc_consistency(window):
             if np.isnan(window).any(): return np.nan
             cum_ret = np.cumprod(1 + window)
             x = np.arange(len(cum_ret))
             return np.corrcoef(x, cum_ret)[0, 1]**2
-        fwd_ret_1d = df['close'].pct_change().shift(-1)
-        feat['target_str_consistency'] = fwd_ret_1d.rolling(window=indexer).apply(_calc_consistency, raw=True)
+        fwd_ret_1d = self.df['close'].pct_change().shift(-1)
+        self.df['target_str_consistency'] = fwd_ret_1d.rolling(window=indexer).apply(_calc_consistency, raw=True)
         # Volatility Scaling Alpha (60d) 銘柄固有のボラティリティでスケーリング
-        feat['target_str_vol_scale'] = feat['target_ret_60'] / (feat['volatility_60'] + 1e-6)
+        self.df['target_str_vol_scale'] = self.df['target_ret_60'] / (self.df['VOL_Volatility60_RAW'] + 1e-6)
         # Triple Barrier Method 
         # 3値分類ラベル: 1(利確), -1(損切), 0(時間切れ)
         # バリア幅の設定: ボラティリティベース (De Prado流)
         # 上値(PT) = 期間ボラティリティ * 1.0
         # 下値(SL) = 期間ボラティリティ * 1.0 (損益比率1:1の設定)
-        vol_horizon = feat['Vol_20d'] * np.sqrt(self.horizon_str)
+        vol_horizon = self.df['Vol_20d'] * np.sqrt(self.horizon_str)
         pt_width = vol_horizon * 1.0
         sl_width = vol_horizon * 1.0
         # 高速化のためのNumpy配列化
-        high_vals = df['high'].values
-        low_vals = df['low'].values
+        high_vals = self.df['high'].values
+        low_vals = self.df['low'].values
         entry_vals = entry_price.values
         pt_vals = pt_width.values
         sl_vals = sl_width.values
-        labels = np.zeros(len(df)) # デフォルト0 (Time-out)
+        labels = np.zeros(len(self.df)) # デフォルト0 (Time-out)
         # 60日間のウィンドウ走査（ループ処理）
         # ※PandasのRollingのみでの「First Touch」判定は困難なため、Numpyループを使用
         horizon = self.horizon_str
-        n_samples = len(df)
+        n_samples = len(self.df)
         for i in range(n_samples - horizon - 1):
             if np.isnan(entry_vals[i]) or np.isnan(pt_vals[i]):
                 labels[i] = np.nan
@@ -683,24 +1028,23 @@ class FeatureEngineer:
                 labels[i] = 1 # 利確バリアに先に到達
             else:
                 labels[i] = -1 # 損切バリアに先に到達（同時なら保守的に損切とみなす）
-        feat['target_str_triple_barrier'] = labels
+        self.df['target_str_triple_barrier'] = labels
         # 不要変数の削除
-        feat.drop(columns=['Vol_20d','Market_Return_Future'], inplace=True)
-        self._feature_registry.pop('Vol_20d', None)
-        self._feature_registry.pop('Market_Return_Future', None)
-        return feat
-
-    def _add_cross_sectional_target(self, df):
+        return self
+    
+    def apply_crosssectional_targets(self):
         """クロスセクションターゲットの追加"""
+        new_cols = {}
         # --- 1. Era-wise Rank (Category A) ---
         # 単純なRank (0.0 ~ 1.0)
-        df['target_tac_rank'] = df.groupby('date')['target_ret_5'].rank(pct=True, method='average')
+        tac_rank = self.df.groupby('date')['target_ret_5'].rank(pct=True, method='average')
+        new_cols['target_tac_rank'] = tac_rank
+
         # 既存: Gauss Rank (正規分布化)
-        for date, group in df.groupby('date'):
-            rank = group['target_ret_5'].rank(pct=True, method='average')
-            epsilon = 1e-6
-            rank = rank * (1 - 2 * epsilon) + epsilon
-            df.loc[group.index, 'target_tac_gauss_rank'] = erfinv(2 * rank - 1)
+        epsilon = 1e-6
+        rank_clipped = tac_rank * (1 - 2 * epsilon) + epsilon
+        new_cols['target_tac_gauss_rank'] = erfinv(2 * rank_clipped - 1)
+
         # --- 2. Linear Residual (Category C) ---
         # 簡易的な実装: リターンを「セクター平均」と「市場平均」で説明する線形モデルの残差
         # 本来はRidge回帰などが望ましいが、計算コストを考慮し
@@ -711,72 +1055,93 @@ class FeatureEngineer:
         # 1. セクターリターンは _add_sector_relative_features で 'Sector_Return_Future' として計算済みと仮定
         #    (もしなければ計算する)
         indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        sec_ret_fut = df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
-        mkt_ret_fut = df['Market_Return'].shift(-1).rolling(window=indexer_sec).sum()
+        sec_ret_fut = self.df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
+        mkt_ret_fut = self.df['Market_Return'].shift(-1).rolling(window=indexer_sec).sum()
         # 2. 残差 = Target_Return - (0.5 * Market + 0.5 * Sector) ※係数は簡易
         # より厳密には、日次で回帰係数を決めるのが良いが、ここでは
         # 「市場とセクターの影響を引いたもの」をLinear Residualの代替とする
-        df['target_tac_linear_residual'] = df['target_ret_5'] - (0.5 * mkt_ret_fut + 0.5 * sec_ret_fut)
+        new_cols['target_tac_linear_residual'] = self.df['target_ret_5'] - (0.5 * mkt_ret_fut + 0.5 * sec_ret_fut)
         # セクター相対フラグ
-        df['target_tac_sector_relative'] = (df['target_ret_5'] > sec_ret_fut).astype(int)
+        new_cols['target_tac_sector_relative'] = (self.df['target_ret_5'] > sec_ret_fut).astype(int)
         # --- 戦略モデル用クロスセクション ---
         # Relative Rank Change (60d)
-        df['target_str_rank'] = df.groupby('date')['target_ret_60'].rank(pct=True)
+        new_cols['target_str_rank'] = self.df.groupby('date')['target_ret_60'].rank(pct=True)
         # Peer Group Neutralized Alpha (60d)
-        sector_mean_60 = df.groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
-        df['target_str_peer_alpha'] = df['target_ret_60'] - sector_mean_60
-        # 不要変数の削除
-        df.drop(columns=['Sector_Return_Future'], inplace=True)
-        self._feature_registry.pop('Sector_Return_Future', None)
-        df.drop(columns=['target_ret_60'], inplace=True)
-        self._feature_registry.pop('target_ret_60', None)
-        return df
-
-    def _fill_missing_values_with_sector_median(self, df):
-        """指定カラムの欠損を業種別中央値で埋める"""
-        target_cols = ['EPS_Actual', 'turnover_ratio', 'log_market_cap']
-        if 'sector33_code' in df.columns:
-            for col in target_cols:
-                if col in df.columns:
-                    sector_median = df.groupby(['date', 'sector33_code'])[col].transform('median')
-                    df[col] = df[col].fillna(sector_median)
-        return df
-
-    def add_time_series_features(self, df, output_target=True):
-        if len(df) < 250: return pd.DataFrame()
-        self._feature_registry = {k: None for k in self.initial_cols}
-        # 入力データフレームの一部のカラムは保持しないため、必要なカラムをfeatにコピーする
-        feat = df[self.initial_cols]
-        # 特徴量作成ブロックの実行
-        feat = self._add_trend_features(feat,df)
-        feat = self._add_momentnum_features(feat,df)
-        feat = self._add_volatility_features(feat,df)
-        feat = self._add_volume_features(feat,df)
-        feat = self._add_fundamental_features(feat,df)
-        feat = self._add_calendar_feature(feat,df)
-        feat = self._add_market_features(feat,df)
-        feat = self._add_margin_features(feat,df)
-        if output_target:
-            df = self._add_targets(feat,df)
-        gc.collect()
-        return feat
+        sector_mean_60 = self.df.groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
+        new_cols['target_str_peer_alpha'] = self.df['target_ret_60'] - sector_mean_60
+        # 一括結合
+        if new_cols:
+            self.df = pd.concat([self.df, pd.DataFrame(new_cols, index=self.df.index)], axis=1)
+        return self
     
-    def add_cross_sectional_features(self, df_in, output_target=True):
-        """銘柄横断特徴量の追加"""
-        initial_cols = [x for x in df_in.columns if x not in self.target_cols and x not in self.meta_cols and x.find('filt_')==-1]
-        self._feature_registry = {k: None for k in initial_cols}
-        df = df_in.copy()
-        df = self._fill_missing_values_with_sector_median(df)
-        # 以下の処理は、入力データフレームのカラムに追加するのみであり、入力データフレームにあるカラムは全て出力する
-        df = self._add_sector_relative_features(df)
-        df = self._add_z_score_features(df)
-        df = self._add_rank_features(df)
-        if output_target:
-            df = self._add_cross_sectional_target(df)
-        return df 
-
-    @property
-    def feature_list(self):
-        """自動登録された全特徴量リストを返す"""
-        return list(self._feature_registry.keys())
     
+    def get_df(self):
+        return self.df
+
+# import numpy as np
+# import pandas as pd
+
+# def get_weights_ffd(d: float, thres: float, size: int) -> np.ndarray:
+#     """
+#     FFD(Fixed-Width Window FracDiff)用の重みを計算する
+#     """
+#     w = [1.0]
+#     for k in range(1, size):
+#         # 再帰的な重みの計算: w_k = -w_{k-1} * (d - k + 1) / k
+#         w_curr = -w[-1] * (d - k + 1) / k
+#         w.append(w_curr)
+    
+#     w = np.array(w[::-1]).reshape(-1, 1) # 反転させて列ベクトル化
+    
+#     # 閾値（thres）を下回る重みを除外（メモリのカットオフ）
+#     # ただし、計算を安定させるため最小限のウィンドウサイズを確保する
+#     mask = np.abs(w) > thres
+#     return w[mask].reshape(-1, 1)
+
+# def apply_frac_diff_ffd(series: pd.Series, d: float, thres: float = 1e-5) -> pd.Series:
+#     """
+#     Pandas Seriesに対して分数次微分を適用する
+#     """
+#     # 1. 重みの取得
+#     weights = get_weights_ffd(d, thres, len(series))
+#     width = len(weights) - 1
+    
+#     # 2. 窓関数内での畳み込み演算
+#     # NaNを避けるため、重みの幅が確保できる箇所から計算開始
+#     res = {}
+#     for i in range(width, series.shape[0]):
+#         # 指定区間のデータと重みのドット積
+#         res[series.index[i]] = np.dot(weights.T, series.iloc[i-width : i+1].values.reshape(-1, 1))[0, 0]
+        
+#     return pd.Series(res)
+
+
+
+    # @register_block
+    # def _add_lagged_targets(self, df):
+    #     """ターゲット変数のラグ特徴量を追加"""
+    #     targets = [c for c in self.target_cols if c in df.columns]
+    #     new_cols = {}
+    #     for col in targets:
+    #         lag = 0
+    #         if '_tac_' in col or 'target_ret_5' in col:
+    #             lag = self.horizon_tac
+    #         elif '_str_' in col or 'target_ret_60' in col:
+    #             lag = self.horizon_str
+    #         if lag > 0:
+    #             new_col_name = f"{col}_Lag{lag}"
+    #             if new_col_name not in df.columns:
+    #                 new_cols[new_col_name] = df[col].shift(lag)
+    #     if new_cols:
+    #         df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    #     return df
+
+    # def _fill_missing_values_with_sector_median(self, df):
+    #     """指定カラムの欠損を業種別中央値で埋める"""
+    #     target_cols = ['EPS_Actual', 'turnover_ratio', 'log_market_cap']
+    #     if 'sector33_code' in df.columns:
+    #         for col in target_cols:
+    #             if col in df.columns:
+    #                 sector_median = df.groupby(['date', 'sector33_code'])[col].transform('median')
+    #                 df[col] = df[col].fillna(sector_median)
+    #     return df
