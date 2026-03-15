@@ -121,6 +121,13 @@ class GANDALFWrapper(BaseModelWrapper):
         }
         self.model = GANDALFNet(**self.model_init_kwargs).to(self.device)
 
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"\n--- GANDALF Model Summary (Fold {model_idx}) ---")
+        print(f"Total Parameters:     {total_params:,}")
+        print(f"Trainable Parameters: {trainable_params:,}")
+        print("-" * 40)
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,

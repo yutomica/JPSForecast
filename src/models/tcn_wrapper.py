@@ -54,10 +54,14 @@ class TCNWrapper(BaseModelWrapper):
             torch.from_numpy(sample_weight).float() # 重みをセット
         )
         train_loader = DataLoader(train_ds, batch_size=self.params.get('batch_size', 32), shuffle=True)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.params.get('lr', 0.001))
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), 
+            lr=self.params.get('lr', self.params.get('learning_rate', 0.001)),
+            weight_decay=self.params.get('weight_decay', 0.0)
+        )
         # 回帰ならMSE、分類ならBCE
         criterion = nn.MSELoss(reduction='none') if self.task_type == "regression" else nn.BCEWithLogitsLoss(reduction='none')
-        max_epochs = self.params.get('max_epochs', 10)
+        max_epochs = self.params.get('max_epochs', self.params.get('epochs', 10))
         for epoch in range(max_epochs):
             self.model.train()
             epoch_loss = 0
@@ -69,6 +73,11 @@ class TCNWrapper(BaseModelWrapper):
                 raw_loss = criterion(output.view(-1), batch_y) 
                 weighted_loss = (raw_loss * batch_w).mean() 
                 weighted_loss.backward()
+                
+                grad_clip = self.params.get('gradient_clip_val', 0.0)
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                    
                 optimizer.step()
                 epoch_loss += weighted_loss.item()
                 pbar.set_postfix({"loss": f"{weighted_loss.item():.8f}"})

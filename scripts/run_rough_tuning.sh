@@ -5,7 +5,7 @@ set -e
 TARGET_TYPES=("tac" "str")
 # TARGET_TYPES=("str")
 # MODELS=("lgbm" "tabnet")
-MODELS=("tabnet")
+MODELS=("tcn" "gandalf" "ft_transformer")
 
 # MLflowのバックエンドをtrain.pyと合わせる
 export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
@@ -41,6 +41,22 @@ for TARGET in "${TARGET_TYPES[@]}"; do
             "str_tcn")
                 TRAIN_TARGET="str_risk_adj"
                 FEATURES="features_str_TimeSeries_rough"
+                ;;
+            "tac_gandalf")
+                TRAIN_TARGET="tac_rank"
+                FEATURES="features_tac_DeepTabular_rough"
+                ;;
+            "str_gandalf")
+                TRAIN_TARGET="str_rank"
+                FEATURES="features_str_DeepTabular_rough"
+                ;;
+            "tac_ft_transformer")
+                TRAIN_TARGET="tac_rank"
+                FEATURES="features_tac_DeepTabular_rough"
+                ;;
+            "str_ft_transformer")
+                TRAIN_TARGET="str_rank"
+                FEATURES="features_str_DeepTabular_rough"
                 ;;
             *)
                 echo "Skipping unknown combination: ${TARGET} ${MODEL}"

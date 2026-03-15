@@ -6,25 +6,10 @@ import matplotlib.pyplot as plt
 import mlflow
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 from .base import BaseModelWrapper
-from .ft_transformer import FTTransformer
-
-
-class _TabularDataset(Dataset):
-    def __init__(self, x_num, x_cat, y=None):
-        self.x_num = torch.from_numpy(x_num.astype(np.float32, copy=False))
-        self.x_cat = torch.from_numpy(x_cat.astype(np.int64, copy=False))
-        self.y = None if y is None else torch.from_numpy(np.asarray(y))
-
-    def __len__(self):
-        return len(self.x_num)
-
-    def __getitem__(self, idx):
-        if self.y is None:
-            return self.x_num[idx], self.x_cat[idx]
-        return self.x_num[idx], self.x_cat[idx], self.y[idx]
-
+from .networks.ft_transformer import FTTransformer
 
 class FTTransformerWrapper(BaseModelWrapper):
     """
@@ -42,11 +27,11 @@ class FTTransformerWrapper(BaseModelWrapper):
         self.cat_dims = params.pop("cat_dims", params.pop("cat_dim", []))
 
         # モデル設定
-        self.d_token = params.pop("d_token", 192)
-        self.n_blocks = params.pop("n_blocks", 3)
-        self.attention_n_heads = params.pop("attention_n_heads", 8)
+        self.d_token = params.pop("d_token", 64)
+        self.n_blocks = params.pop("n_blocks", 2)
+        self.attention_n_heads = params.pop("attention_n_heads", 4)
         self.attention_dropout = params.pop("attention_dropout", 0.1)
-        self.ffn_hidden_multiplier = params.pop("ffn_hidden_multiplier", 4.0)
+        self.ffn_hidden_multiplier = params.pop("ffn_hidden_multiplier", 2.0)
         self.ffn_dropout = params.pop("ffn_dropout", 0.1)
         self.residual_dropout = params.pop("residual_dropout", 0.0)
         self.head_dropout = params.pop("head_dropout", 0.0)
@@ -120,9 +105,20 @@ class FTTransformerWrapper(BaseModelWrapper):
             head_dropout=self.head_dropout,
         ).to(self.device)
 
-    def _make_loader(self, X, y=None, shuffle=False):
+    def _make_loader(self, X, y=None, sample_weight=None, shuffle=False):
         x_num, x_cat = self._split_num_cat(X)
-        ds = _TabularDataset(x_num, x_cat, y)
+        
+        x_num_t = torch.from_numpy(x_num.astype(np.float32, copy=False))
+        x_cat_t = torch.from_numpy(x_cat.astype(np.int64, copy=False))
+        
+        y_t = torch.from_numpy(np.asarray(y, dtype=np.float32)) if y is not None else torch.zeros(len(x_num), dtype=torch.float32)
+        
+        if sample_weight is not None:
+            w_t = torch.from_numpy(np.asarray(sample_weight, dtype=np.float32))
+        else:
+            w_t = torch.ones(len(x_num), dtype=torch.float32)
+            
+        ds = TensorDataset(x_num_t, x_cat_t, y_t, w_t)
         return DataLoader(
             ds,
             batch_size=self.batch_size,
@@ -158,20 +154,21 @@ class FTTransformerWrapper(BaseModelWrapper):
 
         self._build_model(X_train)
 
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"\n--- FT-Transformer Model Summary (Fold {model_idx}) ---")
+        print(f"Total Parameters:     {total_params:,}")
+        print(f"Trainable Parameters: {trainable_params:,}")
+        print("-" * 40)
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
 
-        train_loader = self._make_loader(X_train, y_train, shuffle=True)
-        valid_loader = self._make_loader(X_valid, y_valid, shuffle=False) if X_valid is not None else None
-
-        sample_weight_tensor = None
-        if sample_weight is not None:
-            sample_weight_tensor = torch.from_numpy(
-                np.asarray(sample_weight, dtype=np.float32)
-            )
+        train_loader = self._make_loader(X_train, y_train, sample_weight=sample_weight, shuffle=True)
+        valid_loader = self._make_loader(X_valid, y_valid, sample_weight=None, shuffle=False) if X_valid is not None else None
 
         best_state = copy.deepcopy(self.model.state_dict())
         best_val_loss = float("inf")
@@ -183,31 +180,26 @@ class FTTransformerWrapper(BaseModelWrapper):
             train_total = 0.0
             train_count = 0
 
-            for batch_idx, batch in enumerate(train_loader):
-                x_num, x_cat, y = batch
-                x_num = x_num.to(self.device, non_blocking=True)
-                x_cat = x_cat.to(self.device, non_blocking=True)
-                y = y.to(self.device, non_blocking=True)
+            with tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.max_epochs}", leave=False) as pbar:
+                for x_num, x_cat, y, sw in pbar:
+                    x_num = x_num.to(self.device, non_blocking=True)
+                    x_cat = x_cat.to(self.device, non_blocking=True)
+                    y = y.to(self.device, non_blocking=True)
+                    sw = sw.to(self.device, non_blocking=True)
 
-                if sample_weight_tensor is not None:
-                    start = batch_idx * self.batch_size
-                    end = start + x_num.shape[0]
-                    sw = sample_weight_tensor[start:end].to(self.device, non_blocking=True)
-                else:
-                    sw = None
+                    optimizer.zero_grad(set_to_none=True)
+                    logits = self.model(x_num, x_cat)
+                    loss = self._compute_loss(logits, y, sw)
+                    loss.backward()
 
-                optimizer.zero_grad(set_to_none=True)
-                logits = self.model(x_num, x_cat)
-                loss = self._compute_loss(logits, y, sw)
-                loss.backward()
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
-                if self.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    optimizer.step()
 
-                optimizer.step()
-
-                train_total += loss.item() * x_num.shape[0]
-                train_count += x_num.shape[0]
+                    train_total += loss.item() * x_num.shape[0]
+                    train_count += x_num.shape[0]
+                    pbar.set_postfix({"train_loss": f"{train_total / max(train_count, 1):.6f}"})
 
             train_loss = train_total / max(train_count, 1)
             self.history["train_loss"].append(train_loss)
@@ -219,7 +211,7 @@ class FTTransformerWrapper(BaseModelWrapper):
                 valid_count = 0
 
                 with torch.no_grad():
-                    for x_num, x_cat, y in valid_loader:
+                    for x_num, x_cat, y, sw in valid_loader:
                         x_num = x_num.to(self.device, non_blocking=True)
                         x_cat = x_cat.to(self.device, non_blocking=True)
                         y = y.to(self.device, non_blocking=True)
@@ -236,6 +228,8 @@ class FTTransformerWrapper(BaseModelWrapper):
 
             self.history["valid_loss"].append(valid_loss)
 
+            tqdm.write(f"Epoch {epoch+1}/{self.max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}")
+
             # ---- early stopping ----
             if valid_loss < best_val_loss:
                 best_val_loss = valid_loss
@@ -245,6 +239,7 @@ class FTTransformerWrapper(BaseModelWrapper):
             else:
                 wait += 1
                 if wait >= self.patience:
+                    tqdm.write(f"Early stopping triggered at epoch {epoch + 1}")
                     break
 
         self.model.load_state_dict(best_state)
@@ -319,7 +314,7 @@ class FTTransformerWrapper(BaseModelWrapper):
         self.model.eval()
 
         with torch.no_grad():
-            for x_num, x_cat in loader:
+            for x_num, x_cat, _, _ in loader:
                 x_num = x_num.to(self.device, non_blocking=True)
                 x_cat = x_cat.to(self.device, non_blocking=True)
 
