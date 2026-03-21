@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import mlflow
 
 
 def segments_from_pos(pos_arr: Optional[np.ndarray]) -> List[Tuple[int, int]]:
@@ -120,3 +121,40 @@ def summarize_split_for_logging(
         "valid_segments_str": fmt_segments(va_segs, "VA", pos_to_date),
         "timeline": bar,
     }
+
+
+def log_split_info(
+    fold: int,
+    tr_pos: np.ndarray,
+    va_pos: np.ndarray,
+    pos_to_date: pd.Series,
+    timeline_width: int = 100,
+) -> Dict[str, Any]:
+    """
+    分割情報を集計し、コンソールへの出力とMLflowへのメトリクス記録を行います。
+    """
+    info = summarize_split_for_logging(
+        fold=fold,
+        tr_pos=tr_pos,
+        va_pos=va_pos,
+        pos_to_date=pos_to_date,
+        timeline_width=timeline_width,
+    )
+    
+    print(
+        f"[CV] fold={fold} | "
+        f"TRAIN days={info['train_days']} segs={info['train_segs']} ({info['train_start']}..{info['train_end']}) | "
+        f"VALID days={info['valid_days']} segs={info['valid_segs']} ({info['valid_start']}..{info['valid_end']})"
+    )
+    print(f"      {info['train_segments_str']}")
+    print(f"      {info['valid_segments_str']}")
+    print(f"      {info['timeline']}")
+    
+    # MLflow metrics (Runがアクティブな場合のみ記録)
+    if mlflow.active_run():
+        mlflow.log_metric("cv_train_days", info["train_days"], step=fold)
+        mlflow.log_metric("cv_valid_days", info["valid_days"], step=fold)
+        mlflow.log_metric("cv_train_segs", info["train_segs"], step=fold)
+        mlflow.log_metric("cv_valid_segs", info["valid_segs"], step=fold)
+        
+    return info

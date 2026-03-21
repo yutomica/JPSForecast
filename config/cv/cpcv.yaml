@@ -1,0 +1,5 @@
+# @package cv
+_target_: src.cv.cpcv.SimpleCombinatorialPurgedKFold
+n_splits: ${period.n_splits}
+n_test_splits: ${period.n_test_chunks}
+pct_embargo: ${period.pct_embargo}

@@ -1,0 +1,4 @@
+# @package cv
+_target_: src.cv.purged_kfold.SimplePurgedKFold
+n_splits: ${period.n_splits}
+pct_embargo: ${period.pct_embargo}

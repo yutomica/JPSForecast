@@ -1,0 +1,8 @@
+name: nbeats
+group: deep_timeseries
+data_category: timeseries
+preprocessor_target: src.preprocess.preprocess_nbeats.NBeatsPreprocessor
+model_target: src.models.nbeats_wrapper.NBeatsWrapper
+window_size:
+  tac: 60
+  str: 120

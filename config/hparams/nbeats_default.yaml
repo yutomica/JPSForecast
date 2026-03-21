@@ -1,0 +1,23 @@
+stack_type: generic
+n_stacks: 3
+n_blocks_per_stack: 3
+n_layers: 4
+hidden_size: 256
+theta_size: 64
+dropout: 0.1
+activation: relu
+
+optimizer: adamw
+lr: 0.001
+weight_decay: 0.00001
+batch_size: 512
+max_epochs: 100
+patience: 10
+grad_clip_norm: 1.0
+
+scheduler: reduce_on_plateau
+scheduler_factor: 0.5
+scheduler_patience: 3
+
+use_time_decay: true
+time_decay_rate: 0.9999

@@ -43,7 +43,9 @@ class TCNPreprocessor(BasePreprocessor):
                 
         # 数値変数のスケーリング・補完の学習
         if self.num_cols:
-            num_data = data[self.num_cols].replace([np.inf, -np.inf], np.nan).to_numpy()
+            # pandasのreplaceは遅いため、NumPy配列化してから高速に処理
+            num_data = data[self.num_cols].to_numpy(dtype=np.float32)
+            num_data[np.isinf(num_data)] = np.nan
             self.imputer.fit(num_data)
             num_data_imp = self.imputer.transform(num_data)
             self.scaler.fit(num_data_imp)
@@ -53,36 +55,53 @@ class TCNPreprocessor(BasePreprocessor):
     def transform(self, data, row_indices=None, col_indices=None):
         if not self.is_fitted:
             raise ValueError("Preprocessor must be fitted.")
-        # 過去 window_size 分を確保するために必要な全期間を取得
-        start_idx = max(0, min(row_indices) - self.window_size + 1)
-        end_idx = max(row_indices) + 1
-        extracted = data[start_idx:end_idx, col_indices].copy()
         
-        # NaNとInfの処理、およびスケーリング (数値変数)
-        if hasattr(self, 'num_indices') and self.num_indices:
-            num_data = extracted[:, self.num_indices]
-            num_data = np.where(np.isinf(num_data), np.nan, num_data)
-            num_data = self.imputer.transform(num_data)
-            num_data = self.scaler.transform(num_data)
-            extracted[:, self.num_indices] = num_data
+        if row_indices is None:
+            row_indices = np.arange(len(data))
+        else:
+            row_indices = np.asarray(row_indices)
+            
+        # 各行に対して過去 window_size 分のインデックスを計算
+        # shape: (N, window_size)
+        window_indices = row_indices[:, None] - np.arange(self.window_size - 1, -1, -1)
+        
+        # 範囲外(負)のインデックスは後で0埋めするためのマスクを作成し、0にクリップして抽出可能にする
+        valid_mask = window_indices >= 0
+        clipped_indices = np.clip(window_indices, 0, None)
+        
+        # 必要なユニークインデックスのみを抽出し、前処理の無駄を省く
+        unique_indices, inverse_indices = np.unique(clipped_indices, return_inverse=True)
+        
+        # memmap等から、必要な行・列だけをピンポイントで抽出
+        extracted = data[unique_indices]
+        if col_indices is not None:
+            extracted = extracted[:, col_indices]
+            
+        processed = np.empty((extracted.shape[0], extracted.shape[1]), dtype=np.float32)
             
         # カテゴリ変数のエンコーディング (未知の値は0)
         if hasattr(self, 'cat_indices') and self.cat_indices:
             for col, idx in self.cat_indices.items():
                 if col in self.label_encoders:
                     mapping = self.label_encoders[col]
-                    vectorized_map = np.vectorize(lambda x: mapping.get(x, 0))
-                    extracted[:, idx] = vectorized_map(extracted[:, idx])
+                    # np.vectorizeより高速なpandasのmapを利用
+                    mapped_vals = pd.Series(extracted[:, idx]).map(mapping).fillna(0)
+                    processed[:, idx] = mapped_vals.to_numpy(dtype=np.float32)
+        
+        # NaNとInfの処理、およびスケーリング (数値変数)
+        if hasattr(self, 'num_indices') and self.num_indices:
+            num_data = extracted[:, self.num_indices].astype(np.float32)
+            num_data[np.isinf(num_data)] = np.nan
+            num_data = self.imputer.transform(num_data)
+            num_data = self.scaler.transform(num_data)
+            processed[:, self.num_indices] = num_data
 
-        # 従来の Python ループを廃止し、NumPy のストライド演算を使用
-        # パディング: データの先頭付近でも window_size 分確保できるように 0 で埋める
-        pad_width = ((self.window_size - 1, 0), (0, 0))
-        padded = np.pad(extracted, pad_width, mode='constant', constant_values=0)
-        # shape: (N_windows, 1, window_size, features)
-        windows = sliding_window_view(padded, (self.window_size, extracted.shape[1]))
-        windows = windows.squeeze(axis=1) # (N_windows, window_size, features)
-        target_local_indices = row_indices - start_idx
-        X_3d = windows[target_local_indices]
+        # inverse_indices を用いて直接 3D配列 (N, window_size, features) を構築
+        X_3d = processed[inverse_indices].reshape(len(row_indices), self.window_size, extracted.shape[1])
+        
+        # 範囲外(パディング対象)だった箇所を 0.0 で埋める
+        X_3d[~valid_mask] = 0.0
+        
         print(f" - 3D Sequence construction complete. Shape: {X_3d.shape}")
         return X_3d
 

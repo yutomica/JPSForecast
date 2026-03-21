@@ -18,9 +18,10 @@ from omegaconf import DictConfig, OmegaConf
 import contextlib
 import optuna
 from hydra.utils import instantiate, get_class
-from src.cv.purged_kfold import SimplePurgedKFold, add_t1_column, prepare_purged_cv_input
-from src.cv.cpcv import SimpleCombinatorialPurgedKFold
-from src.cv.cv_viz import summarize_split_for_logging
+from hydra.core.hydra_config import HydraConfig
+from src.cv.cv_utils import add_t1_column, prepare_purged_cv_input
+from src.cv.cv_viz import log_split_info
+from src.preprocess.sampling import apply_sampling
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.ensemble import EnsembleModel
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
@@ -32,34 +33,10 @@ logging.getLogger("alembic").setLevel(logging.WARNING)
 # ついでに sqlalchemy のログも抑制したい場合は以下も有効です
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
 
-def apply_sampling(df, interval):
-    if interval <= 1:
-        return df
-    print(f"Applying sampling (Date-interval): interval={interval} days")
-    
-    df = df.sort_values(['scode', 'date'])
-    scodes = df['scode'].values
-    dates = df['date'].values
-    keep_mask = np.zeros(len(df), dtype=bool)
-    
-    last_scode = None
-    last_date = np.datetime64('1900-01-01')
-    interval_td = np.timedelta64(interval, 'D')
-    
-    for i in range(len(df)):
-        if scodes[i] != last_scode or (dates[i] - last_date) >= interval_td:
-            keep_mask[i] = True
-            last_scode = scodes[i]
-            last_date = dates[i]
-            
-    sampled_df = df[keep_mask].copy()
-    return sampled_df
 
 def train(cfg: DictConfig) -> float:
-    # 1. MLflowの初期設定
-    # Hydraがカレントディレクトリを変更するため、絶対パスでDBを指定する
-    root_dir = Path(__file__).resolve().parent
-    mlflow_db_path = f"sqlite:///{root_dir}/mlflow.db"
+    # MLflowの初期設定 Hydraがカレントディレクトリを変更するため、絶対パスでDBを指定する
+    mlflow_db_path = cfg.mlflow.get("tracking_uri")
     mlflow.set_tracking_uri(mlflow_db_path)
     # 実験が削除済み(deleted)の場合は復元してからセットする
     client = MlflowClient()
@@ -67,14 +44,11 @@ def train(cfg: DictConfig) -> float:
     if experiment and experiment.lifecycle_stage == 'deleted':
         print(f"Restoring deleted experiment: {cfg.mlflow.experiment_name}")
         client.restore_experiment(experiment.experiment_id)
-
     mlflow.set_experiment(cfg.mlflow.experiment_name)
-
     # 環境変数から親Run IDを取得
     parent_run_id = os.environ.get("MLFLOW_PARENT_RUN_ID")
     trial_name = f"trial_{cfg.hydra.job.num}" if "hydra" in cfg and hasattr(cfg.hydra, "job") else None
-
-    # 2. 親ランのコンテキストを開始し、その中で子ラン（Nested Run）を開始
+    # 親ランのコンテキストを開始し、その中で子ラン（Nested Run）を開始
     # contextlib.ExitStackを使ってインデントレベルを維持する
     stack = contextlib.ExitStack()
     if parent_run_id:
@@ -90,14 +64,6 @@ def train(cfg: DictConfig) -> float:
         params = OmegaConf.to_container(cfg, resolve=True)
         feature_cols = params['features'].pop('feature_cols', [])
         cv_summaries = []   # foldごとの期間情報を貯めて、最後にMLflow artifactにする
-        cv_method = cfg.period.method
-        if cv_method in  ["purged_kfold", "cpcv"]:
-            params.update({
-                "cv_method": cv_method,
-                "cv_n_splits": int(cfg.period.n_splits),
-                "cv_pct_embargo": float(cfg.period.pct_embargo),
-                "cv_n_test_chunks": int(getattr(cfg.period, "n_test_chunks", 0)) if hasattr(cfg.period, "n_test_chunks") else 0,
-            })
         mlflow.log_params(params)
         mlflow.log_dict({"feature_cols": feature_cols}, "configs/feature_cols.json")
         print('Start training model ...')
@@ -107,7 +73,7 @@ def train(cfg: DictConfig) -> float:
         meta_df = pd.read_parquet(master_dir / "index_meta.parquet")
         meta_df = meta_df.reset_index(drop=True)
         # ドメイン（戦術/戦略）に応じてフィルタフラグを選択
-        print('Domain: '+cfg.domain.name)
+        print('✅ Domain: '+cfg.domain.name)
         if cfg.domain.name == 'TAC':
             mask = meta_df['is_candidate_tac'] == True
             meta_df = meta_df.rename(columns={
@@ -139,8 +105,9 @@ def train(cfg: DictConfig) -> float:
         
         # --- データ分割・CV ---
         # エンバーゴ（Embargo）日数の設定
+        cv_method = HydraConfig.get().runtime.choices.cv
         embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
-        print('Split: '+cfg.period.method)
+        print(f"✅ Split Method: {cv_method}")
         if cv_method == "fixed":
             # 固定分割（Config指定の期間）
             test_start = pd.to_datetime(cfg.period.test_start_date)
@@ -153,41 +120,31 @@ def train(cfg: DictConfig) -> float:
             train_idx = train_val_meta.index[train_val_meta['date'] < (valid_start - embargo_td)]
             # 1つの分割としてリスト化
             splits = [(train_idx, valid_idx, test_idx, None, None)]
-        elif cv_method in ["purged_kfold", "cpcv"]:
-            samples_info, date_to_indices, dates = prepare_purged_cv_input(train_val_meta)
-            pos_to_date  = pd.Series(dates, index=samples_info.index)  # pos->date
-            if cv_method == "purged_kfold":
-                cv = SimplePurgedKFold(
-                    n_splits=int(cfg.period.n_splits),
-                    samples_info_sets=samples_info,
-                    pct_embargo=float(cfg.period.pct_embargo),
-                )
-            else:
-                cv = SimpleCombinatorialPurgedKFold(
-                    n_splits=int(cfg.period.n_splits),
-                    n_test_splits=int(cfg.period.n_test_chunks),
-                    samples_info_sets=samples_info,
-                    pct_embargo=float(cfg.period.pct_embargo),
-                )
-            cv_input = np.zeros((len(samples_info), 1), dtype=np.float32)
+        else:
+            samples_info, date_to_indices, unique_dates = prepare_purged_cv_input(train_val_meta)
+            pos_to_date = pd.Series(unique_dates, index=np.arange(len(unique_dates)))
+            cv = instantiate(cfg.cv, samples_info_sets=samples_info)
             splits = []
-            for tr_pos, val_pos in cv.split(X=cv_input):
-                tr_dates  = pd.to_datetime(pos_to_date.iloc[tr_pos]).tolist()
-                val_dates = pd.to_datetime(pos_to_date.iloc[val_pos]).tolist()
-                train_idx = pd.Index(np.concatenate([date_to_indices[d] for d in tr_dates]))
-                valid_idx = pd.Index(np.concatenate([date_to_indices[d] for d in val_dates]))
+            cv_input = np.zeros((len(unique_dates), 1)) # posベースのダミー入力
+            for tr_pos, val_pos in cv.split(X=cv_input, groups=unique_dates):
+                tr_dates = unique_dates[tr_pos]
+                val_dates = unique_dates[val_pos]
+                train_idx = pd.Index(np.concatenate([date_to_indices[pd.Timestamp(d)] for d in tr_dates]))
+                valid_idx = pd.Index(np.concatenate([date_to_indices[pd.Timestamp(d)] for d in val_dates]))
                 splits.append((train_idx, valid_idx, None, tr_pos, val_pos))
         
         # --- データロード＆前処理 ---
         # 全特徴量名のロード
         all_features = pd.read_json(master_dir / "feature_names.json", typ='series').tolist()
         # 特徴量の指定
+        features_choice = HydraConfig.get().runtime.choices.features
+        print(f"✅ Feature select: {features_choice}")
         feature_cols = cfg.features.get('feature_cols', all_features)
         feature_cols = list(dict.fromkeys(feature_cols)) # 特徴量の重複排除 (順序保持)
         col_indices = [all_features.index(c) for c in feature_cols]
         cat_cols = cfg.features.get('cat_cols',[])
-        print(f"Features: {len(feature_cols)}")
-        print(f"Cat Features: {len(cat_cols)}")
+        print(f"  - Num of features: {len(feature_cols)}")
+        print(f"  - Num of cat features: {len(cat_cols)}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
         features_mmap = np.memmap(
             master_dir / "features.npy", 
@@ -197,7 +154,7 @@ def train(cfg: DictConfig) -> float:
         )
         
         # --- モデルの学習 ---
-        print(f"Training model: {cfg.model.name}")
+        print(f"✅ Training model: {cfg.model.name}")
         target_col = cfg.target.column
         models = []
         all_results = []
@@ -208,40 +165,10 @@ def train(cfg: DictConfig) -> float:
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
             print(f"Starting Fold {i}...")
             print(f"--- Fold {i} ---")
+            # CVサマリー
             if tr_pos is not None and val_pos is not None:
-                info = summarize_split_for_logging(
-                    fold=i,
-                    tr_pos=tr_pos,
-                    va_pos=val_pos,
-                    pos_to_date=pos_to_date,
-                    timeline_width=100,   # 好みで 80/120/160 など
-                )
-                print(
-                    f"[CV] fold={i} | "
-                    f"TRAIN days={info['train_days']} segs={info['train_segs']} ({info['train_start']}..{info['train_end']}) | "
-                    f"VALID days={info['valid_days']} segs={info['valid_segs']} ({info['valid_start']}..{info['valid_end']})"
-                )
-                print(f"      {info['train_segments_str']}")
-                print(f"      {info['valid_segments_str']}")
-                print(f"      {info['timeline']}")
-                # MLflow metrics
-                mlflow.log_metric("cv_train_days", info["train_days"], step=i)
-                mlflow.log_metric("cv_valid_days", info["valid_days"], step=i)
-                mlflow.log_metric("cv_train_segs", info["train_segs"], step=i)
-                mlflow.log_metric("cv_valid_segs", info["valid_segs"], step=i)
-                # MLflow artifact（後でまとめて保存するために貯める）
-                cv_summaries.append({
-                    "fold": info["fold"],
-                    "train_days": info["train_days"],
-                    "valid_days": info["valid_days"],
-                    "train_segs": info["train_segs"],
-                    "valid_segs": info["valid_segs"],
-                    "train_start": info["train_start"],
-                    "train_end": info["train_end"],
-                    "valid_start": info["valid_start"],
-                    "valid_end": info["valid_end"],
-                    "timeline": info["timeline"],
-                })
+                info = log_split_info(i, tr_pos, val_pos, pos_to_date)
+                cv_summaries.append(info)
             # プリプロセッサのインスタンス化
             prep_params = {
                 "save_dir": ".",
@@ -357,7 +284,10 @@ def train(cfg: DictConfig) -> float:
 
         # 最適化スコアの算出
         if valid_metrics:
-            avg_valid_metrics = np.mean(valid_metrics)
+            mean_ic = np.mean(valid_metrics)
+            std_ic = np.std(valid_metrics)
+            # avg_valid_metrics = np.mean(valid_metrics)
+            avg_valid_metrics = mean_ic - std_ic
         else:
             print("WARNING: No valid metrics (sharpe/corr) found in validation results.")
             avg_valid_sharpe = -1.0

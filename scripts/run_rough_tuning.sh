@@ -95,8 +95,7 @@ print(run.info.run_id)
             features=${FEATURES} \
             target=${TRAIN_TARGET} \
             hparams=${MODEL}_default \
-            hydra/sweeper=optuna \
-            +sweep=${MODEL}_rough \
+            sweep=${MODEL}_rough \
             mlflow.experiment_name="$EXPERIMENT_NAME"
             
         echo "Finished $MODEL ($TARGET)."
