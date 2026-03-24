@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import mlflow
 from torch.utils.data import DataLoader, TensorDataset
 from .base import BaseModelWrapper
+from .pruning import execute_epoch_pruning, log_epoch_metrics
 from .networks.tcn import TCN
 
 class TCNWrapper(BaseModelWrapper):
@@ -20,7 +21,7 @@ class TCNWrapper(BaseModelWrapper):
         self.model = None
         self.history = {'train_loss': [], 'valid_loss': []}
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         # --- [1. 初期化] Early Stopping 用の変数を準備 ---
         patience = self.params.get('early_stopping_patience', 5)     # 何エポック改善がなければ止めるか
         min_delta = self.params.get('min_delta', 0.0) # どの程度の改善を「進歩」とみなすか
@@ -61,7 +62,7 @@ class TCNWrapper(BaseModelWrapper):
         )
         # 回帰ならMSE、分類ならBCE
         criterion = nn.MSELoss(reduction='none') if self.task_type == "regression" else nn.BCEWithLogitsLoss(reduction='none')
-        max_epochs = self.params.get('max_epochs', self.params.get('epochs', 10))
+        max_epochs = self.params.get('max_epochs', self.params.get('max_epochs', 10))
         for epoch in range(max_epochs):
             self.model.train()
             epoch_loss = 0
@@ -103,6 +104,18 @@ class TCNWrapper(BaseModelWrapper):
                     else:
                         counter += 1 # 改善しなかったのでカウントアップ
             tqdm.write(progress_msg)
+            
+            # --- MLflow Logging ---
+            metrics_to_log = {"train_loss": avg_train_loss}
+            if X_valid is not None:
+                metrics_to_log["valid_loss"] = avg_v_loss
+            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+            
+            # --- [5. Epoch Callback (Pruning等) の実行] ---
+            if epoch_callback is not None and X_valid is not None:
+                valid_preds = self.predict(X_valid)
+                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
+            
             # 早期終了の実行
             if counter >= patience:
                 tqdm.write(f"Early stopping triggered at epoch {epoch+1}")

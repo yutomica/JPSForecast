@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from .base import BaseModelWrapper
+from .pruning import execute_epoch_pruning, log_epoch_metrics
 from .networks.ft_transformer import FTTransformer
 
 class FTTransformerWrapper(BaseModelWrapper):
@@ -28,7 +29,7 @@ class FTTransformerWrapper(BaseModelWrapper):
 
         # モデル設定
         self.d_token = params.pop("d_token", 64)
-        self.n_blocks = params.pop("n_blocks", 2)
+        self.n_blocks = params.pop("n_blocks", params.pop("n_layers", 2))
         self.attention_n_heads = params.pop("attention_n_heads", 4)
         self.attention_dropout = params.pop("attention_dropout", 0.1)
         self.ffn_hidden_multiplier = params.pop("ffn_hidden_multiplier", 2.0)
@@ -40,9 +41,9 @@ class FTTransformerWrapper(BaseModelWrapper):
         self.max_epochs = params.pop("max_epochs", 100)
         self.patience = params.pop("patience", 10)
         self.batch_size = params.pop("batch_size", 512)
-        self.lr = params.pop("lr", 1e-3)
+        self.lr = params.pop("lr", params.pop("learning_rate", 1e-3))
         self.weight_decay = params.pop("weight_decay", 1e-5)
-        self.grad_clip_norm = params.pop("grad_clip_norm", 1.0)
+        self.grad_clip_norm = params.pop("grad_clip_norm", params.pop("gradient_clip_val", 1.0))
         self.random_state = params.pop("random_state", 42)
         self.device_name = params.pop(
             "device_name",
@@ -145,7 +146,7 @@ class FTTransformerWrapper(BaseModelWrapper):
 
         return loss_each.mean()
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         if not isinstance(X_train, pd.DataFrame):
             X_train = pd.DataFrame(X_train)
 
@@ -229,6 +230,17 @@ class FTTransformerWrapper(BaseModelWrapper):
             self.history["valid_loss"].append(valid_loss)
 
             tqdm.write(f"Epoch {epoch+1}/{self.max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}")
+
+            # --- MLflow Logging ---
+            metrics_to_log = {"train_loss": train_loss}
+            if valid_loader is not None:
+                metrics_to_log["valid_loss"] = valid_loss
+            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+
+            # --- Epoch Callback (Pruning等) の実行 ---
+            if epoch_callback is not None and X_valid is not None:
+                valid_preds = self.predict(X_valid)
+                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
 
             # ---- early stopping ----
             if valid_loss < best_val_loss:

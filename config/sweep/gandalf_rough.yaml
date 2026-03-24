@@ -1,29 +1,23 @@
 # @package _global_
+defaults:
+  - override /hydra/sweeper: optuna
+interval:
+  tac: 15
+  str: 40
 hydra:
   sweeper:
     # Optunaの設定
     sampler:
-      _target_: optuna.samplers.TPESampler
+      _target_: src.utils.samplers.HydraBruteForceSampler
       seed: 42
     direction: maximize  # ランクICやシャープレシオの最大化
-    n_trials: 50         # 計算負荷と探索効率のバランス（まずは50回）
+    n_trials: 6         # 計算負荷と探索効率のバランス（まずは50回）
     params:
-      # 1. 学習率（Adam/AdamWを想定）
-      hparams.learning_rate: tag(log, interval(1e-4, 0.01))
-      # 2. ネットワークの深さ
-      # 金融データでは深くしすぎると過学習するため、2〜5層が標準的
-      hparams.gflu_stages: int(range(2, 6))
-      # 3. 出力ヘッドのネットワーク規模 (GANDALFにはn_valuesは存在しないためこちらで調整)
-      hparams.head_hidden_dims: choice("[32]", "[64, 32]", "[128, 64]")
-      # 4. 特徴量選択マスクの初期化スパース性（ノイズ対策の鍵）
-      # 0.1〜0.5程度で探索し、不要な特徴量を早期に遮断する
-      hparams.gflu_feature_init_sparsity: interval(0.1, 0.5)
-      # 5. 正則化（GFLU層と出力層で分離）
-      hparams.gflu_dropout: interval(0.0, 0.3)
-      hparams.head_dropout: interval(0.0, 0.3)
-      hparams.weight_decay: tag(log, interval(1e-4, 1e-1))
-      # 6. バッチサイズ
-      # 8GB RAMを考慮し、かつ勾配を安定させるためのスイートスポットを探索
-      hparams.batch_size: choice(512, 1024, 2048)
-      hparams.max_epochs: 10
+      hparams.gflu_stages: choice(4, 6, 10)
+      hparams.head_hidden_dims: choice("[64]", "[128, 64]")
+      hparams.learning_rate: 0.0004
+      hparams.gflu_feature_init_sparsity: 0.1
+      hparams.weight_decay: 0.001
+      hparams.batch_size: 1024
+      hparams.max_epochs: 30
       hparams.patience: 3

@@ -1,8 +1,7 @@
-# config/hparams/tcn_default.yaml
+# config/hparams/tcn_tac_scl.yaml
 # --- ネットワーク構造 ---
 n_layers: 4            # 【更新】受容野と計算負荷のバランス
 num_channel: 32       # 1層あたりのチャネル数（8GB RAMでの安全圏）
-sequence_length: 60    # 【推奨】STRの60日ターゲットに合わせた参照期間
 kernel_size: 3         # 局所的な時間変化を捉える標準的なサイズ
 dilation_base: 2       # 【追加】指数的な受容野拡大のベース
 dropout: 0.3           # 【更新】金融データのノイズ対策として0.2から引き上げ

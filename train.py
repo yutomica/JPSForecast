@@ -25,6 +25,7 @@ from src.preprocess.sampling import apply_sampling
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.ensemble import EnsembleModel
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
+from src.models.pruning import create_pruning_callback
 from src.evaluation import evaluate_metrics, calculate_bin_stats
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
@@ -47,15 +48,28 @@ def train(cfg: DictConfig) -> float:
     mlflow.set_experiment(cfg.mlflow.experiment_name)
     # 環境変数から親Run IDを取得
     parent_run_id = os.environ.get("MLFLOW_PARENT_RUN_ID")
-    trial_name = f"trial_{cfg.hydra.job.num}" if "hydra" in cfg and hasattr(cfg.hydra, "job") else None
+    model_name = cfg.model.get("name", "unknown")
+    target_col = cfg.target.get("name", "unknown")
+    mode = cfg.get("mode", "train")
+    timestamp = datetime.now().strftime("%m%d_%H%M")
+    # 親ラン名: モデル_ターゲット_モード_ドメイン
+    base_run_name = f"{model_name}_{target_col}_{mode}_{timestamp}"
+    # 子ラン名（Trial）: Trial番号_モデル_ドメイン
+    if HydraConfig.initialized() and "job" in HydraConfig.get():
+        trial_num = HydraConfig.get().job.get("num", "0")
+    else:
+        trial_num = "0"
+    trial_run_name = f"Trial_{trial_num}_{model_name}"
+
     # 親ランのコンテキストを開始し、その中で子ラン（Nested Run）を開始
     # contextlib.ExitStackを使ってインデントレベルを維持する
     stack = contextlib.ExitStack()
     if parent_run_id:
+        client.set_tag(parent_run_id, "mlflow.runName", base_run_name)
         stack.enter_context(mlflow.start_run(run_id=parent_run_id))
-        stack.enter_context(mlflow.start_run(run_name=trial_name, nested=True))
+        stack.enter_context(mlflow.start_run(run_name=trial_run_name, nested=True))
     else:
-        stack.enter_context(mlflow.start_run(run_name=trial_name))
+        stack.enter_context(mlflow.start_run(run_name=base_run_name))
 
     with stack:
         mlflow.log_param("model_group", cfg.model.get("group", "unknown"))
@@ -66,14 +80,16 @@ def train(cfg: DictConfig) -> float:
         cv_summaries = []   # foldごとの期間情報を貯めて、最後にMLflow artifactにする
         mlflow.log_params(params)
         mlflow.log_dict({"feature_cols": feature_cols}, "configs/feature_cols.json")
-        print('Start training model ...')
+        print("\n" + "="*60)
+        print('🚀 Start training model...')
+        print("="*60)
 
         # --- データ分割ロジックの構築 ---
         master_dir = Path(cfg.data.path)
         meta_df = pd.read_parquet(master_dir / "index_meta.parquet")
         meta_df = meta_df.reset_index(drop=True)
         # ドメイン（戦術/戦略）に応じてフィルタフラグを選択
-        print('✅ Domain: '+cfg.domain.name)
+        print(f"📊 Domain: {cfg.domain.name}")
         if cfg.domain.name == 'TAC':
             mask = meta_df['is_candidate_tac'] == True
             meta_df = meta_df.rename(columns={
@@ -82,7 +98,7 @@ def train(cfg: DictConfig) -> float:
                 'Future_Close_Tac':'Future_Close',
             })
             horizon = 5  # 5日間の予測期間
-            interval = 5
+            interval = cfg.get("interval", {}).get("tac", 5)
         else:
             mask = meta_df['is_candidate_str'] == True
             meta_df = meta_df.rename(columns={
@@ -91,13 +107,13 @@ def train(cfg: DictConfig) -> float:
                 'Future_Close_Str':'Future_Close',
             })
             horizon = 60 # 60日間の予測期間
-            interval = 20
+            interval = cfg.get("interval", {}).get("str", 20)
         
         # --- サンプリング ---
         # ユニバース選定
         train_val_meta = meta_df[mask].copy()
         if train_val_meta.empty:
-            print(f"WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score -999.0.")
+            print(f"⚠️ WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score -999.0.")
             return -999.0
         # 日付間引き
         train_val_meta = add_t1_column(train_val_meta, horizon)
@@ -107,7 +123,7 @@ def train(cfg: DictConfig) -> float:
         # エンバーゴ（Embargo）日数の設定
         cv_method = HydraConfig.get().runtime.choices.cv
         embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
-        print(f"✅ Split Method: {cv_method}")
+        print(f"🪓 Split Method: {cv_method}")
         if cv_method == "fixed":
             # 固定分割（Config指定の期間）
             test_start = pd.to_datetime(cfg.period.test_start_date)
@@ -138,13 +154,13 @@ def train(cfg: DictConfig) -> float:
         all_features = pd.read_json(master_dir / "feature_names.json", typ='series').tolist()
         # 特徴量の指定
         features_choice = HydraConfig.get().runtime.choices.features
-        print(f"✅ Feature select: {features_choice}")
+        print(f"🧬 Feature select: {features_choice}")
         feature_cols = cfg.features.get('feature_cols', all_features)
         feature_cols = list(dict.fromkeys(feature_cols)) # 特徴量の重複排除 (順序保持)
         col_indices = [all_features.index(c) for c in feature_cols]
         cat_cols = cfg.features.get('cat_cols',[])
-        print(f"  - Num of features: {len(feature_cols)}")
-        print(f"  - Num of cat features: {len(cat_cols)}")
+        print(f"  - Num of features: {len(feature_cols):,}")
+        print(f"  - Num of cat features: {len(cat_cols):,}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
         features_mmap = np.memmap(
             master_dir / "features.npy", 
@@ -154,17 +170,17 @@ def train(cfg: DictConfig) -> float:
         )
         
         # --- モデルの学習 ---
-        print(f"✅ Training model: {cfg.model.name}")
+        print(f"🤖 Training model: {cfg.model.name}")
         target_col = cfg.target.column
         models = []
         all_results = []
         valid_metrics = []
         # スクリーニング結果格納用
+        all_fold_mda_values = []
         all_fold_shap_values = []
         fold_pipelines = []
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
-            print(f"Starting Fold {i}...")
-            print(f"--- Fold {i} ---")
+            print(f"\n{'-'*25} Fold {i} {'-'*25}")
             # CVサマリー
             if tr_pos is not None and val_pos is not None:
                 info = log_split_info(i, tr_pos, val_pos, pos_to_date)
@@ -187,7 +203,7 @@ def train(cfg: DictConfig) -> float:
                 model_meta_params['cat_dims'] = preprocessor.cat_dims
             full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
             full_params.update(model_meta_params)
-            print(f" Fitting on Fold {i} using fit (Sampling 100k)")
+            print(f"  🔹 Fitting preprocessor (Sampling 100k)...")
             sample_data = features_mmap[:100000, col_indices]
             preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
             # ウェイトの計算 (weights.py のロジックを使用)
@@ -198,7 +214,7 @@ def train(cfg: DictConfig) -> float:
                 w_train *= calculate_time_decay_weights(meta_df.loc[train_idx, 'date'], decay_rate=decay_rate)
             w_train *= calculate_sample_weights(meta_df.loc[train_idx, 'log_market_cap'].values, cfg.domain.name)
             # memmap から必要な行のみを読み出し
-            print(f" Transforming data for Fold {i}")
+            print(f"  🔹 Transforming data...")
             X_train = preprocessor.transform(features_mmap, row_indices=train_idx, col_indices=col_indices)
             X_valid = preprocessor.transform(features_mmap, row_indices=valid_idx, col_indices=col_indices)
             y_train = meta_df.loc[train_idx, target_col].values
@@ -206,16 +222,40 @@ def train(cfg: DictConfig) -> float:
             if test_idx is None or len(test_idx) == 0:
                 X_test = None
                 y_test = None
-                print(f" Samples: Train={len(X_train)}, Valid={len(X_valid)}")
+                print(f"  🔹 Samples: Train={len(X_train):,}, Valid={len(X_valid):,}")
             else:
                 X_test = preprocessor.transform(features_mmap, row_indices=test_idx, col_indices=col_indices)
                 y_test = meta_df.loc[test_idx, target_col].values
-                print(f" Samples: Train={len(X_train)}, Valid={len(X_valid)}, Test={len(X_test)}")
+                print(f"  🔹 Samples: Train={len(X_train):,}, Valid={len(X_valid):,}, Test={len(X_test):,}")
             # モデルのインスタンス化と学習
             model_class = get_class(cfg.model.model_target)
             model = model_class(task_type=cfg.target.task_type, **full_params)
-            print(f" Training model ...")
-            model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
+            # --- エポック単位の枝刈り用コールバックの設定 (Sweep時) ---
+            # 各Foldのエポックにおいて、それまでのFoldの確定スコアと
+            # 現在のエポックスコアの平均（蓄積スコア）を計算して判定する
+            # fit_kwargs = {}
+            # is_sweep = HydraConfig.get().runtime.choices.get("sweep") not in [None, "null"]
+            # if is_sweep:
+            #     total_epochs = cfg.hparams.get("max_epochs", cfg.hparams.get("num_boost_round", 1000))
+            #     fit_kwargs["epoch_callback"] = create_pruning_callback(
+            #         client=client, 
+            #         experiment_id=experiment.experiment_id, 
+            #         parent_run_id=parent_run_id,
+            #         fold_idx=i,
+            #         past_fold_scores=valid_metrics.copy(),
+            #         n_startup_trials=30, 
+            #         warmup_ratio=0.3,  # 各Foldの3割終了時点から枝刈り開始
+            #         total_epochs=total_epochs
+            #     )
+            print(f"  🔹 Training model...")
+            try:
+                # model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i, **fit_kwargs)
+                model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
+            except optuna.exceptions.TrialPruned:
+                print(f"  ✂️  Trial pruned at Fold {i}. Stopping trial and returning -999.0.")
+                mlflow.log_metric("avg_valid_metrics", -999.0)
+                return -999.0
+                
             # 予測の実行
             preds = {
                 'train': model.predict(X_train),
@@ -225,7 +265,7 @@ def train(cfg: DictConfig) -> float:
 
             # --- 特徴量スクリーニングロジック ---
             if cfg.get("mode") == "feature_screening":
-                print(f" [Screening] Calculating SHAP for Fold {i}...")
+                print(f"  🔹 [Screening] Calculating SHAP for Fold {i}...")
                 # SHAP算出 (Validデータからサンプリングして計算負荷軽減)
                 explainer = shap.TreeExplainer(model.model)
                 shap_values = explainer.shap_values(X_valid)
@@ -236,17 +276,43 @@ def train(cfg: DictConfig) -> float:
                 all_fold_shap_values.append(abs_shap)
 
             # メトリクス算出 (Train / Valid / Test)
+            valid_ic = None
             for phase in ['train', 'valid', 'test']:
                 if preds[phase] is not None:
+                    idx = locals()[f'{phase}_idx']
                     y_true = locals()[f'y_{phase}']
-                    m = evaluate_metrics(y_true, preds[phase], task_type=cfg.target.task_type)
+                    # 評価用ICの計算対象として生リターン（Future_Close）を取得
+                    y_ret = meta_df.loc[idx, 'Future_Close'].values
+                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type)
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
                     # ValidのSharpe Ratioを収集
-                    if cfg.target.task_type == 'regression' and phase == 'valid':
+                    if phase == 'valid':
                         valid_metrics.append(m['ic'])
-                    if cfg.target.task_type == 'classification' and phase == 'valid':
-                        valid_metrics.append(m['auc'])
+                        valid_ic = m['ic']
+            # 特徴量精査 (MDA) ロジックの追加
+            if cfg.get("mode") == "feature_select":
+                print(f"  🔹 [Selection] Calculating MDA for Fold {i}...")
+                # ベースライン精度の取得 (ValidデータのIC)
+                baseline_score = valid_ic
+                fold_mda = {}
+                y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values
+                # 各特徴量を順番にシャッフルして精度低下を測定
+                for col_idx, col_name in enumerate(feature_cols):
+                    # メモリ節約のため、破壊的な変更を避けコピーを作成
+                    X_valid_permuted = X_valid.copy()
+                    # 対象の特徴量列のみをシャッフル
+                    if isinstance(X_valid_permuted, pd.DataFrame):
+                        X_valid_permuted.iloc[:, col_idx] = np.random.permutation(X_valid_permuted.iloc[:, col_idx].values)
+                    else:
+                        np.random.shuffle(X_valid_permuted[:, col_idx])
+                    # シャッフル後のデータで予測
+                    p_permuted = model.predict(X_valid_permuted)
+                    m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=cfg.target.task_type)
+                    permuted_score = m_permuted['ic']
+                    # 精度低下幅を記録 (MDA)
+                    fold_mda[col_name] = baseline_score - permuted_score
+                all_fold_mda_values.append(fold_mda)
             # ビン分析用データの蓄積 
             # メタデータ(Future_High/Low/Close)を含めてDataFrame化
             for phase in ['valid', 'test']:
@@ -281,16 +347,25 @@ def train(cfg: DictConfig) -> float:
                 shap_df.to_csv(output_filename)
                 mlflow.log_artifact(output_filename)
                 print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
-
+        # MDA (Feature Sharpe) の集計と保存 ---
+        if cfg.get("mode") == "feature_select" and all_fold_mda_values:
+            mda_df = pd.DataFrame(all_fold_mda_values) # rows=folds, cols=features
+            output_filename = f"feature_sharpe_{cfg.model.name}_{cfg.domain.name}_{cfg.target.name}.csv"
+            mda_df.to_csv(output_filename)
+            mlflow.log_artifact(output_filename)
+            print(f"✅ Feature Sharpe results saved to {output_filename} (Group Threshold check needed).")
         # 最適化スコアの算出
         if valid_metrics:
-            mean_ic = np.mean(valid_metrics)
-            std_ic = np.std(valid_metrics)
-            # avg_valid_metrics = np.mean(valid_metrics)
+            # nan を無視して平均と標準偏差を計算する
+            mean_ic = np.nanmean(valid_metrics)
+            std_ic = np.nanstd(valid_metrics)
             avg_valid_metrics = mean_ic - std_ic
+            # すべてが nan だった場合（定数予測など）のフォールバック
+            if np.isnan(avg_valid_metrics):
+                avg_valid_metrics = -1.0
         else:
-            print("WARNING: No valid metrics (sharpe/corr) found in validation results.")
-            avg_valid_sharpe = -1.0
+            print("⚠️ WARNING: No valid metrics (sharpe/corr) found in validation results.")
+            avg_valid_metrics = -1.0
         mlflow.log_metric("avg_valid_metrics", avg_valid_metrics)
         
 
@@ -358,7 +433,9 @@ def train(cfg: DictConfig) -> float:
                 
             print("✅ All artifacts have been bundled into a ZIP file and uploaded to MLflow.")
         
-        print(f"✅ Trial finished. Score: {avg_valid_metrics}")
+        print("\n" + "="*60)
+        print(f"🎯 Trial finished. Score: {avg_valid_metrics:.6f}")
+        print("="*60 + "\n")
         return float(avg_valid_metrics)
 
 @hydra.main(version_base=None, config_path="config", config_name="main")

@@ -4,10 +4,38 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import mlflow
 from .base import BaseModelWrapper
+from .pruning import execute_epoch_pruning, log_epoch_metrics
 import torch
 from pytorch_tabnet.tab_model import TabNetClassifier, TabNetRegressor
 from pytorch_tabnet.callbacks import Callback
 from pytorch_tabnet.pretraining import TabNetPretrainer
+
+class MLflowAndPruningCallback(Callback):
+    def __init__(self, wrapper, X_val, y_val, cb, m_idx):
+        super().__init__()
+        self.wrapper = wrapper
+        self.X_val = X_val
+        self.y_val = y_val
+        self.cb = cb
+        self.m_idx = m_idx
+    def on_epoch_end(self, epoch, logs=None):
+        if self.cb is not None and self.X_val is not None:
+            preds = self.wrapper.predict(self.X_val)
+            execute_epoch_pruning(self.cb, epoch, preds, self.y_val)
+        if logs is not None:
+            metrics = {}
+            if 'loss' in logs: metrics['train_loss'] = logs['loss']
+            for k, v in logs.items():
+                if k.startswith('valid_'):
+                    metrics[k] = v
+            if metrics:
+                log_epoch_metrics(self.m_idx, epoch, metrics)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # cb (epoch_callback) はローカル関数のため、pickle化できずエラーになるのを防ぐ
+        state['cb'] = None
+        return state
 
 class TabNetWrapper(BaseModelWrapper):
     def __init__(self, task_type="regression", **params):
@@ -20,7 +48,7 @@ class TabNetWrapper(BaseModelWrapper):
         self.params = params
         self.model = None
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         # モデル初期化
         # cat_idxs と cat_dims を idx の昇順で並び替える
         sorted_cats = sorted(zip(self.cat_idxs, self.cat_dims))
@@ -53,6 +81,12 @@ class TabNetWrapper(BaseModelWrapper):
             y_train_fit = y_train.reshape(-1, 1)
             y_valid_fit = y_valid.reshape(-1, 1) if y_valid is not None else None
             
+        self.model = model
+
+        # --- Epoch Callback (Pruning等) と MLflow Logging の準備 ---
+        callbacks = []
+        callbacks.append(MLflowAndPruningCallback(self, X_valid, y_valid, epoch_callback, model_idx))
+
         # --- 事前学習 (Pretraining) ---
         if self.use_pretrain:
             print("  Pretraining...")
@@ -77,6 +111,7 @@ class TabNetWrapper(BaseModelWrapper):
             )
             # 事前学習の重みを適用
             model = TabNetClassifier(**common_params) if self.task_type == "classification" else TabNetRegressor(**common_params)
+            self.model = model
             model.fit(
                 X_train=X_train.values, y_train=y_train_fit,
                 eval_set=[(X_valid.values, y_valid_fit)],
@@ -89,7 +124,8 @@ class TabNetWrapper(BaseModelWrapper):
                 num_workers=0,
                 weights=sample_weight.flatten() if sample_weight is not None else 0,
                 drop_last=False,
-                from_unsupervised=pretrainer
+                from_unsupervised=pretrainer,
+                callbacks=callbacks
             )
         else:
             # 通常学習
@@ -104,10 +140,10 @@ class TabNetWrapper(BaseModelWrapper):
                 virtual_batch_size=128,
                 num_workers=0,
                 weights=sample_weight.flatten() if sample_weight is not None else 0,
-                drop_last=False
+                drop_last=False,
+                callbacks=callbacks
             )
 
-        self.model = model
         # 学習曲線のロギング
         self._log_learning_curve(model_idx)
         # 特徴量重要度のロギング

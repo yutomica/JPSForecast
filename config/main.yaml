@@ -9,6 +9,7 @@ defaults:
   - period: tac_standard
   - cv: fixed
   - sweep: null
+  - mode: null 
   - _self_
 
 # MLflow設定（全実験共通）

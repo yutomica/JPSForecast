@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import mlflow
 from .base import BaseModelWrapper
+from .pruning import execute_epoch_pruning, log_epoch_metrics
 from .networks.gandalf import GANDALFNet
 
 
@@ -46,7 +47,7 @@ class GANDALFWrapper(BaseModelWrapper):
         self.feature_names_ = None
         self.is_binary_classification = task_type == "classification"
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         X_train_np, train_feature_names = self._to_numpy_features(X_train)
         if X_train_np is None or len(X_train_np) == 0:
             raise ValueError("X_train is empty.")
@@ -61,27 +62,19 @@ class GANDALFWrapper(BaseModelWrapper):
         batch_size = int(self.params.get("batch_size", 1024))
         max_epochs = int(self.params.get("max_epochs", 100))
         patience = int(self.params.get("patience", 10))
-        learning_rate = float(
-            self.params.get(
-                "learning_rate",
-                self.params.get("lr", self.params.get("optimizer_params", {}).get("lr", 1e-3)),
-            )
-        )
+        learning_rate = float(self.params.get("lr", self.params.get("learning_rate", 1e-3)))
         weight_decay = float(self.params.get("weight_decay", 1e-5))
-        gradient_clip_val = float(self.params.get("gradient_clip_val", 1.0))
+        gradient_clip_val = float(self.params.get("gradient_clip_val", self.params.get("grad_clip_norm", 1.0)))
         num_workers = int(self.params.get("num_workers", 0))
 
-        gflu_stages = int(self.params.get("gflu_stages", 6))
+        gflu_stages = int(self.params.get("gflu_stages", self.params.get("n_blocks", self.params.get("n_layers", 6))))
         gflu_dropout = float(self.params.get("gflu_dropout", 0.0))
         feature_init_sparsity = float(
-            self.params.get(
-                "gflu_feature_init_sparsity",
-                self.params.get("feature_init_sparsity", 0.3),
-            )
+            self.params.get("feature_init_sparsity", self.params.get("gflu_feature_init_sparsity", 0.3))
         )
         learnable_sparsity = bool(self.params.get("learnable_sparsity", True))
         head_hidden_dims = self._normalize_hidden_dims(
-            self.params.get("head_hidden_dims", self.params.get("head_dims", [128, 64]))
+            self.params.get("head_hidden_dims", self.params.get("head_dims", self.params.get("hidden_dims", [128, 64])))
         )
         head_dropout = float(self.params.get("head_dropout", self.params.get("dropout", 0.1)))
 
@@ -160,6 +153,17 @@ class GANDALFWrapper(BaseModelWrapper):
             self.history["valid_loss"].append(valid_loss)
 
             tqdm.write(f"Epoch {epoch+1}/{max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}")
+            
+            # --- MLflow Logging ---
+            metrics_to_log = {"train_loss": train_loss}
+            if X_valid_np is not None:
+                metrics_to_log["valid_loss"] = valid_loss
+            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+            
+            # --- Epoch Callback (Pruning等) の実行 ---
+            if epoch_callback is not None and X_valid is not None:
+                valid_preds = self.predict(X_valid)
+                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid_np)
 
             if valid_loss < best_metric - 1e-8:
                 best_metric = valid_loss

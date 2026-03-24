@@ -1,0 +1,48 @@
+#!/bin/bash
+# run_feature_select_by_models.sh
+
+set -e
+
+# MLflowのバックエンドをtrain.pyと合わせる
+export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
+export exp_name="Feature_Selection"
+
+# 特徴量選択（MDA）実行用の共通関数
+run_feature_select() {
+    local domain=$1
+    local model=$2
+    local target=$3
+    local features=$4
+    local hparams=$5
+
+    echo "============================================================"
+    echo "Starting Feature Selection: $model ($domain)"
+    echo "============================================================"
+
+    python train.py \
+        domain=${domain} \
+        target=${target} \
+        data=master \
+        features=${features} \
+        model=${model} \
+        hparams=${hparams} \
+        period=${domain}_standard \
+        cv=purged_kfold \
+        mlflow.experiment_name="${exp_name}" \
+        +mode=feature_select
+        
+    echo "Finished Feature Selection for $model ($domain)."
+    echo ""
+}
+
+# --- TAC (戦術モデル) ---
+run_feature_select "tac" "lgbm"    "tac_rank"                "features_tac_LGBM_rough"        "lgbm_tac_rnk"    
+run_feature_select "tac" "tabnet"  "tac_rank"                "features_tac_TabNet_rough"      "tabnet_tac_rnk"  
+run_feature_select "tac" "gandalf" "tac_rank"                "features_tac_DeepTabular_rough" "gandalf_tac_rnk" 
+run_feature_select "tac" "lgbm"    "tac_gauss_rank"          "features_tac_LGBM_rough"        "lgbm_tac_rnk" 
+run_feature_select "tac" "tabnet"  "tac_gauss_rank"          "features_tac_TabNet_rough"      "tabnet_tac_rnk" 
+run_feature_select "tac" "gandalf" "tac_gauss_rank"          "features_tac_DeepTabular_rough" "gandalf_tac_rnk" 
+run_feature_select "tac" "lgbm"    "tac_tb_strategy_a"       "features_tac_LGBM_rough"        "lgbm_tac_tpb" 
+run_feature_select "tac" "tcn"     "tac_vol_scaled_residual" "features_tac_TimeSeries_rough"  "tcn_tac_scl" 
+run_feature_select "str" "lgbm"    "str_rank"                "features_str_LGBM_rough"        "lgbm_str_rnk"    
+run_feature_select "str" "lgbm"    "str_peer_alpha"          "features_str_LGBM_rough"        "lgbm_str_rnk"    

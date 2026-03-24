@@ -1,6 +1,4 @@
 # config/hparams/lgbm_default.yaml
-objective: "regression"
-metric: "rmse"
 boosting_type: "gbdt"
 n_jobs: -1
 random_state: 42

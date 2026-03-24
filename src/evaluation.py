@@ -3,15 +3,24 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
 from scipy.stats import spearmanr
 
-def evaluate_metrics(y_true, y_pred, task_type='regression'):
+def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression'):
     """基本メトリクスの算出"""
     metrics = {}
-    if task_type == 'regression':
-        metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
-        # 金融MLで重要なIC(ランク相関)を追加
-        metrics['ic'], _ = spearmanr(y_true, y_pred)
-    else:
+    # 金融MLで重要なIC(ランク相関)をタスクに関わらず追加
+    # y_ret が指定されている場合は予測スコアと生リターン(y_ret)の相関を計算する
+    target_for_ic = y_ret if y_ret is not None else y_true
+    metrics['ic'], _ = spearmanr(target_for_ic, y_pred)
+    
+    if task_type == 'classification':
         metrics['auc'] = roc_auc_score(y_true, y_pred)
+    elif task_type == 'multiclass':
+        try:
+            # スコア化（負の値を含む）されている場合はエラーを回避
+            metrics['logloss'] = log_loss(y_true, y_pred)
+        except ValueError:
+            metrics['logloss'] = np.nan
+    else:
+        metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
     return metrics
 
 def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression',metadata_cols=None, n_bins=10):

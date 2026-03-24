@@ -1,28 +1,27 @@
 # @package _global_
+defaults:
+  - override /hydra/sweeper: optuna
+interval:
+  tac: 15
+  str: 40
 hydra:
   sweeper:
     # Optunaの設定
     sampler:
-      _target_: optuna.samplers.TPESampler
+      _target_: src.utils.samplers.HydraBruteForceSampler
       seed: 42
     direction: maximize  # ランクICやシャープレシオの最大化
-    n_trials: 40         # 計算負荷を考慮し、まずは40回程度で「山」を探る
+    n_trials: 12         # 計算負荷を考慮し、まずは40回程度で「山」を探る
     params:
-      # 1. 学習率（バッチサイズ拡大に伴い上限を少し広げる）
-      hparams.lr: tag(log, interval(5e-5, 1e-3))
-      # 2. ネットワークの深さと幅（8GB RAMでのOOMを回避する限界設定）
-      # d_tokenはn_headsで割り切れる必要がある（ここではn_heads=8を想定）
-      hparams.n_blocks: int(range(1, 4))
+      hparams.n_blocks: choice(1,2,3,4)
       hparams.d_token: choice(32, 64, 96)
-      # 3. Feed-Forward Network (FFN) の拡大係数（過学習を防ぐため2.0を上限に）
-      hparams.ffn_hidden_multiplier: interval(1.0, 2.0)
-      # 4. 強力な正則化（金融MLの低S/N比対策）
-      hparams.attention_dropout: interval(0.1, 0.5)
-      hparams.ffn_dropout: interval(0.1, 0.5)
-      hparams.residual_dropout: interval(0.0, 0.3)
-      hparams.head_dropout: interval(0.0, 0.3)
-      # 5. 重み減衰（Weight Decay）
-      hparams.weight_decay: tag(log, interval(1e-4, 1e-1))
-      # 6. バッチサイズ
-      # 金融MLでは勾配の分散を抑えるため、メモリの許す範囲で大きめを設定
-      hparams.batch_size: choice(256, 512, 1024)
+      # 1. 学習率（バッチサイズ拡大に伴い上限を少し広げる）
+      hparams.lr: 0.0001
+      hparams.attention_dropout: 0.1
+      hparams.ffn_dropout: 0.1
+      hparams.residual_dropout: 0.1
+      hparams.head_dropout: 0.1
+      hparams.weight_decay: 1e-5
+      hparams.batch_size: 512
+      hparams.max_epochs: 10
+      hparams.patience: 3

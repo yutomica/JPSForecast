@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from .base import BaseModelWrapper
+from .pruning import execute_epoch_pruning, log_epoch_metrics
 from .nbeats_model import NBeatsClassifier, NBeatsRegressor
 
 
@@ -28,7 +29,7 @@ class NBeatsWrapper(BaseModelWrapper):
         self.input_shape_ = None
         self.feature_importances_ = None
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         X_train_np = self._to_numpy(X_train).astype(np.float32)
         X_valid_np = self._to_numpy(X_valid).astype(np.float32) if X_valid is not None else None
         y_train_np = np.asarray(y_train, dtype=np.float32).reshape(-1)
@@ -115,6 +116,17 @@ class NBeatsWrapper(BaseModelWrapper):
                     scheduler.step(metric_to_monitor)
                 else:
                     scheduler.step()
+
+            # --- MLflow Logging ---
+            metrics_to_log = {"train_loss": train_loss}
+            if valid_loader is not None:
+                metrics_to_log["valid_loss"] = valid_loss
+            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+
+            # --- Epoch Callback (Pruning等) の実行 ---
+            if epoch_callback is not None and X_valid is not None:
+                valid_preds = self.predict(X_valid)
+                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid_np)
 
             if metric_to_monitor < best_metric:
                 best_metric = metric_to_monitor

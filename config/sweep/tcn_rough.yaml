@@ -1,28 +1,27 @@
 # @package _global_
+defaults:
+  - override /hydra/sweeper: optuna
+interval:
+  tac: 20
+  str: 60
 hydra:
   sweeper:
-    # Optunaの設定
     sampler:
-      _target_: optuna.samplers.TPESampler
+      _target_: src.utils.samplers.HydraBruteForceSampler
       seed: 42
-    direction: maximize  # ランクICやリスク調整後リターンの最大化
-    n_trials: 40
+    direction: maximize
+    n_trials: 36
     params:
-      # 1. 学習率（CNN系は勾配爆発/消失が起きやすいため、対数スケールで慎重に）
-      hparams.lr: tag(log, interval(1e-4, 1e-2))
-      # 2. モデルの幅（チャネル数）：8GB RAMではここが最大のボトルネック
-      # 130個の特徴量を集約するため、16〜64の範囲で十分機能する
-      hparams.num_channel: choice(16, 32, 64)
-      # 3. 受容野の設計（カーネルサイズと階層数）
-      # 金融時系列の局所パターンを捉えるために3または5が標準的
-      hparams.kernel_size: choice(2, 3, 5)
-      hparams.n_layers: int(range(2, 5)) # ネットワークの深さ
-      # 4. 正則化（金融MLの生命線：DropoutとWeight Decay）
-      # TCNは過学習しやすいため、高めのDropout率を探索範囲に含める
-      hparams.dropout: interval(0.1, 0.5)
-      hparams.weight_decay: tag(log, interval(1e-5, 1e-2))
-      hparams.gradient_clip_val: choice(0.1, 0.5)
-      # 6. バッチサイズ
-      hparams.batch_size: choice(512, 1024)
-      hparams.epochs: 10
+      # --- アーキテクチャ・アンカー (Grid Search) ---
+      hparams.n_layers: choice(3, 4, 5)
+      hparams.num_channel: choice(32, 64)
+      hparams.kernel_size: choice(3, 5)
+      model.window_size.tac: choice(20, 40, 90)
+      # --- 学習の安定化用固定値 (ノイズを排除) ---
+      hparams.lr: 0.001
+      hparams.dropout: 0.2
+      hparams.weight_decay: 1e-4
+      hparams.batch_size: 1024
+      # 固定値
+      hparams.max_epochs: 30
       hparams.early_stopping_patience: 3
