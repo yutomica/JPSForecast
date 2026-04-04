@@ -16,7 +16,7 @@ hydra:
       hparams.n_layers: choice(3, 4, 5)
       hparams.num_channel: choice(32, 64)
       hparams.kernel_size: choice(3, 5)
-      model.window_size.tac: choice(20, 40, 90)
+      model.window_size.str: choice(90, 126, 252)
       # --- 学習の安定化用固定値 (ノイズを排除) ---
       hparams.lr: 0.001
       hparams.dropout: 0.2

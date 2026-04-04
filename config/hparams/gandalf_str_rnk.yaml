@@ -1,0 +1,18 @@
+
+gflu_stages: 6
+gflu_dropout: 0.1
+gflu_feature_init_sparsity: 0.1
+learnable_sparsity: true
+
+head_hidden_dims: [64]
+head_dropout: 0.20
+
+learning_rate: 0.0004
+weight_decay: 0.0002
+batch_size: 1024
+max_epochs: 50
+patience: 3
+random_state: 42
+use_time_decay: false
+time_decay_rate: 0.9999
+device_name: "cpu"

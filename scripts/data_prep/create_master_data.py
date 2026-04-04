@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import glob
 import mlflow
+from mlflow.tracking import MlflowClient
 import gc
 from scipy.special import erfinv
 from tqdm import tqdm
@@ -86,12 +87,16 @@ def main(mode = "full"):
         experiment_name = "Sample_Data_Creation"
     else:
         experiment_name = "Master_Data_Creation"
-    existing_exp = mlflow.get_experiment_by_name(experiment_name)
+    client = MlflowClient()
+    existing_exp = client.get_experiment_by_name(experiment_name)
     if existing_exp is None:
         mlflow.create_experiment(
             name=experiment_name,
             artifact_location=f"file://{abs_path}"
         )
+    elif existing_exp.lifecycle_stage == 'deleted':
+        print(f"Restoring deleted experiment: {experiment_name}")
+        client.restore_experiment(existing_exp.experiment_id)
     mlflow.set_experiment(experiment_name)
 
     raw_buffer_df = pd.DataFrame()

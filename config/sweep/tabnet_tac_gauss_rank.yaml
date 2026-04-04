@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - override /hydra/sweeper: optuna
+hydra:
+  sweeper:
+    # Optunaの設定
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+      multivariate: true
+    direction: maximize  # Sharpe Ratioなどを最大化
+    n_trials: 30       # 最適化のため試行回数を増加
+    params:
+      # 探索空間を広く定義し、ベイズ最適化（TPE）を適用
+      hparams.optimizer_params.lr: tag(log, interval(1e-3, 3e-2))
+      hparams.gamma: interval(1.2, 1.5)
+      hparams.lambda_sparse: tag(log, interval(1e-6, 1e-2))
+      hparams.use_pretrain: False

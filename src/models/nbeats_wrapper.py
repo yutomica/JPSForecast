@@ -1,5 +1,6 @@
 import copy
 import os
+import io
 from typing import Dict, Optional
 
 import joblib
@@ -206,6 +207,43 @@ class NBeatsWrapper(BaseModelWrapper):
             self.model = NBeatsRegressor(**model_kwargs).to(self.device)
         self.model.load_state_dict(state["model_state_dict"])
         self.history = state.get("history", {"train_loss": [], "valid_loss": []})
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if "model" in state and state["model"] is not None:
+            buffer = io.BytesIO()
+            torch.save(self.model.state_dict(), buffer)
+            state["model_state_dict"] = buffer.getvalue()
+            del state["model"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "model_state_dict" in state:
+            input_size = int(np.prod(self.input_shape_))
+            model_kwargs = {
+                "input_size": input_size,
+                "forecast_size": 1,
+                "stack_type": self.params.get("stack_type", "generic"),
+                "n_stacks": int(self.params.get("n_stacks", 3)),
+                "n_blocks_per_stack": int(self.params.get("n_blocks_per_stack", 3)),
+                "n_layers": int(self.params.get("n_layers", 4)),
+                "hidden_size": int(self.params.get("hidden_size", 256)),
+                "theta_size": int(self.params.get("theta_size", 64)),
+                "dropout": float(self.params.get("dropout", 0.0)),
+                "activation": self.params.get("activation", "relu"),
+                "trend_degree": int(self.params.get("trend_degree", 2)),
+                "n_harmonics": int(self.params.get("n_harmonics", 8)),
+                "share_weights_in_stack": bool(self.params.get("share_weights_in_stack", False)),
+            }
+            if self.task_type == "classification":
+                self.model = NBeatsClassifier(**model_kwargs).to(self.device)
+            else:
+                self.model = NBeatsRegressor(**model_kwargs).to(self.device)
+                
+            buffer = io.BytesIO(state["model_state_dict"])
+            self.model.load_state_dict(torch.load(buffer, map_location=self.device))
+            del self.__dict__["model_state_dict"]
 
     def _build_dataloader(self, X, y, sample_weight, batch_size, shuffle=False):
         X_tensor = torch.from_numpy(X)

@@ -153,6 +153,44 @@ class FTTransformerWrapper(BaseModelWrapper):
         if X_valid is not None and not isinstance(X_valid, pd.DataFrame):
             X_valid = pd.DataFrame(X_valid)
 
+        y_train_np = np.asarray(y_train)
+
+        # --- データクレンジング (NaN / Inf の確実な除去とウェイトの正値化) ---
+        train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
+        train_mask &= ~X_train.isna().any(axis=1).values
+        X_train_num = X_train.select_dtypes(include=[np.number]).to_numpy(copy=False)
+        if X_train_num.shape[1] > 0:
+            train_mask &= ~np.isinf(X_train_num).any(axis=1)
+
+        if sample_weight is not None:
+            sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
+            sample_weight = np.clip(sample_weight, 0.0, None)
+            train_mask &= (sample_weight > 0)
+
+        dropped_train = len(y_train_np) - np.sum(train_mask)
+        if dropped_train > 0:
+            print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
+
+        X_train = X_train.iloc[train_mask]
+        y_train = y_train_np[train_mask]
+        if sample_weight is not None:
+            sample_weight = sample_weight[train_mask]
+
+        if X_valid is not None and y_valid is not None:
+            y_valid_np = np.asarray(y_valid)
+            valid_mask = ~np.isnan(y_valid_np) & ~np.isinf(y_valid_np)
+            valid_mask &= ~X_valid.isna().any(axis=1).values
+            X_valid_num = X_valid.select_dtypes(include=[np.number]).to_numpy(copy=False)
+            if X_valid_num.shape[1] > 0:
+                valid_mask &= ~np.isinf(X_valid_num).any(axis=1)
+            
+            dropped_valid = len(y_valid_np) - np.sum(valid_mask)
+            if dropped_valid > 0:
+                print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf.")
+            
+            X_valid = X_valid.iloc[valid_mask]
+            y_valid = y_valid_np[valid_mask]
+
         self._build_model(X_train)
 
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -340,3 +378,57 @@ class FTTransformerWrapper(BaseModelWrapper):
                 outputs.append(preds.detach().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).flatten()
+
+    def __getstate__(self):
+        """joblib/pickleで保存する際に呼ばれる"""
+        state = self.__dict__.copy()
+        # シリアライズできないモデルオブジェクトを削除し、代わりにstate_dictを保存
+        if "model" in state and state["model"] is not None:
+            state["_model_state_dict"] = {k: v.cpu() for k, v in state["model"].state_dict().items()}
+            del state["model"]
+        return state
+
+    def __setstate__(self, state):
+        """joblib/pickleで読み込む際に呼ばれる"""
+        model_state = state.pop("_model_state_dict", None)
+        self.__dict__.update(state)
+        
+        # モデルの再構築
+        if model_state is not None:
+            # _build_modelを呼び出すためにダミーのDataFrameを作成
+            # 特徴量名とカテゴリカルインデックスが復元されていることが前提
+            dummy_df = pd.DataFrame(
+                np.zeros((1, len(self._feature_names))), 
+                columns=self._feature_names
+            )
+            self._build_model(dummy_df)
+            self.model.load_state_dict(model_state)
+            self.model.to(self.device)
+            self.model.eval()
+
+    def __getstate__(self):
+        """joblib/pickleで保存する際に呼ばれる"""
+        state = self.__dict__.copy()
+        # シリアライズできないモデルオブジェクトを削除し、代わりにstate_dictを保存
+        if "model" in state and state["model"] is not None:
+            state["_model_state_dict"] = {k: v.cpu() for k, v in state["model"].state_dict().items()}
+            del state["model"]
+        return state
+
+    def __setstate__(self, state):
+        """joblib/pickleで読み込む際に呼ばれる"""
+        model_state = state.pop("_model_state_dict", None)
+        self.__dict__.update(state)
+        
+        # モデルの再構築
+        if model_state is not None:
+            # _build_modelを呼び出すためにダミーのDataFrameを作成
+            # 特徴量名とカテゴリカルインデックスが復元されていることが前提
+            dummy_df = pd.DataFrame(
+                np.zeros((1, len(self._feature_names))), 
+                columns=self._feature_names
+            )
+            self._build_model(dummy_df)
+            self.model.load_state_dict(model_state)
+            self.model.to(self.device)
+            self.model.eval()

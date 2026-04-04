@@ -46,6 +46,28 @@ class TCNWrapper(BaseModelWrapper):
         print(f"Trainable Parameters: {trainable_params:,}")
         print("-" * 40)
 
+        # --- データクレンジング (NaN / Inf の確実な除去) ---
+        # ターゲット、特徴量(3次元)、ウェイトのいずれかに NaN または Inf が含まれるレコードを除外
+        train_mask = ~np.isnan(y_train) & ~np.isinf(y_train)
+        train_mask &= ~np.isnan(X_train).any(axis=(1, 2)) & ~np.isinf(X_train).any(axis=(1, 2))
+        if sample_weight is not None:
+            train_mask &= ~np.isnan(sample_weight) & ~np.isinf(sample_weight)
+        dropped_train = len(y_train) - train_mask.sum()
+        if dropped_train > 0:
+            print(f"⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf in features, target, or weights.")
+        X_train = X_train[train_mask]
+        y_train = y_train[train_mask]
+        if sample_weight is not None:
+            sample_weight = sample_weight[train_mask]
+        if X_valid is not None and y_valid is not None:
+            valid_mask = ~np.isnan(y_valid) & ~np.isinf(y_valid)
+            valid_mask &= ~np.isnan(X_valid).any(axis=(1, 2)) & ~np.isinf(X_valid).any(axis=(1, 2))
+            dropped_valid = len(y_valid) - valid_mask.sum()
+            if dropped_valid > 0:
+                print(f"⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf in features or target.")
+            X_valid = X_valid[valid_mask]
+            y_valid = y_valid[valid_mask]
+
         # データの準備
         if sample_weight is None:
             sample_weight = np.ones(len(y_train), dtype=np.float32)

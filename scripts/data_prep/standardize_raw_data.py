@@ -127,9 +127,35 @@ def standardize_raw_data():
     # 全銘柄の「MA_250計算済みデータ」を日付でまとめて保存し直す
     print("Regrouping data into date chunks...")
     all_temp_files = glob.glob(f"{TEMP_DIR}/*.parquet")
-    # 8GBメモリのため、全読み込みせず「月単位」で集計
-    # ここでは例として2016年から2025年までをループ
-    dates = pd.date_range(start="2016-10-01", end="2025-12-31", freq='QS') # 四半期ごと
+    if not all_temp_files:
+        print("No temporary files found.")
+        return
+
+    print("Determining date range from temp files...")
+    min_dates = []
+    max_dates = []
+    for f in all_temp_files:
+        # メモリ節約と高速化のため、date列のみを読み込む
+        df_date = pd.read_parquet(f, columns=['date'])
+        if not df_date.empty:
+            min_dates.append(df_date['date'].min())
+            max_dates.append(df_date['date'].max())
+
+    if not min_dates:
+        print("No valid dates found in temp files.")
+        return
+
+    global_min_date = min(min_dates)
+    global_max_date = max(max_dates)
+    print(f"Data range found: {global_min_date.date()} to {global_max_date.date()}")
+
+    # 最小日付が属する四半期の初日を計算
+    q_start_month = (global_min_date.month - 1) // 3 * 3 + 1
+    start_q = pd.Timestamp(year=global_min_date.year, month=q_start_month, day=1)
+    
+    # 四半期ごとの開始日を生成
+    dates = pd.date_range(start=start_q, end=global_max_date, freq='QS')
+
     for start_date in dates:
         end_date = start_date + pd.DateOffset(months=3)
         chunk_list = []

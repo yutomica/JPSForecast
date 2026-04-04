@@ -23,7 +23,6 @@ from src.cv.cv_utils import add_t1_column, prepare_purged_cv_input
 from src.cv.cv_viz import log_split_info
 from src.preprocess.sampling import apply_sampling
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
-from src.models.ensemble import EnsembleModel
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
 from src.evaluation import evaluate_metrics, calculate_bin_stats
@@ -33,6 +32,15 @@ import logging
 logging.getLogger("alembic").setLevel(logging.WARNING)
 # ついでに sqlalchemy のログも抑制したい場合は以下も有効です
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+# --- MLflowの不要な警告（DeprecationやCloudPickleのセキュリティ警告）を一時的に抑制 ---
+import warnings
+mlflow_models_logger = logging.getLogger("mlflow.models.model")
+mlflow_pyfunc_logger = logging.getLogger("mlflow.pyfunc")
+prev_models_level = mlflow_models_logger.level
+prev_pyfunc_level = mlflow_pyfunc_logger.level
+mlflow_models_logger.setLevel(logging.ERROR)
+mlflow_pyfunc_logger.setLevel(logging.ERROR)
+            
 
 
 def train(cfg: DictConfig) -> float:
@@ -99,6 +107,7 @@ def train(cfg: DictConfig) -> float:
             })
             horizon = 5  # 5日間の予測期間
             interval = cfg.get("interval", {}).get("tac", 5)
+            if cfg.model.data_category == 'timeseries': interval = 20
         else:
             mask = meta_df['is_candidate_str'] == True
             meta_df = meta_df.rename(columns={
@@ -160,7 +169,7 @@ def train(cfg: DictConfig) -> float:
         col_indices = [all_features.index(c) for c in feature_cols]
         cat_cols = cfg.features.get('cat_cols',[])
         print(f"  - Num of features: {len(feature_cols):,}")
-        print(f"  - Num of cat features: {len(cat_cols):,}")
+        # print(f"  - Num of cat features: {len(cat_cols):,}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
         features_mmap = np.memmap(
             master_dir / "features.npy", 
@@ -283,7 +292,7 @@ def train(cfg: DictConfig) -> float:
                     y_true = locals()[f'y_{phase}']
                     # 評価用ICの計算対象として生リターン（Future_Close）を取得
                     y_ret = meta_df.loc[idx, 'Future_Close'].values
-                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type)
+                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col)
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
                     # ValidのSharpe Ratioを収集
@@ -300,15 +309,28 @@ def train(cfg: DictConfig) -> float:
                 # 各特徴量を順番にシャッフルして精度低下を測定
                 for col_idx, col_name in enumerate(feature_cols):
                     # メモリ節約のため、破壊的な変更を避けコピーを作成
-                    X_valid_permuted = X_valid.copy()
-                    # 対象の特徴量列のみをシャッフル
-                    if isinstance(X_valid_permuted, pd.DataFrame):
-                        X_valid_permuted.iloc[:, col_idx] = np.random.permutation(X_valid_permuted.iloc[:, col_idx].values)
-                    else:
-                        np.random.shuffle(X_valid_permuted[:, col_idx])
+                    X_valid_permuted = X_valid.copy() # X_valid は DataFrame or ndarray
+                    # --- 日次クロスセクション内でのシャッフル ---
+                    dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
+                    unique_dates = np.unique(dates_for_shuffle)
+                    for d in unique_dates:
+                        date_mask = (dates_for_shuffle == d)
+                        if isinstance(X_valid_permuted, pd.DataFrame):
+                            # DataFrameの場合
+                            date_pos = np.where(date_mask)[0]
+                            shuffled_values = np.random.permutation(X_valid_permuted.iloc[date_pos, col_idx].values)
+                            X_valid_permuted.iloc[date_pos, col_idx] = shuffled_values
+                        else:
+                            # ndarrayの場合 (TCNなど)
+                            date_indices = np.where(date_mask)[0]
+                            idx_perm = np.random.permutation(date_indices)
+                            if X_valid_permuted.ndim == 3:
+                                X_valid_permuted[date_indices, :, col_idx] = X_valid_permuted[idx_perm, :, col_idx]
+                            else:
+                                X_valid_permuted[date_indices, col_idx] = X_valid_permuted[idx_perm, col_idx]
                     # シャッフル後のデータで予測
                     p_permuted = model.predict(X_valid_permuted)
-                    m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=cfg.target.task_type)
+                    m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=cfg.target.task_type, target_col=target_col)
                     permuted_score = m_permuted['ic']
                     # 精度低下幅を記録 (MDA)
                     fold_mda[col_name] = baseline_score - permuted_score
@@ -320,6 +342,7 @@ def train(cfg: DictConfig) -> float:
                     idx = locals()[f'{phase}_idx'] # valid_idx or test_idx
                     res_df = pd.DataFrame({
                         'date': meta_df.loc[idx, 'date'],
+                        'scode': meta_df.loc[idx, 'scode'],
                         'target': locals()[f'y_{phase}'],
                         'score': preds[phase],
                         'phase': phase,
@@ -334,7 +357,6 @@ def train(cfg: DictConfig) -> float:
             gc.collect()
             models.append(copy.deepcopy(model))
             fold_pipelines.append(FoldPipeline(preprocessor, model))
-        ensemble_model = EnsembleModel(models)
         
         # --- スクリーニング結果の集計と保存 ---
         if cfg.get("mode") == "feature_screening":
@@ -392,9 +414,23 @@ def train(cfg: DictConfig) -> float:
                 fold_pipelines=fold_pipelines,
                 col_indices=col_indices
             )
-            pipeline_save_path = os.path.join(d, "ensemble_inference_pipeline.joblib")
-            final_pipeline.save(pipeline_save_path)
-            mlflow.log_artifact(pipeline_save_path, artifact_path="model")
+            
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    # mlflow.pyfunc.log_model は内部でメトリクスを再記録しようとしてUNIQUE制約エラーを起こすことがあるため、
+                    # save_model と log_artifacts に分割して問題を回避する。
+                    model_dir = os.path.join(d, "model_dir")
+                    mlflow.pyfunc.save_model(
+                        path=model_dir,
+                        python_model=final_pipeline,
+                        code_paths=["src"] # 依存するコードのパス
+                    )
+                    mlflow.log_artifacts(model_dir, artifact_path="model")
+            finally:
+                mlflow_models_logger.setLevel(prev_models_level)
+                mlflow_pyfunc_logger.setLevel(prev_pyfunc_level)
+                
             # ビン分析
             bin_stats_path = os.path.join(d, "test_bin_analysis.csv")
             bin_stats.to_csv(bin_stats_path)
@@ -405,6 +441,46 @@ def train(cfg: DictConfig) -> float:
             mlflow.log_artifact(f.name, artifact_path="config")
         os.remove(f.name)
         
+        # --- final_sweep モード時の最高値更新・Staging昇格・OOF保存 ---
+        if cfg.get("mode") == "final_sweep" and avg_valid_metrics != -1.0:
+            current_run_id = mlflow.active_run().info.run_id
+            is_best = True
+            if parent_run_id:
+                # 同一親ランの過去のランを取得
+                past_runs = client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'"
+                )
+                past_scores = [
+                    r.data.metrics.get("avg_valid_metrics", -float("inf")) 
+                    for r in past_runs 
+                    if r.info.run_id != current_run_id
+                ]
+                if past_scores:
+                    best_past_score = max(past_scores)
+                    if avg_valid_metrics <= best_past_score:
+                        is_best = False
+            if is_best:
+                print(f"\n🌟 New best score ({avg_valid_metrics:.6f}) achieved! Promoting to Staging and saving OOF data.")
+                # OOFデータの保存 (Stacking用)
+                oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
+                oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"
+                oof_df.to_csv(oof_filename, index=False)
+                mlflow.log_artifact(oof_filename, artifact_path="oof_data")
+                if os.path.exists(oof_filename):
+                    os.remove(oof_filename)
+                # モデルレジストリへの登録とStagingへの昇格
+                registered_model_name = f"{cfg.model.name}_{cfg.target.column}"
+                model_uri = f"runs:/{current_run_id}/model"
+                try:
+                    mv = mlflow.register_model(model_uri, registered_model_name)
+                    client.transition_model_version_stage(
+                        name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=True
+                    )
+                    print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) and transitioned to Staging.")
+                except Exception as e:
+                    print(f"⚠️ Failed to register model to registry (Ensure model is logged as PyFunc if required): {e}")
+
         # --- MLflow成果物の一括ZIP化とGoogle Driveへの移動 ---
         if cfg.get("output_gdrive", False):
             # 現在の日時を取得してファイル名を作成（YYYY-MM-DD_HH-MM-SS）

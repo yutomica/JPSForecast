@@ -3,13 +3,18 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
 from scipy.stats import spearmanr
 
-def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression'):
+def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_col=None):
     """基本メトリクスの算出"""
     metrics = {}
     # 金融MLで重要なIC(ランク相関)をタスクに関わらず追加
     # y_ret が指定されている場合は予測スコアと生リターン(y_ret)の相関を計算する
-    target_for_ic = y_ret if y_ret is not None else y_true
-    metrics['ic'], _ = spearmanr(target_for_ic, y_pred)
+    if target_col == 'target_tac_vol_scaled_residual' and y_ret is not None:
+        target_ic, _ = spearmanr(y_true, y_pred)
+        raw_return_ic, _ = spearmanr(y_ret, y_pred)
+        metrics['ic'] = 0.3 * target_ic + 0.7 * raw_return_ic
+    else:
+        target_for_ic = y_ret if y_ret is not None else y_true
+        metrics['ic'], _ = spearmanr(target_for_ic, y_pred)
     
     if task_type == 'classification':
         metrics['auc'] = roc_auc_score(y_true, y_pred)

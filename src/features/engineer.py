@@ -224,57 +224,90 @@ class FeatureEngineer:
         return self
 
     def apply_bulk_cross_sectional(self):
-        # メモリ節約のため、辞書に貯めずに直接dfに代入する方式に変更
-        print(f"Applying Cross-Sectional Transformations to {len(self.df.columns)} columns...")
-        columns = list(self.df.columns)
-        for col in tqdm(columns):
-            if col.startswith("MOM_") and col.endswith("_RAW"):
-                self.cs_rank("MOM", col, store=None)
-                self.cs_zscore("MOM", col, store=None)
-                self.sn_zscore("MOM", col, store=None)
-            elif col.startswith("VOL_") and col.endswith("_RAW"):
-                self.cs_rank("VOL", col, store=None)
-                self.cs_zscore("VOL", col, store=None)
-                self.sn_zscore("VOL", col, store=None)
-            elif col.startswith("LIQ_") and col.endswith("_RAW"):
-                self.cs_rank("LIQ", col, store=None)
-                self.cs_zscore("LIQ", col, store=None)
-            elif col.startswith("VAL_") and col.endswith("_RAW"):
-                self.cs_rank("VAL", col, store=None)
-                self.cs_zscore("VAL", col, store=None)
-                self.sn_zscore("VAL", col, store=None)
-            elif col.startswith("QLT_") and col.endswith("_RAW"):
-                self.cs_rank("QLT", col, store=None)
-                self.cs_zscore("QLT", col, store=None)
-                self.sn_zscore("QLT", col, store=None)
-            elif col.startswith("SIZ_") and col.endswith("_RAW"):
-                self.cs_rank("SIZ", col, store=None)
-                self.cs_zscore("SIZ", col, store=None)
-            elif col.startswith("SPD_") and col.endswith("_RAW"):
-                self.cs_rank("SPD", col, store=None)
-                self.cs_zscore("SPD", col, store=None)
-            elif col.startswith("BET_") and col.endswith("_RAW"):
-                self.cs_rank("BET", col, store=None)
-                self.cs_zscore("BET", col, store=None)
-                self.sn_zscore("BET", col, store=None)
-            elif col.startswith("EVT_") and col.endswith("_RAW"):
-                self.cs_rank("EVT", col, store=None)
-                self.cs_zscore("EVT", col, store=None)
-                self.sn_zscore("EVT", col, store=None)
-            elif col.startswith("CON_") and col.endswith("_RAW"):
-                self.cs_rank("CON", col, store=None)
-                self.cs_zscore("CON", col, store=None)
-                self.sn_zscore("CON", col, store=None)
-            elif col.startswith("GOV_") and col.endswith("_RAW"):
-                if "Sector33Code" in col:
+        """
+        RAW特徴量に対して、横断面加工（cs_rank, cs_zscore, sn_zscore）を効率的に一括適用する。
+        - プレフィックスごとの処理ルールを定義し、ベクトル化アプローチで高速に実行する。
+        """
+        print(f"Applying Cross-Sectional Transformations...")
+        # 1. プレフィックスごとの変換ルールを定義
+        TRANSFORM_CONFIG = {
+            # prefix: [transform_type, ...]
+            "MOM": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "VOL": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "LIQ": ["cs_rank", "cs_zscore"],
+            "VAL": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "QLT": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "SIZ": ["cs_rank", "cs_zscore"],
+            "SPD": ["cs_rank", "cs_zscore"],
+            "BET": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "EVT": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "CON": ["cs_rank", "cs_zscore", "sn_zscore"],
+            "GOV": ["cs_rank", "cs_zscore", "sn_zscore"],
+        }
+        # 2. 変換対象となるRAW特徴量を特定し、ルールに基づいて各変換リストに振り分ける
+        raw_cols = [c for c in self.df.columns if c.endswith("_RAW")]
+        cols_for_cs_rank = []
+        cols_for_cs_zscore = []
+        cols_for_sn_zscore = []
+        for col in raw_cols:
+            prefix = col.split('_')[0]
+            if prefix in TRANSFORM_CONFIG:
+                # 特殊ケースの除外: GOV_Sector33Code_RAW は変換対象外
+                if col == "GOV_Sector33Code_RAW":
                     continue
-                self.cs_rank("GOV", col, store=None)
-                self.cs_zscore("GOV", col, store=None)
-                self.sn_zscore("GOV", col, store=None)
-            # ループごとにGCを実行してメモリピークを抑える
-            gc.collect()
+                transforms = TRANSFORM_CONFIG[prefix]
+                if "cs_rank" in transforms:
+                    cols_for_cs_rank.append(col)
+                if "cs_zscore" in transforms:
+                    cols_for_cs_zscore.append(col)
+                if "sn_zscore" in transforms:
+                    cols_for_sn_zscore.append(col)
+        new_cols_data = {}
+        # 3. 横断面加工を一括で実行
+        # 3-1. cs_rank (日次Gauss Rank)
+        def to_gaussian_series(s):
+            n = s.count()
+            if n == 0: return s
+            r = s.rank(method='average')
+            pct = (r - 0.5) / n
+            return (np.sqrt(2) * erfinv(2 * pct - 1)).astype('float32')
+        if cols_for_cs_rank:
+            print(f" - Applying cs_rank to {len(cols_for_cs_rank)} columns...")
+            with np.errstate(invalid='ignore'):
+                ranked_df = self.df.groupby('date')[cols_for_cs_rank].transform(to_gaussian_series)
+            for col in ranked_df.columns:
+                prefix, feature_name, _ = col.split('_', 2)
+                new_cols_data[self._generate_name(prefix, feature_name, "CSR")] = ranked_df[col]
+        # 3-2. cs_zscore (日次Z-Score)
+        def zscore_series(s, p=0.01):
+            lower = s.quantile(p)
+            upper = s.quantile(1 - p)
+            s_clipped = s.clip(lower, upper)
+            return ((s_clipped - s_clipped.mean()) / (s_clipped.std() + 1e-8)).astype('float32')
+        if cols_for_cs_zscore:
+            print(f" - Applying cs_zscore to {len(cols_for_cs_zscore)} columns...")
+            with np.errstate(invalid='ignore'):
+                zscored_df = self.df.groupby('date')[cols_for_cs_zscore].transform(zscore_series)
+            for col in zscored_df.columns:
+                prefix, feature_name, _ = col.split('_', 2)
+                new_cols_data[self._generate_name(prefix, feature_name, "CSZ")] = zscored_df[col]
+        # 3-3. sn_zscore (セクター内Z-Score)
+        if cols_for_sn_zscore:
+            print(f" - Applying sn_zscore to {len(cols_for_sn_zscore)} columns...")
+            with np.errstate(invalid='ignore'):
+                sn_zscored_df = self.df.groupby(['date', 'sector33_code'])[cols_for_sn_zscore].transform(
+                    lambda x: (x - x.mean()) / (x.std() + 1e-8)
+                )
+            sn_zscored_df = sn_zscored_df.astype('float32')
+            for col in sn_zscored_df.columns:
+                prefix, feature_name, _ = col.split('_', 2)
+                new_cols_data[self._generate_name(prefix, feature_name, "SNZ")] = sn_zscored_df[col]
+        # 4. 新しい特徴量をDataFrameに結合
+        if new_cols_data:
+            print(" - Concatenating new features...")
+            self.df = pd.concat([self.df, pd.DataFrame(new_cols_data, index=self.df.index)], axis=1)
+        gc.collect()
         return self
-
     
     # --- RAW特徴量作成 ---
     def apply_momentum_block(self):
@@ -1039,7 +1072,6 @@ class FeatureEngineer:
         # 単純なRank (0.0 ~ 1.0)
         tac_rank = self.df.groupby('date')['target_ret_5'].rank(pct=True, method='average')
         new_cols['target_tac_rank'] = tac_rank
-
         # 既存: Gauss Rank (正規分布化)
         epsilon = 1e-6
         rank_clipped = tac_rank * (1 - 2 * epsilon) + epsilon
@@ -1065,7 +1097,10 @@ class FeatureEngineer:
         new_cols['target_tac_sector_relative'] = (self.df['target_ret_5'] > sec_ret_fut).astype(int)
         # --- 戦略モデル用クロスセクション ---
         # Relative Rank Change (60d)
-        new_cols['target_str_rank'] = self.df.groupby('date')['target_ret_60'].rank(pct=True)
+        str_rank = self.df.groupby('date')['target_ret_60'].rank(pct=True, method='average')
+        new_cols['target_str_rank'] = str_rank
+        str_rank_clipped = str_rank * (1 - 2 * epsilon) + epsilon
+        new_cols['target_str_gauss_rank'] = erfinv(2 * str_rank_clipped - 1)
         # Peer Group Neutralized Alpha (60d)
         sector_mean_60 = self.df.groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
         new_cols['target_str_peer_alpha'] = self.df['target_ret_60'] - sector_mean_60

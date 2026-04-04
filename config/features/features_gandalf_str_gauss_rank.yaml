@@ -1,0 +1,33 @@
+name: str_gauss_rank
+feature_cols:
+ - BET_Beta60_CSZ
+ - BET_MarketHV20_CSZ
+ - BET_MarketHV20_SNZ
+ - BET_MarketReturn_CSZ
+ - BET_MarketReturn_TSR_252D
+ - BET_MarketVolChange_CSZ
+ - BET_SectorMomentum5d_SNZ
+ - BET_SectorRel_SNZ
+ - BET_SectorRelStrength60_SNZ
+ - GOV_MarketSegment_CSZ
+ - MOM_DistSMA25-75_CSZ
+ - MOM_MADev200_SNZ
+ - MOM_MADev75_CSZ
+ - MOM_Return6m_CSZ
+ - QLT_ROE_CSZ
+ - QLT_ROE_SNZ
+ - SEA_CosDayOfWeek_RAW
+ - SEA_SinDayOfWeek_RAW
+ - SPD_MarginBuyImpact_CSZ
+ - SPD_VWAPDev_CSZ
+ - VAL_EarningsYield_CSZ
+ - VAL_LogPBR_CSZ
+ - VAL_LogPBR_SNZ
+ - VOL_HistVol20_SNZ
+ - VOL_HV30_TSR_252D
+ - VOL_LargeMoveCount_TSR_252D
+ - VOL_Volatility60_SNZ
+ - VOL_VolumeMA25_CSZ
+ - VOL_VolumeMA25_SNZ
+cat_cols:
+ - GOV_MarketSegment_CSZ

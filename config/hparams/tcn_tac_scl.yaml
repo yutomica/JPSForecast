@@ -13,7 +13,7 @@ gradient_clip_val: 0.5 # 【追加】TCNの勾配爆発を防ぎ、学習を安�
 batch_size: 512        # 【更新】8GB RAMでのOOM回避と勾配の安定性のバランス
 
 # --- 最適化・評価 ---
-max_epochs: 100            # 最大エポック。Early Stoppingがあるため多めに設定
+max_epochs: 30            # 最大エポック。Early Stoppingがあるため多めに設定
 early_stopping_patience: 5 # 【更新】TabNetの設定と合わせ、収束を見極める
 min_delta: 0.0001
 metric_direction: "maximize" # ランクIC等のスコアを最大化

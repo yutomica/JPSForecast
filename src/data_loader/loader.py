@@ -41,11 +41,16 @@ class DataLoader:
             print(f"Error fetching symbols: {e}")
             return []
 
-    def get_latest_symbols(self):
-        query = f"SELECT DISTINCT scode FROM jps.scode_list WHERE scode not in ('0002') and market != 'その他' ORDER BY scode"
+    def get_latest_symbols(self, date):
+        query = f"""
+            SELECT scode,sector33_code
+            FROM jps.scode_list
+        """
         try:
             df = pd.read_sql(query, self.conn)
-            return df['scode'].tolist()
+            df = df.dropna(subset=['sector33_code'])
+            df['sector33_code'] = df['sector33_code'].astype(str)
+            return df
         except Exception as e:
             print(f"Error fetching symbols: {e}")
             return []

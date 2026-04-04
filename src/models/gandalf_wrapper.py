@@ -56,6 +56,33 @@ class GANDALFWrapper(BaseModelWrapper):
         y_train_np = np.asarray(y_train)
         y_valid_np = np.asarray(y_valid) if y_valid is not None else None
 
+        # --- データクレンジング (NaN / Inf の確実な除去とウェイトの正値化) ---
+        train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
+        train_mask &= ~np.isnan(X_train_np).any(axis=1) & ~np.isinf(X_train_np).any(axis=1)
+        
+        if sample_weight is not None:
+            sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
+            sample_weight = np.clip(sample_weight, 0.0, None)
+            train_mask &= (sample_weight > 0)
+        
+        dropped_train = len(y_train_np) - np.sum(train_mask)
+        if dropped_train > 0:
+            print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
+            
+        X_train_np = X_train_np[train_mask]
+        y_train_np = y_train_np[train_mask]
+        if sample_weight is not None:
+            sample_weight = sample_weight[train_mask]
+
+        if X_valid_np is not None and y_valid_np is not None:
+            valid_mask = ~np.isnan(y_valid_np) & ~np.isinf(y_valid_np)
+            valid_mask &= ~np.isnan(X_valid_np).any(axis=1) & ~np.isinf(X_valid_np).any(axis=1)
+            dropped_valid = len(y_valid_np) - np.sum(valid_mask)
+            if dropped_valid > 0:
+                print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf.")
+            X_valid_np = X_valid_np[valid_mask]
+            y_valid_np = y_valid_np[valid_mask]
+
         self.feature_names_ = train_feature_names
         self._set_seed(int(self.params.get("random_state", 42)))
 
@@ -388,20 +415,20 @@ class GANDALFWrapper(BaseModelWrapper):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        model = state.get("model")
-        if model is not None:
-            state["_serialized_model_state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-            state["model"] = None
-        return state
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     model = state.get("model")
+    #     if model is not None:
+    #         state["_serialized_model_state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    #         state["model"] = None
+    #     return state
 
-    def __setstate__(self, state):
-        serialized = state.pop("_serialized_model_state", None)
-        self.__dict__.update(state)
-        self.device = torch.device("cpu")
-        if serialized is not None and self.model_init_kwargs is not None:
-            self.model = GANDALFNet(**self.model_init_kwargs)
-            self.model.load_state_dict(serialized)
-            self.model.to(self.device)
-            self.model.eval()
+    # def __setstate__(self, state):
+    #     serialized = state.pop("_serialized_model_state", None)
+    #     self.__dict__.update(state)
+    #     self.device = torch.device("cpu")
+    #     if serialized is not None and self.model_init_kwargs is not None:
+    #         self.model = GANDALFNet(**self.model_init_kwargs)
+    #         self.model.load_state_dict(serialized)
+    #         self.model.to(self.device)
+    #         self.model.eval()

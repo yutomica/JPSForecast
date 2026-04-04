@@ -49,6 +49,31 @@ class TabNetWrapper(BaseModelWrapper):
         self.model = None
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+        # --- データクレンジング (ターゲットのNaN除去とウェイトの正値化) ---
+        train_mask = ~np.isnan(y_train) & ~np.isinf(y_train)
+        if sample_weight is not None:
+            # ウェイトの NaN や Inf を 0 にし、さらに負の値を 0 にクリップ
+            sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
+            sample_weight = np.clip(sample_weight, 0.0, None)
+            train_mask &= (sample_weight > 0)
+        
+        dropped_train = len(y_train) - np.sum(train_mask)
+        if dropped_train > 0:
+            print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN target or zero weights.")
+            
+        X_train = X_train[train_mask]
+        y_train = y_train[train_mask]
+        if sample_weight is not None:
+            sample_weight = sample_weight[train_mask]
+
+        if X_valid is not None and y_valid is not None:
+            valid_mask = ~np.isnan(y_valid) & ~np.isinf(y_valid)
+            dropped_valid = len(y_valid) - np.sum(valid_mask)
+            if dropped_valid > 0:
+                print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN target.")
+            X_valid = X_valid[valid_mask]
+            y_valid = y_valid[valid_mask]
+
         # モデル初期化
         # cat_idxs と cat_dims を idx の昇順で並び替える
         sorted_cats = sorted(zip(self.cat_idxs, self.cat_dims))
