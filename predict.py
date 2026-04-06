@@ -179,10 +179,12 @@ def predict(target_date: str):
     features_df = filter.calc_relative_metrics(features_df)
 
     # scoring
+    sql = "select scode,sname,market,gyoshu,Close from jps.scode_list"
+    output = pd.read_sql(sql, conn)
     print("\nLoading Production models from MLflow Registry...")
+    features_df = features_df.sort_values(['scode', 'date']).reset_index(drop=True)
     latest_date = features_df['date'].max()
-    all_scores = features_df[features_df['date'] == latest_date][['date', 'scode']].copy()
-
+    all_scores = features_df[features_df['date'] == latest_date][['date', 'scode']].drop_duplicates(subset='scode').copy()
     registered_models = client.search_registered_models(filter_string="name LIKE '%'")
     production_models = []
     for rm in registered_models:
@@ -199,12 +201,10 @@ def predict(target_date: str):
         model_name = model_version.name
         model_uri = f"models:/{model_name}/Production"
         print(f"\nScoring with {model_name}...")
-
         try:
             # MLflowのRunパラメータからモデルのドメインとカテゴリ（時系列かTableか）を取得
             run = client.get_run(model_version.run_id)
             params = run.data.params
-            
             # domain のパース（dictが文字列化されている場合に対応）
             domain_raw = params.get('domain.name', params.get('domain/name', params.get('domain', 'STR')))
             if isinstance(domain_raw, str) and domain_raw.strip().startswith('{'):
@@ -215,7 +215,6 @@ def predict(target_date: str):
                     domain = 'STR'
             else:
                 domain = str(domain_raw).upper()
-
             # data_category のパース（dictが文字列化されている場合に対応）
             model_raw = params.get('model.data_category', params.get('model/data_category', params.get('model', 'tabular')))
             if isinstance(model_raw, str) and model_raw.strip().startswith('{'):
@@ -238,79 +237,56 @@ def predict(target_date: str):
                 print(f"  - WARNING: No candidate stocks found for {domain} on {latest_date.strftime('%Y-%m-%d')}.")
                 all_scores[f'score_{model_name}'] = np.nan
                 continue
-            if data_category == 'timeseries':
-                # 時系列モデル：対象銘柄のすべてのレコード(最大244日分など)を抽出
-                target_df = features_df[features_df['scode'].isin(target_scodes)].copy()
-            else:
-                # Table型モデル：最新日の対象レコードのみ抽出
-                target_df = features_df[latest_candidates_mask].copy()
-            # 時系列順にソートしてインデックスをリセット
-            target_df = target_df.sort_values(['scode', 'date']).reset_index(drop=True)
-
             loaded_model = mlflow.pyfunc.load_model(model_uri)
             local_path = client.download_artifacts(run_id=model_version.run_id, path="configs/feature_cols.json")
             with open(local_path) as f:
                 config = json.load(f)
             feature_cols = config['feature_cols']
             
-            if data_category == 'timeseries':
-                # 時系列モデルの場合、(N銘柄, T期間, F特徴量) の3次元テンソルに変換する
-                X_pred_list = []
-                valid_scodes = []
-                # 推論に必要な期間長（データが最も揃っている最大行数をウィンドウサイズとする）
-                max_seq_len = target_df.groupby('scode').size().max()
-                for scode, group in target_df.groupby('scode', sort=False):
-                    if len(group) == max_seq_len:
-                        X_pred_list.append(group[feature_cols].values)
-                        valid_scodes.append(scode)
-                    else:
-                        print(f"  - WARNING: Stock {scode} has insufficient history ({len(group)} < {max_seq_len}). Skipping.")
-                if len(X_pred_list) == 0:
-                    print(f"  - WARNING: No valid stocks with full history length ({max_seq_len}) found.")
-                    all_scores[f'score_{model_name}'] = np.nan
-                    continue
-                X_pred = np.array(X_pred_list, dtype=np.float32)
-                # 時系列推論用に、配列長と一致するようにターゲット銘柄のリストを上書き
-                target_scodes = np.array(valid_scodes)
-            else:
-                X_pred = target_df[feature_cols]
-            scores = loaded_model.predict(X_pred)
-            
-            # スコアの配列長に応じて結果を割り当て、最新日のスコアのみ抽出してマージする
-            if len(scores) == len(target_df):
-                target_df[f'score_{model_name}'] = scores
-                latest_scores = target_df[target_df['date'] == latest_date][['scode', f'score_{model_name}']]
-            elif len(scores) == len(target_scodes):
-                # 時系列モデルが最新日のスコアのみを返した場合のフォールバック
-                latest_scores = pd.DataFrame({'scode': target_scodes, f'score_{model_name}': scores})
-            else:
-                raise ValueError(f"Unexpected scores length: {len(scores)}. Expected {len(target_df)} or {len(target_scodes)}.")
-
-            all_scores = all_scores.merge(latest_scores, on='scode', how='left')
-            print(f"  - Scoring complete. Average score: {np.nanmean(scores):.4f}")
+            features_arr = features_df[feature_cols].values
+            col_indices = list(range(len(feature_cols)))
+            ref_idx = features_df.index[latest_candidates_mask].values
+            print(f"  - Predicting for {len(ref_idx):,} records...")
+            pipeline = loaded_model.unwrap_python_model()
+            all_preds = np.zeros(len(ref_idx), dtype=np.float32)
+            batch_size = 10000
+            for i in tqdm(range(0, len(ref_idx), batch_size), desc="  Predicting batches"):
+                batch_idx = ref_idx[i : i + batch_size]
+                batch_preds_folds = []
+                for fold_pipe in pipeline.fold_pipelines:
+                    X_processed = fold_pipe.preprocessor.transform(features_arr, row_indices=batch_idx, col_indices=col_indices)
+                    p = fold_pipe.model.predict(X_processed)
+                    batch_preds_folds.append(p)
+                all_preds[i : i + batch_size] = np.mean(batch_preds_folds, axis=0)
+                
+            latest_scores = pd.DataFrame({
+                'scode': features_df.loc[ref_idx, 'scode'].values,
+                f'score_{model_name}': all_preds
+            }).drop_duplicates(subset='scode')
+            output = pd.merge(output, latest_scores, on='scode', how='left')
+            print(f"  - Scoring complete. Average score: {np.nanmean(all_preds):.4f}")
         except Exception as e:
             print(f"  - Failed to score with {model_name}. Error: {e}")
             all_scores[f'score_{model_name}'] = np.nan
             continue
 
     # 4. スタッキングモデルのスコアリング (未実装)
-    print("\nScoring with Stacking model (placeholder)...")
-    try:
-        # stacking_model_uri = "models:/stacking_model_name/Production"
-        # stacking_model = mlflow.pyfunc.load_model(stacking_model_uri)
-        # X_stacking = all_scores.filter(like='score_')
-        # stacking_score = stacking_model.predict(X_stacking)
-        # all_scores['score_stacking'] = stacking_score
-        # print("  - Stacking model scoring complete.")
-        all_scores['score_stacking'] = np.nan # プレースホルダー
-    except Exception as e:
-        print(f"  - Stacking model not found or failed to score: {e}")
-        all_scores['score_stacking'] = np.nan
+    # print("\nScoring with Stacking model (placeholder)...")
+    # try:
+    #     stacking_model_uri = "models:/stacking_model_name/Production"
+    #     stacking_model = mlflow.pyfunc.load_model(stacking_model_uri)
+    #     X_stacking = all_scores.filter(like='score_')
+    #     stacking_score = stacking_model.predict(X_stacking)
+    #     all_scores['score_stacking'] = stacking_score
+    #     print("  - Stacking model scoring complete.")
+    #     all_scores['score_stacking'] = np.nan # プレースホルダー
+    # except Exception as e:
+    #     print(f"  - Stacking model not found or failed to score: {e}")
+    #     all_scores['score_stacking'] = np.nan
 
     # 5. 結果をCSVに出力
-    sql = "select scode,sname,market,gyoshu,Close from jps.scode_list"
-    output = pd.read_sql(sql, conn)
-    output = output.merge(all_scores[['scode'] + [x for x in all_scores.columns if x.startswith('score')]], on='scode', how='left')
+    output = output.dropna()
+    output = output.drop_duplicates(subset='scode')
     output_filename = f"predictions_{target_date.replace('-', '')}.csv"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
     output.to_csv(output_path, index=False, encoding='shift-jis')
