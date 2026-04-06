@@ -76,6 +76,21 @@ class FeatureEngineer:
         if param:
             name += f"_{param}"
         return name
+
+    def _apply_ta(self, func, series, **kwargs):
+        """1つの列に対するpandas_taの計算を銘柄ごとに行う安全なラッパー"""
+        def safe_func(x):
+            res = func(x, **kwargs)
+            return res if res is not None else pd.Series(np.nan, index=x.index)
+        return series.groupby(self.df['scode']).transform(safe_func)
+
+    def _apply_ta_multi(self, func, cols, **kwargs):
+        """複数の列に対するpandas_taの計算を銘柄ごとに行う安全なラッパー"""
+        def _calc(group):
+            args = [group[c] for c in cols]
+            res = func(*args, **kwargs)
+            return res.iloc[:, 0] if isinstance(res, pd.DataFrame) else (res if res is not None else pd.Series(np.nan, index=group.index))
+        return self.df.groupby('scode', group_keys=False).apply(_calc)
     
 
     # --- 横断面加工 (Cross-Sectional) ---
@@ -311,106 +326,118 @@ class FeatureEngineer:
     
     # --- RAW特徴量作成 ---
     def apply_momentum_block(self):
+        grouped = self.df.groupby('scode')
+        grouped_close = grouped['close']
+        grouped_high = grouped['high']
+        grouped_low = grouped['low']
+
         col_name = self._generate_name("MOM", "ADX14", "RAW")
-        adx = ta.adx(self.df['high'], self.df['low'], self.df['close'], length=14)
-        self.df[col_name] = adx.iloc[:, 0].values if adx is not None else np.nan
+        self.df[col_name] = self._apply_ta_multi(ta.adx, ['high', 'low', 'close'], length=14)
         self.new_cols.append(col_name)
-        for w in [5, 25, 75]:
+
+        sma5 = self._apply_ta(ta.sma, self.df['close'], length=5)
+        sma25 = self._apply_ta(ta.sma, self.df['close'], length=25)
+        sma75 = self._apply_ta(ta.sma, self.df['close'], length=75)
+
+        for w, sma in zip([5, 25, 75], [sma5, sma25, sma75]):
             col_name = self._generate_name("MOM", f"DistSMA{w}", "RAW")
-            sma = ta.sma(self.df['close'], length=w)
-            self.df[col_name] = (self.df['close'].values / sma.values) - 1 if sma is not None else np.nan
+            self.df[col_name] = (self.df['close'] / sma) - 1
             self.new_cols.append(col_name)
-        sma5 = ta.sma(self.df['close'], length=5)
-        sma25 = ta.sma(self.df['close'], length=25)
-        sma75 = ta.sma(self.df['close'], length=75)
+
         col_name = self._generate_name("MOM", "DistSMA5-25", "RAW")
-        self.df[col_name] = (sma5.values / sma25.values) - 1 if (sma5 is not None and sma25 is not None) else np.nan
+        self.df[col_name] = (sma5 / sma25) - 1
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "DistSMA25-75", "RAW")
-        self.df[col_name] = (sma25.values / sma75.values) - 1 if (sma25 is not None and sma75 is not None) else np.nan
+        self.df[col_name] = (sma25 / sma75) - 1
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "EfficiencyRatio10", "RAW")
-        er = ta.er(self.df['close'], length=10)
-        self.df[col_name] = er.values if er is not None else np.nan
+        self.df[col_name] = self._apply_ta(ta.er, self.df['close'], length=10)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "LinRegSlope10", "RAW")
-        slope = ta.slope(self.df['close'], length=10)
-        self.df[col_name] = slope.values if slope is not None else np.nan
+        self.df[col_name] = self._apply_ta(ta.slope, self.df['close'], length=10)
         self.new_cols.append(col_name)
-        macd = ta.macd(self.df['close'], fast=12, slow=26, signal=9)
+
+        def get_macd_norm(g):
+            macd = ta.macd(g, fast=12, slow=26, signal=9)
+            return macd['MACDh_12_26_9'] if macd is not None else pd.Series(np.nan, index=g.index)
+        macd_hist = grouped_close.apply(get_macd_norm).reset_index(level=0, drop=True) / self.df['close']
         col_name = self._generate_name("MOM", "MACDHistNorm", "RAW")
-        if macd is not None:
-            macd_hist = macd['MACDh_12_26_9'].values / self.df['close'].values
-        else:
-            macd_hist = np.full(len(self.df), np.nan)
         self.df[col_name] = macd_hist
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "MACDHistDiff", "RAW")
-        self.df[col_name] = pd.Series(macd_hist).diff(1).values
+        self.df[col_name] = macd_hist.groupby(self.df['scode']).diff(1)
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "DistHigh60", "RAW")
-        self.df[col_name] = self.df['close'] / self.df['high'].rolling(60).max()
+        self.df[col_name] = self.df['close'] / grouped_high.rolling(60).max().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "DistHigh250", "RAW")
-        self.df[col_name] = self.df['close'] / self.df['high'].rolling(250).max()
+        self.df[col_name] = self.df['close'] / grouped_high.rolling(250).max().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        high_26 = self.df['high'].rolling(26).max()
-        low_26 = self.df['low'].rolling(26).min()
+
+        high_26 = grouped_high.rolling(26).max().reset_index(level=0, drop=True)
+        low_26 = grouped_low.rolling(26).min().reset_index(level=0, drop=True)
         kijun_sen = (high_26 + low_26) / 2
         col_name = self._generate_name("MOM", "DistKijun", "RAW")
         self.df[col_name] = (self.df['close'] - kijun_sen) / kijun_sen
         self.new_cols.append(col_name)
-        past_3d_high = self.df['high'].shift(1).rolling(3).max()
+
+        past_3d_high = grouped_high.shift(1).groupby(self.df['scode']).rolling(3).max().reset_index(level=0, drop=True)
         col_name = self._generate_name("MOM", "NewHighFlag3", "RAW")
         self.df[col_name] = (self.df['close'] > past_3d_high).astype(int)
         self.new_cols.append(col_name)
-        roll_120 = self.df['close'].rolling(120)
-        max_120 = roll_120.max()
-        min_120 = roll_120.min()
+
+        roll_120 = grouped_close.rolling(120)
+        max_120 = roll_120.max().reset_index(level=0, drop=True)
+        min_120 = roll_120.min().reset_index(level=0, drop=True)
         col_name = self._generate_name("MOM", "PricePos120", "RAW")
         self.df[col_name] = (self.df['close'] - min_120) / (max_120 - min_120)
         self.new_cols.append(col_name)
-        high_9 = self.df['high'].rolling(9).max()
-        low_9 = self.df['low'].rolling(9).min()
-        tenkan_sen = (high_9 + low_9) / 2
-        high_26 = self.df['high'].rolling(26).max()
-        low_26 = self.df['low'].rolling(26).min()
-        kijun_sen = (high_26 + low_26) / 2
-        high_52 = self.df['high'].rolling(52).max()
-        low_52 = self.df['low'].rolling(52).min()
+
+        high_52 = grouped_high.rolling(52).max().reset_index(level=0, drop=True)
+        low_52 = grouped_low.rolling(52).min().reset_index(level=0, drop=True)
         span_b = (high_52 + low_52) / 2
-        span_b_curr = span_b.shift(26)
+        span_b_curr = span_b.groupby(self.df['scode']).shift(26)
         col_name = self._generate_name("MOM", "IchimokuDist", "RAW")
         self.df[col_name] = (self.df['close'] - span_b_curr) / span_b_curr
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "LogReturn", "RAW")
-        self.df[col_name] = np.log(self.df['close'] / self.df['close'].shift(1))
+        log_return = np.log(self.df['close'] / grouped_close.shift(1))
+        self.df[col_name] = log_return
         self.new_cols.append(col_name)
+
         for w in [3,5,10,20]:
             col_name = self._generate_name("MOM", f"Return{w}d", "RAW")
-            self.df[col_name] = self.df['close'].pct_change(w)
+            self.df[col_name] = grouped_close.pct_change(w)
             self.new_cols.append(col_name)
-        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+
         for w in [1,2]:
             col_name = self._generate_name("MOM", f"Return1dLag{w}", "RAW")
-            self.df[col_name] = log_return.shift(w)
+            self.df[col_name] = log_return.groupby(self.df['scode']).shift(w)
             self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "RSI9", "RAW")
-        rsi9 = ta.rsi(self.df['close'], length=9)
-        self.df[col_name] = rsi9.values if rsi9 is not None else np.nan
+        rsi9 = self._apply_ta(ta.rsi, self.df['close'], length=9)
+        self.df[col_name] = rsi9
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "RSI9-14Diff", "RAW")
-        rsi14 = ta.rsi(self.df['close'], length=14)
-        self.df[col_name] = (rsi9.values - rsi14.values) if (rsi9 is not None and rsi14 is not None) else np.nan
+        rsi14 = self._apply_ta(ta.rsi, self.df['close'], length=14)
+        self.df[col_name] = rsi9 - rsi14
         self.new_cols.append(col_name)
-        bb = ta.bbands(self.df['close'], length=20, std=2)
+
+        def calc_bb_pct(x):
+            bb = ta.bbands(x, length=20, std=2)
+            if bb is not None:
+                bb_p_col = [c for c in bb.columns if c.startswith('BBP')][0]
+                return bb[bb_p_col]
+            return pd.Series(np.nan, index=x.index)
         col_name = self._generate_name("MOM", "BBPercentB", "RAW")
-        if bb is not None:
-            bb_p_col = [c for c in bb.columns if c.startswith('BBP')][0]
-            self.df[col_name] = bb[bb_p_col].values
-        else:
-            self.df[col_name] = np.nan
+        self.df[col_name] = grouped_close.apply(calc_bb_pct).reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
+
         range_len = self.df['high'] - self.df['low']
         body_size = np.abs(self.df['close'] - self.df['open'])
         upper_shadow = self.df['high'] - self.df[['close', 'open']].max(axis=1)
@@ -430,210 +457,247 @@ class FeatureEngineer:
             self.df[col_name] = (self.df['close'] - self.df['open']) / range_len
             self.new_cols.append(col_name)
             col_name = self._generate_name("MOM", "LowerShadowMA5", "RAW")
-            self.df[col_name] = lower_shadow_ratio.rolling(5).mean()
-        diff = self.df['close'].diff()
+            self.df[col_name] = lower_shadow_ratio.groupby(self.df['scode']).rolling(5).mean().reset_index(level=0, drop=True)
+
+        diff = grouped_close.diff()
         sign = np.sign(diff).fillna(0)
-        is_change = sign != sign.shift(1)
-        group_id = is_change.cumsum()
-        count = self.df.groupby(group_id).cumcount() + 1
+        is_change = sign != sign.groupby(self.df['scode']).shift(1)
+        group_id = is_change.groupby(self.df['scode']).cumsum()
+        count = self.df.groupby(['scode', group_id]).cumcount() + 1
         col_name = self._generate_name("MOM", "Streak", "RAW")
         self.df[col_name] = np.where(sign > 0, count, np.where(sign < 0, -count, 0))
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "BullishRatio20", "RAW")
-        self.df[col_name] = (sign > 0).rolling(20).mean()
+        self.df[col_name] = (sign > 0).groupby(self.df['scode']).rolling(20).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "ClosePosition", "RAW")
-        self.df[col_name] = (self.df['close'] - self.df['low'].rolling(20).min()) / (self.df['high'].rolling(20).max() - self.df['low'].rolling(20).min())
+        self.df[col_name] = (self.df['close'] - grouped_low.rolling(20).min().reset_index(level=0, drop=True)) / (grouped_high.rolling(20).max().reset_index(level=0, drop=True) - grouped_low.rolling(20).min().reset_index(level=0, drop=True))
         self.new_cols.append(col_name)
-        prev_close = self.df['close'].shift(1)
+
+        prev_close = grouped_close.shift(1)
         col_name = self._generate_name("MOM", "GapRate", "RAW")
         self.df[col_name] = (self.df['open'] / prev_close) - 1.0
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "MaxGain5", "RAW")
-        self.df[col_name] = (self.df['high'].rolling(5).max() / self.df['close']) - 1.0
+        self.df[col_name] = (grouped_high.rolling(5).max().reset_index(level=0, drop=True) / self.df['close']) - 1.0
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "RCI9", "RAW")
-        rci_9 = self._calc_rci(self.df['close'], 9)
+        rci_9 = grouped_close.apply(lambda x: self._calc_rci(x, 9)).reset_index(level=0, drop=True)
         self.df[col_name] = rci_9
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "RCI9Diff", "RAW")
-        self.df[col_name] = rci_9.diff(1)
+        self.df[col_name] = rci_9.groupby(self.df['scode']).diff(1)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "RCI26", "RAW")
-        rci_26 = self._calc_rci(self.df['close'], 26)
+        rci_26 = grouped_close.apply(lambda x: self._calc_rci(x, 26)).reset_index(level=0, drop=True)
         self.df[col_name] = rci_26
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "RCI26Diff", "RAW")
-        self.df[col_name] = rci_26.diff(1)
+        self.df[col_name] = rci_26.groupby(self.df['scode']).diff(1)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "RCI52", "RAW")
-        self.df[col_name] = self._calc_rci(self.df['close'], 52)
+        self.df[col_name] = grouped_close.apply(lambda x: self._calc_rci(x, 52)).reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "Momentum12-1", "RAW")
-        self.df[col_name] = self.df['close'].shift(20) / self.df['close'].shift(260) - 1
+        self.df[col_name] = grouped_close.shift(20) / grouped_close.shift(260) - 1
         self.new_cols.append(col_name)
+
         col_name = self._generate_name("MOM", "RetIntraday", "RAW")
         self.df[col_name] = (self.df['close'] / self.df['open']) - 1.0
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "WinRate10d", "RAW")
-        self.df[col_name] = (log_return > 0).rolling(10).mean()
+        self.df[col_name] = (log_return > 0).groupby(self.df['scode']).rolling(10).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
+
         for window in [25, 75, 200]:
-            ma = self.df['close'].rolling(window=window).mean()
+            ma = grouped_close.rolling(window=window).mean().reset_index(level=0, drop=True)
             col_name = self._generate_name("MOM", f"MADev{window}", "RAW")
             self.df[col_name] = (self.df['close'] / ma) - 1
             self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "Return20d", "RAW")
-        self.df[col_name] = self.df['close'].pct_change(20)
+        self.df[col_name] = grouped_close.pct_change(20)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "Return6m", "RAW")
-        self.df[col_name] = self.df['close'].pct_change(120)
+        self.df[col_name] = grouped_close.pct_change(120)
         self.new_cols.append(col_name)
         col_name = self._generate_name("MOM", "Return12m", "RAW")
-        self.df[col_name] = self.df['close'].pct_change(240)
+        self.df[col_name] = grouped_close.pct_change(240)
         self.new_cols.append(col_name)
-        max_52w = self.df['close'].rolling(window=240).max()
+        max_52w = grouped_close.rolling(window=240).max().reset_index(level=0, drop=True)
         col_name = self._generate_name("MOM", "High52wDist", "RAW")
         self.df[col_name] = (self.df['close'] / max_52w) - 1
         self.new_cols.append(col_name)
         return self
 
     def apply_volatility_block(self):
-        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
-        return_1d = self.df['close'].pct_change(1)
+        grouped = self.df.groupby('scode')
+        grouped_close = grouped['close']
+        grouped_low = grouped['low']
+        grouped_high = grouped['high']
+
+        log_return = np.log(self.df['close'] / grouped_close.shift(1))
+        return_1d = grouped_close.pct_change(1)
+
         col_name = self._generate_name("VOL", "MAE5", "RAW")
-        self.df[col_name] = (self.df['low'].rolling(5).min() / self.df['close']) - 1.0
+        self.df[col_name] = (grouped_low.rolling(5).min().reset_index(level=0, drop=True) / self.df['close']) - 1.0
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "MAE10", "RAW")
-        self.df[col_name] = (self.df['low'].rolling(10).min() / self.df['close']) - 1.0
+        self.df[col_name] = (grouped_low.rolling(10).min().reset_index(level=0, drop=True) / self.df['close']) - 1.0
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "DownsideRun", "RAW")
-        self.df[col_name] = log_return.clip(lower=0).rolling(5).sum()
+        self.df[col_name] = log_return.clip(lower=0).groupby(self.df['scode']).rolling(5).sum().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "ReturnSkewnessDiff", "RAW")
-        self.df[col_name] = log_return.rolling(20).skew().diff()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(20).skew().reset_index(level=0, drop=True).groupby(self.df['scode']).diff()
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "ReturnKurtosis", "RAW")
-        self.df[col_name] = log_return.rolling(20).kurt()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(20).kurt().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        bb = ta.bbands(self.df['close'], length=20, std=2)
-        if bb is not None:
-            # pandas_taのBandwidthは通常'BBB'プレフィックス
-            bb_w_cols = [c for c in bb.columns if c.startswith('BBB')]
-            if bb_w_cols:
-                col_name = self._generate_name("VOL", "BBWidth", "RAW")
-                self.df[col_name] = bb[bb_w_cols[0]].values
-                self.new_cols.append(col_name)
-        gap_rate = (self.df['open'] / self.df['close'].shift(1)) - 1.0
+
+        def calc_bb_width(x):
+            bb = ta.bbands(x, length=20, std=2)
+            if bb is not None:
+                bb_w_cols = [c for c in bb.columns if c.startswith('BBB')]
+                if bb_w_cols: return bb[bb_w_cols[0]]
+            return pd.Series(np.nan, index=x.index)
+        col_name = self._generate_name("VOL", "BBWidth", "RAW")
+        self.df[col_name] = grouped_close.apply(calc_bb_width).reset_index(level=0, drop=True)
+        self.new_cols.append(col_name)
+
+        gap_rate = (self.df['open'] / grouped_close.shift(1)) - 1.0
         col_name = self._generate_name("VOL", "GapAbs", "RAW")
         self.df[col_name] = gap_rate.abs()
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "LargeMoveCount", "RAW")
-        self.df[col_name] = (return_1d.abs() > 0.03).rolling(20).sum()
+        self.df[col_name] = (return_1d.abs() > 0.03).groupby(self.df['scode']).rolling(20).sum().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         range_len = self.df['high'] - self.df['low']
         col_name = self._generate_name("VOL", "RangeRatioLong", "RAW")
-        self.df[col_name] = range_len.rolling(5).mean() / range_len.rolling(20).mean()
+        range_grouped = range_len.groupby(self.df['scode'])
+        self.df[col_name] = range_grouped.rolling(5).mean().reset_index(level=0, drop=True) / range_grouped.rolling(20).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        atr = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=14)
+
+        def calc_atr(group, length):
+            res = ta.atr(group['high'], group['low'], group['close'], length=length)
+            return res if res is not None else pd.Series(np.nan, index=group.index)
+
+        atr = grouped.apply(lambda g: calc_atr(g, 14)).reset_index(level=0, drop=True)
         col_name = self._generate_name("VOL", "ATRRatio", "RAW")
-        self.df[col_name] = (atr.values / self.df['close'].values) if atr is not None else np.nan
+        self.df[col_name] = atr / self.df['close']
         self.new_cols.append(col_name)
-        atr_mid = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=20)
-        atr_short = ta.atr(self.df['high'], self.df['low'], self.df['close'], length=5)
+
+        atr_mid = grouped.apply(lambda g: calc_atr(g, 20)).reset_index(level=0, drop=True)
+        atr_short = grouped.apply(lambda g: calc_atr(g, 5)).reset_index(level=0, drop=True)
         col_name = self._generate_name("VOL", "ATRSqueeze", "RAW")
-        self.df[col_name] = (atr_short.values / atr_mid.values) if (atr_short is not None and atr_mid is not None) else np.nan
+        self.df[col_name] = atr_short / atr_mid
         self.new_cols.append(col_name)
-        bb = ta.bbands(self.df['close'], length=20, std=2)
-        if bb is not None:
-            col_name = self._generate_name("VOL", "ATRSqueezeBB", "RAW")
-            self.df[col_name] = (bb['BBU_20_2.0'].values - bb['BBL_20_2.0'].values) / (bb['BBM_20_2.0'].values + 1e-9)
-            self.new_cols.append(col_name)
+
+        def calc_atr_squeeze_bb(x):
+            bb = ta.bbands(x, length=20, std=2)
+            if bb is not None:
+                return (bb['BBU_20_2.0'] - bb['BBL_20_2.0']) / (bb['BBM_20_2.0'] + 1e-9)
+            return pd.Series(np.nan, index=x.index)
+        col_name = self._generate_name("VOL", "ATRSqueezeBB", "RAW")
+        self.df[col_name] = grouped_close.apply(calc_atr_squeeze_bb).reset_index(level=0, drop=True)
+        self.new_cols.append(col_name)
+
         col_name = self._generate_name("VOL", "HistVol20", "RAW")
-        self.df[col_name] = log_return.rolling(20).std()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(20).std().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "HV30", "RAW")
-        hv30 = log_return.rolling(30).std() * np.sqrt(250)
+        hv30 = log_return.groupby(self.df['scode']).rolling(30).std().reset_index(level=0, drop=True) * np.sqrt(250)
         self.df[col_name] = hv30
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "HVSlope", "RAW")
-        self.df[col_name] = hv30.diff(5)
+        self.df[col_name] = hv30.groupby(self.df['scode']).diff(5)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "RealizedSkew20", "RAW")
-        self.df[col_name] = log_return.rolling(20).skew()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(20).skew().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "UlcerIndex14", "RAW")
-        ui = ta.ui(self.df['close'], length=14)
-        self.df[col_name] = ui.values if ui is not None else np.nan
+        self.df[col_name] = self._apply_ta(ta.ui, self.df['close'], length=14)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "ATRChgRate", "RAW")
-        self.df[col_name] = atr.pct_change().values if atr is not None else np.nan
+        self.df[col_name] = atr.groupby(self.df['scode']).pct_change()
         self.new_cols.append(col_name)
         with np.errstate(divide='ignore', invalid='ignore'):
             hl_log_sq = np.log(self.df['high'] / self.df['low']) ** 2
             const_factor = 4 * np.log(2)
             col_name = self._generate_name("VOL", "VolatilityParkinson", "RAW")
-            self.df[col_name] = np.sqrt(hl_log_sq.rolling(14).mean() / const_factor)
+            self.df[col_name] = np.sqrt(hl_log_sq.groupby(self.df['scode']).rolling(14).mean().reset_index(level=0, drop=True) / const_factor)
             self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "ReturnVolatility", "RAW")
-        self.df[col_name] = log_return.rolling(10).std()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(10).std().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        hv5 = log_return.rolling(5).std() * np.sqrt(250)
+        hv5 = log_return.groupby(self.df['scode']).rolling(5).std().reset_index(level=0, drop=True) * np.sqrt(250)
         col_name = self._generate_name("VOL", "VolRatioHV", "RAW")
         self.df[col_name] = hv5 / hv30
         self.new_cols.append(col_name)
-        self.new_cols.append(col_name)
+
         def calc_downside_std(x, window=60):
             neg_ret = x.where(x < 0, 0)
             return neg_ret.rolling(window).std()
         col_name = self._generate_name("VOL", "DownsideDev60", "RAW")
-        self.df[col_name] = log_return.transform(lambda x: calc_downside_std(x))
+        self.df[col_name] = log_return.groupby(self.df['scode']).apply(lambda x: calc_downside_std(x)).reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "Volatility60", "RAW")
-        self.df[col_name] = self.df['close'].pct_change().rolling(60).std()
+        self.df[col_name] = grouped_close.pct_change().groupby(self.df['scode']).rolling(60).std().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         return self
         
     def apply_liquidity_block(self):
+        grouped = self.df.groupby('scode')
+        grouped_vol = grouped['volume']
+        grouped_vol_p = grouped['volume_p']
+        grouped_close = grouped['close']
+
         volume_log = np.log(self.df['volume'] + 1)
-        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        log_return = np.log(self.df['close'] / grouped_close.shift(1))
         col_name = self._generate_name("LIQ", "VolumeLog", "RAW")
         self.df[col_name] = volume_log
         self.new_cols.append(col_name)
         col_name = self._generate_name("LIQ", "AbnormalVolume", "RAW")
-        self.df[col_name] = self.df['volume_p'] / self.df['volume_p'].rolling(20).mean()
+        self.df[col_name] = self.df['volume_p'] / grouped_vol_p.rolling(20).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("LIQ", "VolumeChange", "RAW")
-        self.df[col_name] = self.df['volume'].pct_change()
+        self.df[col_name] = grouped_vol.pct_change()
         self.new_cols.append(col_name)
         col_name = self._generate_name("LIQ", "VolumeSlope5", "RAW")
-        slope = ta.slope(np.log(self.df['volume'] + 1), length=5)
-        self.df[col_name] = slope.values if slope is not None else np.nan
+        self.df[col_name] = volume_log.groupby(self.df['scode']).transform(lambda x: ta.slope(x, length=5) if ta.slope(x, length=5) is not None else pd.Series(np.nan, index=x.index))
         self.new_cols.append(col_name)
         col_name = self._generate_name("LIQ", "LogTradingCap", "RAW")
         self.df[col_name] = np.log(self.df['close'] * self.df['volume'] + 1)
         self.new_cols.append(col_name)
+
+        def calc_mfi(group):
+            res = ta.mfi(group['high'], group['low'], group['close'], group['volume'], length=14)
+            return res if res is not None else pd.Series(np.nan, index=group.index)
         col_name = self._generate_name("LIQ", "MFI14", "RAW")
-        mfi = ta.mfi(self.df['high'], self.df['low'], self.df['close'], self.df['volume'], length=14)
-        self.df[col_name] = mfi.values if mfi is not None else np.nan
+        self.df[col_name] = grouped.apply(calc_mfi).reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        vol_ma5 = self.df['volume'].rolling(5).mean()
+
+        vol_ma5 = grouped_vol.rolling(5).mean().reset_index(level=0, drop=True)
         col_name = self._generate_name("LIQ", "VolRatio5d", "RAW")
         self.df[col_name] = self.df['volume'] / vol_ma5.replace(0, np.nan)
         self.new_cols.append(col_name)
-        vol_median_20 = self.df['volume'].rolling(20).median()
+        vol_median_20 = grouped_vol.rolling(20).median().reset_index(level=0, drop=True)
         is_spike = (self.df['volume'] > (vol_median_20 * 3)).astype(int)
         col_name = self._generate_name("LIQ", "VolSpikeCount20", "RAW")
-        self.df[col_name] = is_spike.rolling(20).sum()
+        self.df[col_name] = is_spike.groupby(self.df['scode']).rolling(20).sum().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         is_up = (self.df['close'] > self.df['open']).astype(int)
-        vol_up = (self.df['volume'] * is_up).rolling(20).sum()
-        vol_down = (self.df['volume'] * (1 - is_up)).rolling(20).sum()
+        vol_up = (self.df['volume'] * is_up).groupby(self.df['scode']).rolling(20).sum().reset_index(level=0, drop=True)
+        vol_down = (self.df['volume'] * (1 - is_up)).groupby(self.df['scode']).rolling(20).sum().reset_index(level=0, drop=True)
         col_name = self._generate_name("LIQ", "VolUpDownRatio", "RAW")
         self.df[col_name] = vol_up / (vol_down + 1e-9)
         self.new_cols.append(col_name)
         col_name = self._generate_name("VOL", "VolumeMA25", "RAW")
-        self.df[col_name] = volume_log.rolling(25).mean()
+        self.df[col_name] = volume_log.groupby(self.df['scode']).rolling(25).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("LIQ", "TurnoverRatio", "RAW")
         self.df[col_name] = self.df['volume'] / self.df['shares_outstanding'].replace(0, np.nan)
@@ -677,14 +741,12 @@ class FeatureEngineer:
         self.new_cols.append(col_name) 
         # 成長率計算
         fund_cols = ['operating_profit', 'sales', 'eps']
-        temp_df = self.df[fund_cols + ['scode']].copy()
-        temp_df[fund_cols] = temp_df.groupby('scode')[fund_cols].ffill()
-        grouped = temp_df.groupby('scode')
+        grouped = self.df.groupby('scode')
         for col in fund_cols:
-            v_t = temp_df[col]
-            v_prev = grouped[col].shift(LAG_YEAR)
-            self.df[f'{col}_growth_yoy'] = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
-            self.df[f'{col}_growth_yoy'] = self.df[f'{col}_growth_yoy'].clip(-3.0, 3.0)
+            v_t = grouped[col].ffill()
+            v_prev = grouped[col].shift(LAG_YEAR).ffill()
+            growth = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
+            self.df[f'{col}_growth_yoy'] = growth.clip(-3.0, 3.0)
         col_name = self._generate_name("QLT", "OperatingProfitGrowthYOY", "RAW")
         self.df[col_name] = self.df['operating_profit_growth_yoy']
         self.new_cols.append(col_name)
@@ -703,22 +765,24 @@ class FeatureEngineer:
         return self
     
     def apply_supplydemand_bloc(self):
+        grouped_vol = self.df.groupby('scode')['volume']
+
         typ_price = (self.df['high'] + self.df['low'] + self.df['close']) / 3
-        pv_sum = (typ_price * self.df['volume']).rolling(5).sum()
-        v_sum = self.df['volume'].rolling(5).sum()
+        pv_sum = (typ_price * self.df['volume']).groupby(self.df['scode']).rolling(5).sum().reset_index(level=0, drop=True)
+        v_sum = grouped_vol.rolling(5).sum().reset_index(level=0, drop=True)
         rolling_vwap = pv_sum / v_sum
         col_name = self._generate_name("SPD", "DistVWAP5", "RAW")
         dist_vwap_5 = (self.df['close'] - rolling_vwap) / rolling_vwap
         self.df[col_name] = dist_vwap_5
         self.new_cols.append(col_name)
         col_name = self._generate_name("SPD", "DistVWAPSlope", "RAW")
-        self.df[col_name] = dist_vwap_5.diff()
+        self.df[col_name] = dist_vwap_5.groupby(self.df['scode']).diff()
         self.new_cols.append(col_name)
         vwap = self.df['volume_p'] / self.df['volume'].replace(0, 1)
         col_name = self._generate_name("SPD", "VWAPDev", "RAW")
         self.df[col_name] = (self.df['close'] / vwap) - 1
         self.new_cols.append(col_name)
-        avg_vol_60 = self.df['volume'].rolling(60).mean()
+        avg_vol_60 = grouped_vol.rolling(60).mean().reset_index(level=0, drop=True)
         col_name = self._generate_name("SPD", "MarginBuyImpact", "RAW")
         self.df[col_name] = (
             self.df['long_margin_trade_balance_share'] / avg_vol_60.replace(0, np.nan)
@@ -732,7 +796,7 @@ class FeatureEngineer:
         self.df[col_name] = margin_ratio
         self.new_cols.append(col_name)
         col_name = self._generate_name("SPD", "MarginRatioDelta4w", "RAW")
-        self.df[col_name] = margin_ratio.diff(20)
+        self.df[col_name] = margin_ratio.groupby(self.df['scode']).diff(20)
         self.new_cols.append(col_name)
         col_name = self._generate_name("SPD", "MarketForeignBuy", "RAW")
         self.df[col_name] = self.df['Foreign_Net_Buy']
@@ -741,25 +805,31 @@ class FeatureEngineer:
         self.df[col_name] = self.df['Individual_Net_Buy']
         self.new_cols.append(col_name)
         col_name = self._generate_name("SPD", "OverseaFlowTrend", "RAW")
-        flow = self.df['Foreign_Net_Buy'].rolling(20).mean()
+        flow = self.df['Foreign_Net_Buy'].groupby(self.df['scode']).rolling(20).mean().reset_index(level=0, drop=True)
         self.df[col_name] = flow
         self.new_cols.append(col_name)
         col_name = self._generate_name("SPD", "FlowAccel", "RAW")
-        self.df[col_name] = flow - flow.rolling(5).mean()
+        self.df[col_name] = flow - flow.groupby(self.df['scode']).rolling(5).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         return self
     
     def apply_beta_block(self):
-        ret_stock = self.df['close'].pct_change()
+        grouped = self.df.groupby('scode')
+        grouped_close = grouped['close']
+        
         ret_market = self.df['Market_Return']
-        rolling_cov = ret_stock.rolling(60).cov(ret_market)
-        rolling_var = ret_market.rolling(60).var()
-        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
+        def calc_cov(g):
+            r_s = g['close'].pct_change()
+            return r_s.rolling(60).cov(g['Market_Return'])
+        rolling_cov = grouped.apply(calc_cov).reset_index(level=0, drop=True)
+        rolling_var = grouped['Market_Return'].rolling(60).var().reset_index(level=0, drop=True)
+        
+        log_return = np.log(self.df['close'] / grouped_close.shift(1))
         col_name = self._generate_name("BET", "Beta60", "RAW")
         self.df[col_name] = rolling_cov / rolling_var
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "RS25", "RAW")
-        self.df[col_name] = self.df['close'].pct_change(25) - self.df['close_mkt'].pct_change(25)
+        self.df[col_name] = grouped_close.pct_change(25) - grouped['close_mkt'].pct_change(25)
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "MarketReturn", "RAW")
         self.df[col_name] = ret_market
@@ -774,7 +844,7 @@ class FeatureEngineer:
         self.df[col_name] = self.df['market_vol_change']
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "SectorMomentum5d", "RAW")
-        self.df[col_name] = self.df['sector_return'].rolling(5).mean()
+        self.df[col_name] = grouped['sector_return'].rolling(5).mean().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "SectorReturn", "RAW")
         self.df[col_name] = self.df['sector_return']
@@ -786,10 +856,10 @@ class FeatureEngineer:
         self.df[col_name] = log_return - self.df['sector_return']
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "RelSectorReturn5d", "RAW")
-        self.df[col_name] = log_return.rolling(5).sum() - self.df['sector_return'].rolling(5).sum()
+        self.df[col_name] = log_return.groupby(self.df['scode']).rolling(5).sum().reset_index(level=0, drop=True) - grouped['sector_return'].rolling(5).sum().reset_index(level=0, drop=True)
         self.new_cols.append(col_name)
-        sector_ret_60 = (1 + self.df['sector_return']).rolling(60).apply(np.prod, raw=True) - 1
-        market_ret_60 = (1 + self.df['Market_Return']).rolling(60).apply(np.prod, raw=True) - 1
+        sector_ret_60 = (1 + self.df['sector_return']).groupby(self.df['scode']).rolling(60).apply(np.prod, raw=True).reset_index(level=0, drop=True) - 1
+        market_ret_60 = (1 + self.df['Market_Return']).groupby(self.df['scode']).rolling(60).apply(np.prod, raw=True).reset_index(level=0, drop=True) - 1
         col_name = self._generate_name("BET", "SectorRelStrength60", "RAW")
         self.df[col_name] = sector_ret_60 - market_ret_60
         self.new_cols.append(col_name)
@@ -833,7 +903,7 @@ class FeatureEngineer:
     
     def apply_event_block(self):
         col_name = self._generate_name("EVT", "EPSActual", "RAW")
-        self.df[col_name] = self.df['eps'].ffill()
+        self.df[col_name] = self.df.groupby('scode')['eps'].ffill()
         self.new_cols.append(col_name)
         col_name = self._generate_name("EVT", "IsMissingEPS", "RAW")
         self.df[col_name] = self.df['eps'].isna().astype(int)
@@ -905,75 +975,63 @@ class FeatureEngineer:
         return self
     
     def apply_tempfeat(self):
-        # ターゲットやフィルタリングフラグ作成用一次変数
-        log_return = np.log(self.df['close'] / self.df['close'].shift(1))
-        self.df['Vol_20d'] = log_return.rolling(20).std()
-        self.df['volume_p_MA5'] = self.df['volume_p'].rolling(5).mean()
+        grouped = self.df.groupby('scode')
+        log_return = np.log(self.df['close'] / grouped['close'].shift(1))
+        self.df['Vol_20d'] = log_return.groupby(self.df['scode']).rolling(20).std().reset_index(level=0, drop=True)
+        self.df['volume_p_MA5'] = grouped['volume_p'].rolling(5).mean().reset_index(level=0, drop=True)
         self.df['log_market_cap'] = np.log(self.df['close'] * self.df['shares_outstanding'])
-        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        self.df['Market_Return_Future'] = self.df['Market_Return'].shift(-1).rolling(window=indexer).sum()
-        self.df['Sector_Return_Future'] = self.df['sector_return'].shift(-1).rolling(window=indexer).sum()
+        
+        def _fwd_sum(s, w):
+            return s.iloc[::-1].rolling(w, min_periods=1).sum().iloc[::-1].shift(-1)
+            
+        self.df['Market_Return_Future'] = grouped['Market_Return'].apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
+        self.df['Sector_Return_Future'] = grouped['sector_return'].apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
         return self
 
     
     # --- ターゲット作成 ---
     def apply_timeseries_targets(self):
-        """ダーゲット作成"""
-        # --- ターゲット作成：戦略モデル ---
-        entry_price = self.df['open'].shift(-1) # 翌日始値エントリー
-        # インデクサ作成
-        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
-        # 未来データの取得
-        future_high_max = self.df['high'].shift(-1).rolling(window=indexer).max()
-        future_low_min = self.df['low'].shift(-1).rolling(window=indexer).min()
-        future_close_end = self.df['close'].shift(-self.horizon_tac)
+        grouped = self.df.groupby('scode')
+        
+        def _fwd_max(s, w): return s.iloc[::-1].rolling(w, min_periods=1).max().iloc[::-1].shift(-1)
+        def _fwd_min(s, w): return s.iloc[::-1].rolling(w, min_periods=1).min().iloc[::-1].shift(-1)
+        def _fwd_sum(s, w): return s.iloc[::-1].rolling(w, min_periods=1).sum().iloc[::-1].shift(-1)
+        
+        entry_price = grouped['open'].shift(-1)
+        
+        future_high_max = grouped['high'].apply(lambda x: _fwd_max(x, self.horizon_tac)).reset_index(level=0, drop=True)
+        future_low_min = grouped['low'].apply(lambda x: _fwd_min(x, self.horizon_tac)).reset_index(level=0, drop=True)
+        future_close_end = grouped['close'].shift(-self.horizon_tac)
+        
         # 基本情報格納
         self.df['Entry_Price'] = entry_price
         self.df['Future_High_Tac'] = future_high_max
         self.df['Future_Low_Tac'] = future_low_min
         self.df['Future_Close_Tac'] = future_close_end
-        # --- 1. Smoothed Target (Category C) ---
-        # 翌日から5日間のVWAPを計算
-        # VWAP = Sum(Volume_P) / Sum(Volume)
-        future_pv_sum = self.df['volume_p'].shift(-1).rolling(window=indexer).sum()
-        future_v_sum = self.df['volume'].shift(-1).rolling(window=indexer).sum()
+        
+        future_pv_sum = grouped['volume_p'].apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
+        future_v_sum = grouped['volume'].apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
         future_vwap = future_pv_sum / (future_v_sum + 1e-9)
-        # target = VWAP_5d / Entry_Price - 1
         self.df['target_tac_smoothed_return'] = (future_vwap / entry_price) - 1.0
-        # --- 2. Volatility-Scaled Residual (Category B) ---
         self.df['target_ret_5'] = (future_close_end / entry_price.replace(0, np.nan)) - 1.0
-        # Beta調整 (Market_Return_Futureは _add_market_self.dfures で作成済みと仮定)
-        # もし未作成なら簡易的に self.df['Market_Return'].shift(-1).rolling(window=indexer).sum() を使用
-        market_ret_future = self.df['Market_Return'].shift(-1).rolling(window=indexer).sum()
+        
+        market_ret_future = grouped['Market_Return'].apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
         residual_ret = self.df['target_ret_5'] - (self.df['BET_Beta60_RAW'] * market_ret_future)
-        # Vol調整 (日次Vol * sqrt(5) で期間Volに換算)
         vol_5d = self.df['Vol_20d'] * np.sqrt(self.horizon_tac)
         self.df['target_tac_vol_scaled_residual'] = residual_ret / (vol_5d + 1e-6)
-        # --- 3. Triple Barrier Methods (Category D) ---
-        # 期間ボラティリティに基づく動的閾値
-        # Vectorized implementation for speed (avoid loop)
+        
         def calc_triple_barrier(up_multiplier, down_multiplier):
-            """
-            ベクトル化されたトリプルバリア計算
-            return: 1(利確), -1(損切), 0(時間切れ)
-            """
             barrier_up = entry_price * (1 + vol_5d * up_multiplier)
             barrier_dn = entry_price * (1 - vol_5d * down_multiplier)
-            # 1日後～5日後の高値・安値を取得
-            h1 = self.df['high'].shift(-1); l1 = self.df['low'].shift(-1)
-            h2 = self.df['high'].shift(-2); l2 = self.df['low'].shift(-2)
-            h3 = self.df['high'].shift(-3); l3 = self.df['low'].shift(-3)
-            h4 = self.df['high'].shift(-4); l4 = self.df['low'].shift(-4)
-            h5 = self.df['high'].shift(-5); l5 = self.df['low'].shift(-5)
-            # 各日のヒット判定 (利確=1, 損切=-1, なし=0)
-            # 損切を優先判定（保守的）または同時なら損切とするロジック
+            h1 = grouped['high'].shift(-1); l1 = grouped['low'].shift(-1)
+            h2 = grouped['high'].shift(-2); l2 = grouped['low'].shift(-2)
+            h3 = grouped['high'].shift(-3); l3 = grouped['low'].shift(-3)
+            h4 = grouped['high'].shift(-4); l4 = grouped['low'].shift(-4)
+            h5 = grouped['high'].shift(-5); l5 = grouped['low'].shift(-5)
+            
             def check_hit(h, l, b_up, b_dn):
-                # 損切ヒット
                 sl = (l < b_dn)
-                # 利確ヒット
                 tp = (h > b_up)
-                # 両方ヒットした場合(大きな足)は、損切(-1)とみなす（保守的運用）
-                # 利確のみ=1, 損切のみ=-1, 両方=-1, なし=0
                 res = np.where(sl, -1, np.where(tp, 1, 0))
                 return res
             r1 = check_hit(h1, l1, barrier_up, barrier_dn)

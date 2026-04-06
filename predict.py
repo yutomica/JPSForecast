@@ -18,7 +18,6 @@ import argparse
 import json
 import sys
 import ast
-from joblib import Parallel, delayed
 import MySQLdb
 
 # プロジェクトのルートをパスに追加
@@ -87,47 +86,31 @@ def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
 def create_features(df: pd.DataFrame, target_date: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
-    print("Creating time-series features in parallel...")
+    print("Creating time-series features (vectorized)...")
 
-    # メモリ枯渇を防ぐため、コピーを生成する手動チャンク分割を廃止し、軽量なViewリストへ戻す
-    stock_groups = [group for _, group in df.groupby('scode')]
-
-    def _process_stock(df_stock: pd.DataFrame) -> pd.DataFrame:
-        # 時系列処理のために日付でソートし、インデックスをリセット
-        df_stock = df_stock.sort_values('date').reset_index(drop=True)
-        engineer = FeatureEngineer(df_stock)
-        pipe = (
-            engineer
-            .apply_momentum_block()
-            .apply_volatility_block()
-            .apply_liquidity_block()
-            .apply_value_block()
-            .apply_quality_block()
-            .apply_size_block()
-            .apply_supplydemand_bloc()
-            .apply_beta_block()
-            .apply_seasonality_block()
-            .apply_event_block()
-            .apply_consensus_block()
-            .apply_governance_block()
-            .apply_bulk_time_series()
-        )
-        return pipe.get_df()
-    try:
-        # pre_dispatchでメモリ展開数を制限。バッチ処理はjoblib(batch_size='auto')に任せる
-        parallel_gen = Parallel(n_jobs=-1, pre_dispatch='2*n_jobs', return_as="generator")(
-            delayed(_process_stock)(group) for group in stock_groups
-        )
-        processed_stocks = list(tqdm(parallel_gen, total=len(stock_groups), desc="Creating TS Features"))
-    except TypeError:
-        # joblibのバージョンが古い場合は verbose=10 で標準出力に進捗を表示
-        processed_stocks = Parallel(n_jobs=-1, pre_dispatch='2*n_jobs', verbose=10)(
-            delayed(_process_stock)(group) for group in stock_groups
-        )
-    if not processed_stocks:
+    # 時系列処理のために全体を銘柄・日付でソートし、インデックスをリセット
+    df = df.sort_values(['scode', 'date']).reset_index(drop=True)
+    engineer = FeatureEngineer(df)
+    pipe = (
+        engineer
+        .apply_momentum_block()
+        .apply_volatility_block()
+        .apply_liquidity_block()
+        .apply_value_block()
+        .apply_quality_block()
+        .apply_size_block()
+        .apply_supplydemand_bloc()
+        .apply_beta_block()
+        .apply_seasonality_block()
+        .apply_event_block()
+        .apply_consensus_block()
+        .apply_governance_block()
+        .apply_bulk_time_series()
+    )
+    full_df = pipe.get_df()
+    if full_df.empty:
         print("Warning: No data after time-series feature engineering.")
         return pd.DataFrame()
-    full_df = pd.concat(processed_stocks, ignore_index=True)
     gc.collect()
     # TCN等の時系列モデル推論に必要な「過去252営業日分」のデータに絞り込み、不要な過去データの横断面加工をスキップ
     target_dt = pd.to_datetime(target_date)

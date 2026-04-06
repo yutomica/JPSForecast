@@ -86,39 +86,41 @@ def standardize_raw_data():
         )
         # セクターインデックスの結合
         df_batch = pd.merge(df_batch,df_sector_indices,on=['date', 'sector33_code'],how='left')
-        for symbol, df_stock in df_batch.groupby('scode'):
-            df_stock = df_stock.sort_values('date').reset_index(drop=True)
-            engine = FeatureEngineer(df_stock)
-            pipe = (
-                engine
-                .apply_momentum_block()
-                .apply_volatility_block()
-                .apply_liquidity_block()
-                .apply_value_block()
-                .apply_quality_block()
-                .apply_size_block()
-                .apply_supplydemand_bloc()
-                .apply_beta_block()
-                .apply_seasonality_block()
-                .apply_event_block()
-                .apply_consensus_block()
-                .apply_governance_block()
-                .apply_tempfeat()
-                .apply_bulk_time_series()
-                .apply_timeseries_targets()
-            )
-            df_feat = pipe.get_df()
-            if df_feat.empty: continue
+        
+        df_batch = df_batch.sort_values(['scode', 'date']).reset_index(drop=True)
+        engine = FeatureEngineer(df_batch)
+        pipe = (
+            engine
+            .apply_momentum_block()
+            .apply_volatility_block()
+            .apply_liquidity_block()
+            .apply_value_block()
+            .apply_quality_block()
+            .apply_size_block()
+            .apply_supplydemand_bloc()
+            .apply_beta_block()
+            .apply_seasonality_block()
+            .apply_event_block()
+            .apply_consensus_block()
+            .apply_governance_block()
+            .apply_tempfeat()
+            .apply_bulk_time_series()
+            .apply_timeseries_targets()
+        )
+        df_feat_all = pipe.get_df()
+        
+        for symbol, df_stock in df_feat_all.groupby('scode'):
+            if df_stock.empty: continue
             # 過去データの除外、momentum_12_1基準で
-            df_feat = df_feat.dropna(subset='MOM_Momentum12-1_RAW')
+            df_stock = df_stock.dropna(subset='MOM_Momentum12-1_RAW')
             # 上場間も無い銘柄を除外、Dist_SMA75基準で
-            df_feat = df_feat.dropna(subset='MOM_DistSMA75_RAW')
+            df_stock = df_stock.dropna(subset='MOM_DistSMA75_RAW')
             # 直近データの除外、Future_X_Str基準で
-            df_feat = df_feat.dropna(subset='Future_High_Str')
+            df_stock = df_stock.dropna(subset='Future_High_Str')
             # filter
-            df_feat = filter.calc_intrinsic_metrics(df_feat)
+            df_stock = filter.calc_intrinsic_metrics(df_stock)
             # 一時保存
-            df_feat.to_parquet(f"{TEMP_DIR}/{symbol}.parquet")
+            df_stock.to_parquet(f"{TEMP_DIR}/{symbol}.parquet")
 
     del df_topix, df_fins, df_investor_types, df_margin_weekly, df_margin, df_shrt_sector, df_sector_indices
     gc.collect()
