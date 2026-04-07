@@ -21,12 +21,14 @@ LOG_FILE="${LOG_DIR}/prediction_${CURRENT_TIME}.log"
 cd "${PROJECT_DIR}" || exit 1
 
 echo "==========================================" | tee -a "${LOG_FILE}"
-echo "Starting Daily Prediction: $(date)" | tee -a "${LOG_FILE}"
+echo "Starting Daily Prediction: $(date "+%Y-%m-%d %H:%M:%S")" | tee -a "${LOG_FILE}"
 echo "==========================================" | tee -a "${LOG_FILE}"
 
 # predict.py の実行 (標準出力と標準エラー出力をターミナルとログファイル両方に出力)
-python predict.py 2>&1 | tee -a "${LOG_FILE}"
+# cron実行時は環境変数が引き継がれないため、必要に応じて仮想環境を有効化してください
+# source "${PROJECT_DIR}/jps-env/bin/activate"
+/Users/yuu/.pyenv/shims/python predict.py 2>&1 | tee -a "${LOG_FILE}"
 
 echo "==========================================" | tee -a "${LOG_FILE}"
-echo "✅ Prediction completed: $(date)" | tee -a "${LOG_FILE}"
+echo "✅ Prediction completed: $(date "+%Y-%m-%d %H:%M:%S")" | tee -a "${LOG_FILE}"
 echo "==========================================" | tee -a "${LOG_FILE}"

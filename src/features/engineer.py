@@ -1133,7 +1133,7 @@ class FeatureEngineer:
         # 既存: Gauss Rank (正規分布化)
         epsilon = 1e-6
         rank_clipped = tac_rank * (1 - 2 * epsilon) + epsilon
-        new_cols['target_tac_gauss_rank'] = erfinv(2 * rank_clipped - 1)
+        new_cols['target_tac_gauss_rank'] = (erfinv(2 * rank_clipped - 1)).clip(-3.0, 3.0)
 
         # --- 2. Linear Residual (Category C) ---
         # 簡易的な実装: リターンを「セクター平均」と「市場平均」で説明する線形モデルの残差
@@ -1158,7 +1158,7 @@ class FeatureEngineer:
         str_rank = self.df.groupby('date')['target_ret_60'].rank(pct=True, method='average')
         new_cols['target_str_rank'] = str_rank
         str_rank_clipped = str_rank * (1 - 2 * epsilon) + epsilon
-        new_cols['target_str_gauss_rank'] = erfinv(2 * str_rank_clipped - 1)
+        new_cols['target_str_gauss_rank'] = (erfinv(2 * str_rank_clipped - 1)).clip(-3.0, 3.0)
         # Peer Group Neutralized Alpha (60d)
         sector_mean_60 = self.df.groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
         new_cols['target_str_peer_alpha'] = self.df['target_ret_60'] - sector_mean_60

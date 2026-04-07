@@ -21,6 +21,17 @@ def evaluate_model_performance(df, score_col, target_col, n_bins=5, horizon=5, s
     df = df[['date', 'scode', score_col, target_col]].dropna(subset=[score_col, target_col]).copy()
     # 前処理: リターンをログリターンに変換
     df['log_return'] = np.log(df[target_col])
+
+    # --- 日別スコア上位10銘柄の評価 ---
+    print(f"🏆 Calculating Top 10 Metrics for {score_col}...")
+    def get_top10_metrics(group):
+        top10 = group.nlargest(10, score_col)
+        return pd.Series({
+            'top10_min_score': top10[score_col].min(),
+            'top10_mean_return': top10[target_col].mean()
+        })
+    top10_metrics = df.groupby('date').apply(get_top10_metrics)
+
     # Rank IC の算出 
     print(f"📊 Calculating Rank IC for {score_col}...")
     def calc_daily_ic(group):
@@ -50,7 +61,7 @@ def evaluate_model_performance(df, score_col, target_col, n_bins=5, horizon=5, s
     
     # --- 4. 可視化 ---
     daily_count = df.groupby('date').size().rename('target_count')
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 20), sharex=True)
     # ICの推移
     daily_ic.rolling(window=20).mean().plot(ax=ax1, color='tab:blue', alpha=0.8)
     ax1.axhline(0, color='black', linestyle='--', alpha=0.5)
@@ -76,6 +87,19 @@ def evaluate_model_performance(df, score_col, target_col, n_bins=5, horizon=5, s
     lines_1, labels_1 = ax3.get_legend_handles_labels()
     lines_2, labels_2 = ax3_twin.get_legend_handles_labels()
     ax3.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
+
+    # 上位10銘柄の推移
+    ax4.plot(top10_metrics.index, top10_metrics['top10_min_score'], color='tab:purple', label='Top 10 Min Score')
+    ax4.set_ylabel("Min Score (Top 10)")
+    ax4.set_title(f"Top 10 Min Score and Mean Return - {score_col}")
+    ax4_twin = ax4.twinx()
+    ax4_twin.plot(top10_metrics.index, top10_metrics['top10_mean_return'], color='tab:orange', alpha=0.8, label='Top 10 Mean Return')
+    ax4_twin.set_ylabel(f"Mean Return ({target_col})")
+    
+    lines_3, labels_3 = ax4.get_legend_handles_labels()
+    lines_4, labels_4 = ax4_twin.get_legend_handles_labels()
+    ax4.legend(lines_3 + lines_4, labels_3 + labels_4, loc='upper left')
+
     plt.tight_layout()
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
@@ -88,7 +112,7 @@ def evaluate_model_performance(df, score_col, target_col, n_bins=5, horizon=5, s
     daily_ic.name = 'daily_ic'
     cum_log_ret_renamed = cum_log_ret.copy()
     cum_log_ret_renamed.columns = [f'cum_log_ret_Q{i+1}' for i in range(n_bins)]
-    result_df = pd.concat([daily_count, daily_ic, cum_log_ret_renamed], axis=1).reset_index()
+    result_df = pd.concat([daily_count, daily_ic, cum_log_ret_renamed, top10_metrics], axis=1).reset_index()
     return result_df
 
 # --- 実行例 ---
