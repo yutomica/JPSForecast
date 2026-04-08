@@ -219,6 +219,7 @@ class GANDALFWrapper(BaseModelWrapper):
             return np.array([], dtype=np.float32)
 
         self.model.eval()
+        self._set_seed(int(self.params.get("random_state", 42)))
         preds = []
         batch_size = int(self.params.get("predict_batch_size", self.params.get("batch_size", 4096)))
 
@@ -414,6 +415,10 @@ class GANDALFWrapper(BaseModelWrapper):
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            import os
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
     # def __getstate__(self):
     #     state = self.__dict__.copy()

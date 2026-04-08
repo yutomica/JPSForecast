@@ -124,9 +124,8 @@ def train(cfg: DictConfig) -> float:
         if train_val_meta.empty:
             print(f"⚠️ WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score -999.0.")
             return -999.0
-        # 日付間引き
+        # T1（ホライズン終了日）の追加
         train_val_meta = add_t1_column(train_val_meta, horizon)
-        train_val_meta = apply_sampling(train_val_meta, interval)
         
         # --- データ分割・CV ---
         # エンバーゴ（Embargo）日数の設定
@@ -190,6 +189,12 @@ def train(cfg: DictConfig) -> float:
         fold_pipelines = []
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
             print(f"\n{'-'*25} Fold {i} {'-'*25}")
+            
+            # --- 学習データのみ日付間引きを適用 ---
+            train_meta_subset = meta_df.loc[train_idx].copy()
+            train_meta_sampled = apply_sampling(train_meta_subset, interval)
+            train_idx = train_meta_sampled.index
+            
             # CVサマリー
             if tr_pos is not None and val_pos is not None:
                 info = log_split_info(i, tr_pos, val_pos, pos_to_date)

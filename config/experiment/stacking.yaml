@@ -1,0 +1,21 @@
+# @package _global_
+
+defaults:
+  - override /model: lgbm
+  - override /features: all
+  - override /cv : purged_kfold
+
+data:
+  path: "./data/stacking_dir"
+hparams:
+  num_boost_round: 500
+  learning_rate: 0.01
+  num_leaves: 15
+  max_depth: 4
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_alpha: 1.0
+  reg_lambda: 1.0
+  use_time_decay: true
+mlflow:
+  experiment_name: "Stacking_Experiment"

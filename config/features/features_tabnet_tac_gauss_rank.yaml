@@ -1,48 +1,34 @@
 name: tac_gauss_rank
 feature_cols:
- - BET_MarketVolChange_TSZ_20D
- - BET_SectorRel_CSZ
- - CON_RevisionRate_CSZ
- - EVT_EPSActual_CSZ
- - EVT_IsMissingEPS_CSZ
- - LIQ_LogTradingCap_CSZ
- - MOM_DistHigh60_CSZ
- - MOM_DistSMA5_CSZ
- - MOM_High52wDist_CSZ
- - MOM_MACDHistDiff_TSZ_20D
- - MOM_MADev75_CSZ
- - MOM_MaxGain5_TSZ_20D
- - MOM_Momentum12-1_CSZ
+ - BET_Beta60_TSZ_20D
+ - BET_MarketHV20_TSZ_20D
+ - BET_MarketReturn_CSR
+ - BET_MarketReturn_CSZ
+ - BET_MarketTrendIdx_TSZ_20D
+ - BET_RS25_TSZ_20D
+ - CON_RevisionRate_CSR
+ - MOM_DistHigh250_TSZ_20D
  - MOM_Momentum12-1_TSZ_20D
  - MOM_NewHighFlag3_CSZ
- - MOM_RCI26_TSZ_20D
- - MOM_Return12m_CSZ
- - MOM_Return20d_CSZ
- - MOM_Return20d_TSZ_20D
- - MOM_Return5d_TSZ_20D
- - MOM_Return6m_TSZ_20D
- - QLT_OperatingProfitGrowthYOY_TSZ_20D
- - QLT_SalesGrowthYOY_TSZ_20D
+ - MOM_Return12m_TSZ_20D
+ - QLT_ROE_CSZ
  - SEA_CosDayOfWeek_RAW
  - SEA_SinDayOfWeek_RAW
- - SPD_DistVWAP5_CSZ
- - SPD_DistVWAP5_TSZ_20D
- - SPD_MarginRatio_CSZ
  - SPD_MarketForeignBuy_CSZ
  - SPD_MarketIndividualBuy_CSZ
- - SPD_MarketIndividualBuy_TSZ_20D
- - SPD_VWAPDev_TSZ_20D
- - VOL_ATRSqueeze_TSZ_20D
+ - SPD_OverseaFlowTrend_CSZ
+ - VAL_EarningsYield_CSZ
+ - VAL_LogPBR_CSZ
+ - VAL_LogPBR_TSZ_20D
+ - VOL_ATRRatio_CSZ
+ - VOL_ATRSqueezeBB_CSZ
  - VOL_DownsideDev60_TSZ_20D
  - VOL_HistVol20_CSZ
- - VOL_HistVol20_TSZ_20D
- - VOL_HV30_TSZ_20D
+ - VOL_HV30_CSZ
+ - VOL_HVSlope_CSZ
  - VOL_LargeMoveCount_CSZ
  - VOL_ReturnVolatility_CSZ
- - VOL_ReturnVolatility_TSZ_20D
  - VOL_Volatility60_CSZ
  - VOL_Volatility60_TSZ_20D
- - VOL_VolatilityParkinson_CSZ
- - VOL_VolatilityParkinson_TSZ_20D
- - VOL_VolRatioHV_TSZ_20D
+ - VOL_VolumeMA25_CSZ
 cat_cols:

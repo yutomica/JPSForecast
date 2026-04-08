@@ -1,11 +1,11 @@
-n_d: 16
+n_d: 8
 n_a: 24
-n_steps: 3
+n_steps: 5
 gamma: 1.2
 lambda_sparse: 3.5e-05
-n_independent: 2  # 【追加】独立したGLU層数
-n_shared: 2       # 【追加】共有されたGLU層数
-momentum: 0.08    # 【追加】BNのモメンタム（金融向けに低めに設定）
+n_independent: 2  
+n_shared: 2      
+momentum: 0.08   
 optimizer_fn: "adam"
 optimizer_params:
   lr: 0.002
