@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import mlflow
 import optuna
+from hydra.utils import get_method
 from .base import BaseModelWrapper
 from .pruning import calculate_spearman_ic, log_epoch_metrics
 
@@ -13,6 +14,11 @@ class LGBMWrapper(BaseModelWrapper):
         self.task_type = task_type
         params.pop("use_time_decay", None)
         params.pop("time_decay_rate", None)
+        # カスタム目的関数および評価関数のパスを取得
+        self.custom_objective_path = params.pop("custom_objective", None)
+        self.custom_metric_path = params.pop("custom_metric", None)
+        
+        # デフォルトの目的関数と評価指標を設定
         if self.task_type == "classification":
             params["objective"] = params.get("objective", "binary")
             params["metric"] = params.get("metric", "binary_logloss")
@@ -22,6 +28,10 @@ class LGBMWrapper(BaseModelWrapper):
         else:
             params["objective"] = params.get("objective", "regression")
             params["metric"] = params.get("metric", "rmse")
+        # もしカスタム目的関数のパスが指定されていれば、それで上書き
+        if self.custom_objective_path:
+            params['objective'] = get_method(self.custom_objective_path)
+
         self.params = params
         self.model = None
         self.classes_ = None
@@ -64,6 +74,11 @@ class LGBMWrapper(BaseModelWrapper):
             else:
                 return 'ic', calculate_spearman_ic(preds, labels), True
             
+        # --- Configで指定されたカスタム関数の動的読み込み ---
+        fevals = [custom_ic_eval]
+        if self.custom_metric_path:
+            fevals.append(get_method(self.custom_metric_path))
+
         # 学習の実行
         evals_result = {}
         verbose_val = self.params.get("verbose", -1)
@@ -97,7 +112,7 @@ class LGBMWrapper(BaseModelWrapper):
             valid_sets=valid_sets,
             valid_names=valid_names,
             num_boost_round=self.params.get("num_boost_round", 1000),
-            feval=custom_ic_eval,
+            feval=fevals,
             callbacks=callbacks # 履歴を記録
         )
         # 重要度の作成と保存

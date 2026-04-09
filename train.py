@@ -331,7 +331,7 @@ def train(cfg: DictConfig) -> float:
 
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
-        if cv_method in ["purged_kfold", "cpcv"]:
+        if cv_method in ["purged_kfold", "cpcv", "anchored_walk_forward"]:
             test_res = full_res_df[full_res_df['phase'] == 'valid']
         else: 
             test_res = full_res_df[full_res_df['phase'] == 'test']

@@ -1048,4 +1048,6 @@ class FeatureEngineer:
         self.df['target_str_triple_barrier'] = labels
         self.df['target_str_mdd'] = mdd_labels
         return self
-    
+
+    def get_df(self):
+        return self.df 
