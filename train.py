@@ -1,21 +1,15 @@
 import numpy as np
-from datetime import datetime
 import os
 import gc
-import shap
 import hydra
 import mlflow
-from mlflow.tracking import MlflowClient
 import json
 import pandas as pd
 import joblib
 import tempfile
-import shutil
-from urllib.parse import urlparse
 import copy
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
-import contextlib
 import optuna
 from hydra.utils import instantiate, get_class
 from hydra.core.hydra_config import HydraConfig
@@ -25,7 +19,9 @@ from src.preprocess.sampling import apply_sampling
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
-from src.evaluation import evaluate_metrics, calculate_bin_stats
+from src.utils.evaluation import evaluate_metrics, calculate_bin_stats
+from src.utils.feature_selection import calculate_shap, calculate_mda
+from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
 # alembic のロガーを取得し、ログレベルを WARNING に上げる
@@ -44,40 +40,7 @@ mlflow_pyfunc_logger.setLevel(logging.ERROR)
 
 
 def train(cfg: DictConfig) -> float:
-    # MLflowの初期設定 Hydraがカレントディレクトリを変更するため、絶対パスでDBを指定する
-    mlflow_db_path = cfg.mlflow.get("tracking_uri")
-    mlflow.set_tracking_uri(mlflow_db_path)
-    # 実験が削除済み(deleted)の場合は復元してからセットする
-    client = MlflowClient()
-    experiment = client.get_experiment_by_name(cfg.mlflow.experiment_name)
-    if experiment and experiment.lifecycle_stage == 'deleted':
-        print(f"Restoring deleted experiment: {cfg.mlflow.experiment_name}")
-        client.restore_experiment(experiment.experiment_id)
-    mlflow.set_experiment(cfg.mlflow.experiment_name)
-    # 環境変数から親Run IDを取得
-    parent_run_id = os.environ.get("MLFLOW_PARENT_RUN_ID")
-    model_name = cfg.model.get("name", "unknown")
-    target_col = cfg.target.get("name", "unknown")
-    mode = cfg.get("mode", "train")
-    timestamp = datetime.now().strftime("%m%d_%H%M")
-    # 親ラン名: モデル_ターゲット_モード_ドメイン
-    base_run_name = f"{model_name}_{target_col}_{mode}_{timestamp}"
-    # 子ラン名（Trial）: Trial番号_モデル_ドメイン
-    if HydraConfig.initialized() and "job" in HydraConfig.get():
-        trial_num = HydraConfig.get().job.get("num", "0")
-    else:
-        trial_num = "0"
-    trial_run_name = f"Trial_{trial_num}_{model_name}"
-
-    # 親ランのコンテキストを開始し、その中で子ラン（Nested Run）を開始
-    # contextlib.ExitStackを使ってインデントレベルを維持する
-    stack = contextlib.ExitStack()
-    if parent_run_id:
-        client.set_tag(parent_run_id, "mlflow.runName", base_run_name)
-        stack.enter_context(mlflow.start_run(run_id=parent_run_id))
-        stack.enter_context(mlflow.start_run(run_name=trial_run_name, nested=True))
-    else:
-        stack.enter_context(mlflow.start_run(run_name=base_run_name))
+    client, experiment_id, parent_run_id, stack = setup_mlflow_run(cfg)
 
     with stack:
         mlflow.log_param("model_group", cfg.model.get("group", "unknown"))
@@ -253,7 +216,7 @@ def train(cfg: DictConfig) -> float:
             #     total_epochs = cfg.hparams.get("max_epochs", cfg.hparams.get("num_boost_round", 1000))
             #     fit_kwargs["epoch_callback"] = create_pruning_callback(
             #         client=client, 
-            #         experiment_id=experiment.experiment_id, 
+        #         experiment_id=experiment_id, 
             #         parent_run_id=parent_run_id,
             #         fold_idx=i,
             #         past_fold_scores=valid_metrics.copy(),
@@ -280,13 +243,7 @@ def train(cfg: DictConfig) -> float:
             # --- 特徴量スクリーニングロジック ---
             if cfg.get("mode") == "feature_screening":
                 print(f"  🔹 [Screening] Calculating SHAP for Fold {i}...")
-                # SHAP算出 (Validデータからサンプリングして計算負荷軽減)
-                explainer = shap.TreeExplainer(model.model)
-                shap_values = explainer.shap_values(X_valid)
-                # 回帰の場合、shap_valuesはndarray。クラス分類の場合はリストの可能性あり
-                if isinstance(shap_values, list):
-                    shap_values = shap_values[1] # バイナリ分類のPositiveクラスなどを想定
-                abs_shap = np.abs(shap_values).mean(axis=0)
+                abs_shap = calculate_shap(model, X_valid)
                 all_fold_shap_values.append(abs_shap)
 
             # メトリクス算出 (Train / Valid / Test)
@@ -307,38 +264,14 @@ def train(cfg: DictConfig) -> float:
             # 特徴量精査 (MDA) ロジックの追加
             if cfg.get("mode") == "feature_select":
                 print(f"  🔹 [Selection] Calculating MDA for Fold {i}...")
-                # ベースライン精度の取得 (ValidデータのIC)
                 baseline_score = valid_ic
-                fold_mda = {}
                 y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values
-                # 各特徴量を順番にシャッフルして精度低下を測定
-                for col_idx, col_name in enumerate(feature_cols):
-                    # メモリ節約のため、破壊的な変更を避けコピーを作成
-                    X_valid_permuted = X_valid.copy() # X_valid は DataFrame or ndarray
-                    # --- 日次クロスセクション内でのシャッフル ---
-                    dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
-                    unique_dates = np.unique(dates_for_shuffle)
-                    for d in unique_dates:
-                        date_mask = (dates_for_shuffle == d)
-                        if isinstance(X_valid_permuted, pd.DataFrame):
-                            # DataFrameの場合
-                            date_pos = np.where(date_mask)[0]
-                            shuffled_values = np.random.permutation(X_valid_permuted.iloc[date_pos, col_idx].values)
-                            X_valid_permuted.iloc[date_pos, col_idx] = shuffled_values
-                        else:
-                            # ndarrayの場合 (TCNなど)
-                            date_indices = np.where(date_mask)[0]
-                            idx_perm = np.random.permutation(date_indices)
-                            if X_valid_permuted.ndim == 3:
-                                X_valid_permuted[date_indices, :, col_idx] = X_valid_permuted[idx_perm, :, col_idx]
-                            else:
-                                X_valid_permuted[date_indices, col_idx] = X_valid_permuted[idx_perm, col_idx]
-                    # シャッフル後のデータで予測
-                    p_permuted = model.predict(X_valid_permuted)
-                    m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=cfg.target.task_type, target_col=target_col)
-                    permuted_score = m_permuted['ic']
-                    # 精度低下幅を記録 (MDA)
-                    fold_mda[col_name] = baseline_score - permuted_score
+                dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
+                fold_mda = calculate_mda(
+                    model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
+                    dates_for_shuffle=dates_for_shuffle, feature_cols=feature_cols,
+                    baseline_score=baseline_score, task_type=cfg.target.task_type, target_col=target_col
+                )
                 all_fold_mda_values.append(fold_mda)
             # ビン分析用データの蓄積 
             # メタデータ(Future_High/Low/Close)を含めてDataFrame化
@@ -449,69 +382,19 @@ def train(cfg: DictConfig) -> float:
         # --- final_sweep モード時の最高値更新・Staging昇格・OOF保存 ---
         if cfg.get("mode") == "final_sweep" and avg_valid_metrics != -1.0:
             current_run_id = mlflow.active_run().info.run_id
-            is_best = True
-            if parent_run_id:
-                # 同一親ランの過去のランを取得
-                past_runs = client.search_runs(
-                    experiment_ids=[experiment.experiment_id],
-                    filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'"
-                )
-                past_scores = [
-                    r.data.metrics.get("avg_valid_metrics", -float("inf")) 
-                    for r in past_runs 
-                    if r.info.run_id != current_run_id
-                ]
-                if past_scores:
-                    best_past_score = max(past_scores)
-                    if avg_valid_metrics <= best_past_score:
-                        is_best = False
-            if is_best:
-                print(f"\n🌟 New best score ({avg_valid_metrics:.6f}) achieved! Promoting to Staging and saving OOF data.")
-                # OOFデータの保存 (Stacking用)
-                oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
-                oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"
-                oof_df.to_csv(oof_filename, index=False)
-                mlflow.log_artifact(oof_filename, artifact_path="oof_data")
-                if os.path.exists(oof_filename):
-                    os.remove(oof_filename)
-                # モデルレジストリへの登録とStagingへの昇格
-                registered_model_name = f"{cfg.model.name}_{cfg.target.column}"
-                model_uri = f"runs:/{current_run_id}/model"
-                try:
-                    mv = mlflow.register_model(model_uri, registered_model_name)
-                    client.transition_model_version_stage(
-                        name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=True
-                    )
-                    print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) and transitioned to Staging.")
-                except Exception as e:
-                    print(f"⚠️ Failed to register model to registry (Ensure model is logged as PyFunc if required): {e}")
+            check_and_promote_model(
+                client=client, 
+            experiment_id=experiment_id, 
+                parent_run_id=parent_run_id, 
+                current_run_id=current_run_id, 
+                avg_valid_metrics=avg_valid_metrics, 
+                full_res_df=full_res_df, 
+                cfg=cfg
+            )
 
         # --- MLflow成果物の一括ZIP化とGoogle Driveへの移動 ---
         if cfg.get("output_gdrive", False):
-            # 現在の日時を取得してファイル名を作成（YYYY-MM-DD_HH-MM-SS）
-            current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            zip_filename = f"{current_time}_artifacts_bundle"
-            # 現在のRunの成果物保存場所（ローカルパス）を取得
-            artifact_uri = mlflow.get_artifact_uri()
-            local_artifact_path = urlparse(artifact_uri).path
-            with tempfile.TemporaryDirectory() as tmp_zip_dir:
-                # 圧縮用の一時パス
-                zip_temp_path = os.path.join(tmp_zip_dir, zip_filename)
-                # MLflowの成果物ディレクトリ全体をZIP圧縮
-                # shutil.make_archive(出力先, 形式, 圧縮対象フォルダ)
-                if os.path.exists(local_artifact_path):
-                    shutil.make_archive(zip_temp_path, 'zip', local_artifact_path)
-                    # 生成されたZIPファイルをGoogle Driveのパスへ移動
-                    # path_gdrive は cfg.path_gdrive など、適宜コンフィグから読み取ってください
-                    gdrive_destination = os.path.join(path_to_gdrive,"results_TAC", f"{zip_filename}.zip")
-                    # 移動先ディレクトリが存在することを確認 (親ディレクトリも含めて作成)
-                    os.makedirs(os.path.dirname(gdrive_destination), exist_ok=True)
-                    # ファイルを移動（shutil.move を使用）
-                    shutil.move(f"{zip_temp_path}.zip", gdrive_destination)
-                    print(f"✅ Artifacts bundled and moved to: {gdrive_destination}")
-                else:
-                    print("⚠️ Artifact directory not found. ZIP creation skipped.") 
-                
+            bundle_and_upload_artifacts(path_to_gdrive, cfg.domain.name)
             print("✅ All artifacts have been bundled into a ZIP file and uploaded to MLflow.")
         
         print("\n" + "="*60)

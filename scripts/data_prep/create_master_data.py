@@ -52,7 +52,6 @@ def main(mode = "full"):
         pipe = (
             engineer
             .apply_bulk_cross_sectional()
-            .apply_crosssectional_targets()
         )
         sample_df = pipe.get_df()
         feature_cols = [x for x in sample_df.columns if x.startswith(('MOM_', 'VOL_', 'LIQ_', 'VAL_', 'QLT_', 'SIZ_', 'SPD_', 'BET_', 'SEA_', 'EVT_', 'CON_', 'GOV_'))]
@@ -132,7 +131,6 @@ def main(mode = "full"):
             pipe = (
                 engineer
                 .apply_bulk_cross_sectional()
-                .apply_crosssectional_targets()
             )
             df = pipe.get_df()
             del calc_df, engineer
