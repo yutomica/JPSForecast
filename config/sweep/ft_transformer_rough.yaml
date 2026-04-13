@@ -1,17 +1,11 @@
 # @package _global_
 defaults:
   - override /hydra/sweeper: optuna
-interval:
-  tac: 15
-  str: 40
 hydra:
   sweeper:
     # Optunaの設定
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
-      seed: 42
-    direction: maximize  # ランクICやシャープレシオの最大化
-    n_trials: 12         # 計算負荷を考慮し、まずは40回程度で「山」を探る
     params:
       hparams.n_blocks: choice(1,2,3,4)
       hparams.d_token: choice(32, 64, 96)

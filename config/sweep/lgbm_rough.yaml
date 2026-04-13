@@ -1,26 +1,28 @@
 # @package _global_
 defaults:
   - override /hydra/sweeper: optuna
-interval:
-  tac: 10
-  str: 30
 hydra:
   sweeper:
-    # Optunaの設定
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
-      seed: 42
-    direction: maximize  # Sharpe Ratioなどを最大化
-    n_trials: 18        # 試行回数
     params:
-      hparams.learning_rate: choice(0.05, 0.1)
-      hparams.num_leaves: choice(15, 31, 63)
-      hparams.min_child_samples: choice(200, 500, 1000)
-      # 固定値
-      hparams.max_depth: -1
+      # ======================================================
+      # 【探索対象】 木構造の骨格（アンカーパラメータ）
+      # ======================================================
+      hparams.max_depth: choice(3,5,7)
+      hparams.num_leaves: choice(7,15,31,63)
+      hparams.min_child_samples: choice(200,500,1000,2000)
+
+      # ======================================================
+      # 【固定対象】 Step 2では探索せず固定するパラメータ
+      # ======================================================
+      # 学習速度を優先し、やや高めに固定（Step 4のHPOで 0.01 などに下げる）
+      hparams.learning_rate: 0.05 
+      # 特徴量とデータのサンプリングは標準的な値で固定し、安定性を担保
       hparams.feature_fraction: 0.8
       hparams.bagging_fraction: 0.8
       hparams.bagging_freq: 5
       hparams.lambda_l1: 1.0
       hparams.lambda_l2: 1.0
+      hparams.min_split_gain: 0.1
       hparams.verbose: -1

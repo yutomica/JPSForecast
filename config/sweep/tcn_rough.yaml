@@ -1,22 +1,15 @@
 # @package _global_
 defaults:
   - override /hydra/sweeper: optuna
-interval:
-  tac: 20
-  str: 60
 hydra:
   sweeper:
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
-      seed: 42
-    direction: maximize
-    n_trials: 36
     params:
       # --- アーキテクチャ・アンカー (Grid Search) ---
       hparams.n_layers: choice(3, 4, 5)
       hparams.num_channel: choice(32, 64)
       hparams.kernel_size: choice(3, 5)
-      model.window_size.str: choice(90, 126, 252)
       # --- 学習の安定化用固定値 (ノイズを排除) ---
       hparams.lr: 0.001
       hparams.dropout: 0.2

@@ -47,9 +47,11 @@ def setup_mlflow_run(cfg):
         
     return client, experiment_id, parent_run_id, stack
 
-def check_and_promote_model(client, experiment_id, parent_run_id, current_run_id, avg_valid_metrics, full_res_df, cfg):
+def check_and_promote_model(client, experiment_id, parent_run_id, current_run_id, optimization_score, full_res_df, cfg):
     """過去のRunと比較し、最高値であればStagingに昇格してOOFを保存する"""
     is_best = True
+    direction = cfg.get("optimization_direction", "maximize")
+    
     if parent_run_id:
         # 同一親ランの過去のランを取得
         past_runs = client.search_runs(
@@ -57,17 +59,22 @@ def check_and_promote_model(client, experiment_id, parent_run_id, current_run_id
             filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'"
         )
         past_scores = [
-            r.data.metrics.get("avg_valid_metrics", -float("inf")) 
+            r.data.metrics.get("optimization_score", float("inf") if direction == "minimize" else -float("inf")) 
             for r in past_runs 
             if r.info.run_id != current_run_id
         ]
         if past_scores:
-            best_past_score = max(past_scores)
-            if avg_valid_metrics <= best_past_score:
-                is_best = False
+            if direction == "minimize":
+                best_past_score = min(past_scores)
+                if optimization_score >= best_past_score:
+                    is_best = False
+            else:
+                best_past_score = max(past_scores)
+                if optimization_score <= best_past_score:
+                    is_best = False
                 
     if is_best:
-        print(f"\n🌟 New best score ({avg_valid_metrics:.6f}) achieved! Promoting to Staging and saving OOF data.")
+        print(f"\n🌟 New best score ({optimization_score:.6f}) achieved! Promoting to Staging and saving OOF data.")
         # OOFデータの保存 (Stacking用)
         oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
         oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"

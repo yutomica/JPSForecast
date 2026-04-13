@@ -15,7 +15,7 @@ def calculate_shap(model, X_valid):
     abs_shap = np.abs(shap_values).mean(axis=0)
     return abs_shap
 
-def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, feature_cols, baseline_score, task_type, target_col):
+def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, feature_cols, baseline_score, task_type, target_col, opt_metric="ic"):
     """
     各特徴量を順番にシャッフルして精度低下を測定する(MDA)
     """
@@ -44,8 +44,8 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
                     
         # シャッフル後のデータで予測
         p_permuted = model.predict(X_valid_permuted)
-        m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=task_type, target_col=target_col)
-        permuted_score = m_permuted['ic']
+        m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=task_type, target_col=target_col, dates=dates_for_shuffle)
+        permuted_score = m_permuted.get(opt_metric, np.nan)
         # 精度低下幅を記録 (MDA)
         fold_mda[col_name] = baseline_score - permuted_score
         

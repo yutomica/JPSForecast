@@ -23,6 +23,8 @@ class FTTransformerWrapper(BaseModelWrapper):
     def __init__(self, task_type="regression", **params):
         self.task_type = task_type
 
+        # paramsがpopされて消える前に、ハイパーパラメータ全体を保持
+        self.params = copy.deepcopy(params)
         # train.py から渡される可能性のある別名も吸収
         self.cat_idxs = params.pop("cat_idx", params.pop("cat_idxs", []))
         self.cat_dims = params.pop("cat_dims", params.pop("cat_dim", []))
@@ -130,12 +132,35 @@ class FTTransformerWrapper(BaseModelWrapper):
         )
 
     def _compute_loss(self, logits, y, sample_weight=None):
+        loss_type = self.params.get("objective", "mse")
+
         if self.task_type == "classification":
             # train.py の task_type は binary classification 前提とみなす
             y = y.float().view(-1)
             loss_each = nn.functional.binary_cross_entropy_with_logits(
                 logits.view(-1), y, reduction="none"
             )
+        elif loss_type == "quantile":
+            y = y.float().view(-1)
+            alpha = self.params.get("alpha", 0.5)
+            diff = y - logits.view(-1)
+            loss_each = torch.max(alpha * diff, (alpha - 1) * diff)
+        elif loss_type in ["fair", "fair_loss"]:
+            y = y.float().view(-1)
+            c = self.params.get("fair_c", 1.0)
+            abs_diff = torch.abs(y - logits.view(-1))
+            loss_each = c * (abs_diff - c * torch.log1p(abs_diff / c))
+        elif loss_type == "tweedie":
+            y = torch.max(y.float().view(-1), torch.zeros_like(y.float().view(-1)))
+            p = self.params.get("tweedie_variance_power", 1.5)
+            mu = torch.clamp(logits.view(-1), min=1e-6)
+            loss_each = (mu ** (2 - p)) / (2 - p) - y * (mu ** (1 - p)) / (1 - p)
+        elif loss_type == "asymmetric_mse":
+            y = y.float().view(-1)
+            alpha = self.params.get("alpha", 3.0)
+            beta = self.params.get("beta", 1.0)
+            diff = y - logits.view(-1)
+            loss_each = torch.where(diff > 0, alpha * (diff ** 2), beta * (diff ** 2))
         else:
             y = y.float().view(-1)
             loss_each = (logits.view(-1) - y) ** 2
@@ -212,6 +237,8 @@ class FTTransformerWrapper(BaseModelWrapper):
         best_state = copy.deepcopy(self.model.state_dict())
         best_val_loss = float("inf")
         wait = 0
+        
+        loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
 
         for epoch in range(self.max_epochs):
             # ---- train ----
@@ -238,7 +265,7 @@ class FTTransformerWrapper(BaseModelWrapper):
 
                     train_total += loss.item() * x_num.shape[0]
                     train_count += x_num.shape[0]
-                    pbar.set_postfix({"train_loss": f"{train_total / max(train_count, 1):.6f}"})
+                    pbar.set_postfix({f"train_{loss_name}": f"{train_total / max(train_count, 1):.6f}"})
 
             train_loss = train_total / max(train_count, 1)
             self.history["train_loss"].append(train_loss)
@@ -267,7 +294,7 @@ class FTTransformerWrapper(BaseModelWrapper):
 
             self.history["valid_loss"].append(valid_loss)
 
-            tqdm.write(f"Epoch {epoch+1}/{self.max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}")
+            tqdm.write(f"Epoch {epoch+1}/{self.max_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}")
 
             # --- MLflow Logging ---
             metrics_to_log = {"train_loss": train_loss}
@@ -378,33 +405,6 @@ class FTTransformerWrapper(BaseModelWrapper):
                 outputs.append(preds.detach().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).flatten()
-
-    def __getstate__(self):
-        """joblib/pickleで保存する際に呼ばれる"""
-        state = self.__dict__.copy()
-        # シリアライズできないモデルオブジェクトを削除し、代わりにstate_dictを保存
-        if "model" in state and state["model"] is not None:
-            state["_model_state_dict"] = {k: v.cpu() for k, v in state["model"].state_dict().items()}
-            del state["model"]
-        return state
-
-    def __setstate__(self, state):
-        """joblib/pickleで読み込む際に呼ばれる"""
-        model_state = state.pop("_model_state_dict", None)
-        self.__dict__.update(state)
-        
-        # モデルの再構築
-        if model_state is not None:
-            # _build_modelを呼び出すためにダミーのDataFrameを作成
-            # 特徴量名とカテゴリカルインデックスが復元されていることが前提
-            dummy_df = pd.DataFrame(
-                np.zeros((1, len(self._feature_names))), 
-                columns=self._feature_names
-            )
-            self._build_model(dummy_df)
-            self.model.load_state_dict(model_state)
-            self.model.to(self.device)
-            self.model.eval()
 
     def __getstate__(self):
         """joblib/pickleで保存する際に呼ばれる"""

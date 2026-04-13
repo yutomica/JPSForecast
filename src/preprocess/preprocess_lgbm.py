@@ -31,26 +31,43 @@ class LGBMPreprocessor(BasePreprocessor):
         """
         if not self.is_fitted:
             raise ValueError("Preprocessor must be fitted.")
+            
         if isinstance(data, pd.DataFrame):
             # 推論時：APIから取得した生のDataFrame
             df_processed = data[self.feature_cols].copy()
+            # pandasでの置換は遅いため、数値列に限定して処理
+            num_cols = [c for c in df_processed.columns if c not in self.cat_cols]
+            if num_cols:
+                df_processed[num_cols] = df_processed[num_cols].replace([np.inf, -np.inf], np.nan)
         else:
             # 学習時：memmapからスライシング
             # row_indices, col_indices を使って必要な次元だけをメモリに乗せる
-            if col_indices is not None:
-                extracted = data[row_indices][:, col_indices]
-            else:
-                extracted = data[row_indices]
+            # メモリ使用量のピークを抑えるためチャンクごとに読み込む
+            chunk_size = 50000
+            num_cols_to_extract = len(col_indices) if col_indices is not None else data.shape[1]
+            extracted = np.empty((len(row_indices), num_cols_to_extract), dtype=np.float32)
+            for i in range(0, len(row_indices), chunk_size):
+                chunk_rows = row_indices[i:i+chunk_size]
+                if col_indices is not None:
+                    extracted[i:i+chunk_size, :] = data[chunk_rows][:, col_indices]
+                else:
+                    extracted[i:i+chunk_size, :] = data[chunk_rows]
+            # インプレース処理で巨大な中間配列の生成を防ぎ、infをnanに置換する
+            np.nan_to_num(extracted, copy=False, nan=np.nan, posinf=np.nan, neginf=np.nan)
             df_processed = pd.DataFrame(extracted, columns=self.feature_cols)
-        # 無限大の処理
-        df_processed.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
         # カテゴリ変数の型変換
         for col in self.cat_cols:
             if col in df_processed.columns:
                 df_processed[col] = df_processed[col].fillna(-1).astype(int).astype('category')
+                
         num_cols = list(dict.fromkeys([c for c in df_processed.columns if c not in self.cat_cols]))
         if num_cols:
-            df_processed[num_cols] = df_processed[num_cols].astype('float32')
+            # すでにfloat32の場合はastypeをスキップし、無駄なメモリコピーを防ぐ
+            cols_to_cast = [c for c in num_cols if df_processed[c].dtype != 'float32']
+            if cols_to_cast:
+                df_processed[cols_to_cast] = df_processed[cols_to_cast].astype('float32')
+                
         return df_processed
 
     def save(self, filename='scaler.joblib'):

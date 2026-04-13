@@ -16,3 +16,4 @@ data/
 .vscode/
 .env
 logs/
+optuna.db

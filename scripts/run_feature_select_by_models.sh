@@ -15,6 +15,12 @@ run_feature_select() {
     local features=$4
     local hparams=$5
 
+    # LGBM向けにGPUを有効化する引数を追加
+    local gpu_args=""
+    if [ "$USE_GPU" -eq 1 ] && [ "$model" = "lgbm" ]; then
+        gpu_args="++hparams.device_type=gpu"
+    fi
+
     echo "============================================================"
     echo "Starting Feature Selection: $model ($domain)"
     echo "============================================================"
@@ -29,7 +35,8 @@ run_feature_select() {
         period=${domain}_standard \
         cv=purged_kfold \
         mlflow.experiment_name="${exp_name}" \
-        +mode=feature_select
+        +mode=feature_select \
+        $gpu_args
         
     echo "Finished Feature Selection for $model ($domain)."
     echo ""

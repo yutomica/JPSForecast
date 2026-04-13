@@ -1,17 +1,19 @@
-# config/hparams/lgbm_default.yaml
-objective: "regression"
-metric: "rmse"
-boosting_type: "gbdt"
-importance_type: "gain"
+# config/hparams/lgbm_screening.yaml
+boosting_type: gbdt
+importance_type: gain
 n_jobs: -1
 random_state: 42
-learning_rate: 0.01
-num_leaves: 31
-max_depth: 8
-min_child_samples: 100
+learning_rate: 0.005        # 【修正】0.05は高すぎる。0.01〜0.005まで下げて「ゆっくり」学習させる
+n_estimators: 10000         # このままでOK（アーリーストッピングで止めるため）
+early_stopping_round: 100   # 【修正】学習率を下げたため、忍耐力（patience）を100〜200に増やす
+max_depth: 3                # 【修正】4でも良いが、3にして「3次以上の相互作用」を完全に禁止する方が安全
+num_leaves: 7               # 【修正】max_depth=3の場合、最大葉数は 2^3=8。余裕を持たせて7以下にする
 subsample: 0.8
-subsample_freq: 5
-colsample_bytree: 0.5
-lambda_l1: 1.0
+subsample_freq: 1
+colsample_bytree: 0.5       # 特徴量の半分をランダムに隠す（非常に良い設定）
+colsample_bynode: 0.8       # 【追加】ノードの分岐ごとにも特徴量を隠し、さらに多様な特徴量に光を当てる
+min_child_samples: 500      # 【追加・最重要】1つの葉に最低500のサンプルがないと分岐させない。少数のノイズへの適合を物理的に防ぐ
+reg_alpha: 1.0              # 【追加】L1正則化（Lasso）。効かない特徴量の重みを強制的に0に落とす
+reg_lambda: 1.0             # 【追加】L2正則化（Ridge）。特定の木に予測が依存しすぎるのを防ぐ
 use_time_decay: false
-n_estimators: 10000
+verbose: -1

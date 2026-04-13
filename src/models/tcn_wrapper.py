@@ -17,9 +17,44 @@ class TCNWrapper(BaseModelWrapper):
     def __init__(self, task_type="regression", **params):
         self.task_type = task_type
         self.params = params
-        self.device = torch.device("cpu") # 8GBメモリではCPUが安定
+        device_name = self.params.pop("device_name", "cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            "cuda" if (device_name == "cuda" and torch.cuda.is_available()) else "cpu"
+        )
         self.model = None
         self.history = {'train_loss': [], 'valid_loss': []}
+
+    def _compute_loss(self, logits, y, sample_weight=None):
+        loss_type = self.params.get("objective", "mse")
+        
+        if self.task_type == "classification":
+            loss_each = nn.BCEWithLogitsLoss(reduction='none')(logits.view(-1), y.float().view(-1))
+        elif loss_type == "quantile":
+            alpha = self.params.get("alpha", 0.5)
+            diff = y.float().view(-1) - logits.view(-1)
+            loss_each = torch.max(alpha * diff, (alpha - 1) * diff)
+        elif loss_type == "fair":
+            c = self.params.get("fair_c", 1.0)
+            abs_diff = torch.abs(y.float().view(-1) - logits.view(-1))
+            loss_each = c * (abs_diff - c * torch.log1p(abs_diff / c))
+        elif loss_type == "tweedie":
+            p = self.params.get("tweedie_variance_power", 1.5)
+            # Tweedieは予測値が正である必要があるため最小値を制限
+            mu = torch.clamp(logits.view(-1), min=1e-6)
+            y_c = torch.max(y.float().view(-1), torch.zeros_like(y.float().view(-1)))
+            loss_each = (mu ** (2 - p)) / (2 - p) - y_c * (mu ** (1 - p)) / (1 - p)
+        elif loss_type == "asymmetric_mse":
+            alpha = self.params.get("alpha", 3.0)
+            beta = self.params.get("beta", 1.0)
+            diff = y.float().view(-1) - logits.view(-1)
+            loss_each = torch.where(diff > 0, alpha * (diff ** 2), beta * (diff ** 2))
+        else:
+            loss_each = nn.MSELoss(reduction='none')(logits.view(-1), y.float().view(-1))
+            
+        if sample_weight is not None:
+            loss_each = loss_each * sample_weight.view(-1)
+            
+        return loss_each.mean()
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
         # --- [1. 初期化] Early Stopping 用の変数を準備 ---
@@ -76,25 +111,32 @@ class TCNWrapper(BaseModelWrapper):
             torch.from_numpy(y_train).float(),
             torch.from_numpy(sample_weight).float() # 重みをセット
         )
-        train_loader = DataLoader(train_ds, batch_size=self.params.get('batch_size', 32), shuffle=True)
+        train_loader = DataLoader(
+            train_ds, 
+            batch_size=self.params.get('batch_size', 32), 
+            shuffle=True,
+            pin_memory=(self.device.type == "cuda")
+        )
         optimizer = torch.optim.Adam(
             self.model.parameters(), 
             lr=self.params.get('lr', self.params.get('learning_rate', 0.001)),
             weight_decay=self.params.get('weight_decay', 0.0)
         )
-        # 回帰ならMSE、分類ならBCE
-        criterion = nn.MSELoss(reduction='none') if self.task_type == "regression" else nn.BCEWithLogitsLoss(reduction='none')
         max_epochs = self.params.get('max_epochs', self.params.get('max_epochs', 10))
+        
+        loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
+
         for epoch in range(max_epochs):
             self.model.train()
             epoch_loss = 0
             pbar = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{max_epochs}]", unit="batch", leave=False)
             for batch_x, batch_y, batch_w in pbar:
-                batch_x, batch_y, batch_w = batch_x.to(self.device), batch_y.to(self.device), batch_w.to(self.device)
+                batch_x = batch_x.to(self.device, non_blocking=True)
+                batch_y = batch_y.to(self.device, non_blocking=True)
+                batch_w = batch_w.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 output = self.model(batch_x)
-                raw_loss = criterion(output.view(-1), batch_y) 
-                weighted_loss = (raw_loss * batch_w).mean() 
+                weighted_loss = self._compute_loss(output, batch_y, batch_w)
                 weighted_loss.backward()
                 
                 grad_clip = self.params.get('gradient_clip_val', 0.0)
@@ -114,10 +156,10 @@ class TCNWrapper(BaseModelWrapper):
                     v_input = torch.from_numpy(X_valid).to(self.device)
                     v_target = torch.from_numpy(y_valid).to(self.device).float()
                     v_out = self.model(v_input)
-                    v_loss = criterion(v_out.view(-1), v_target).mean()
+                    v_loss = self._compute_loss(v_out, v_target)
                     avg_v_loss = v_loss.item()
                     self.history['valid_loss'].append(avg_v_loss)
-                    progress_msg += f" - valid_loss: {avg_v_loss:.8f}"
+                    progress_msg += f" - valid_{loss_name}: {avg_v_loss:.8f}"
                     # --- [4. Early Stopping 判定] ---
                     if avg_v_loss < best_v_loss - min_delta:
                         best_v_loss = avg_v_loss

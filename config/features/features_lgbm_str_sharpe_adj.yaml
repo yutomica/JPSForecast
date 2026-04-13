@@ -1,0 +1,36 @@
+name: str_sharpe_adj
+feature_cols:
+ - BET_Beta60_CSR
+ - BET_Beta60_CSZ
+ - BET_Beta60_RAW
+ - BET_Beta60_SNZ
+ - CON_ProgressRate_CSR
+ - CON_ProgressRate_RAW
+ - CON_ProgressRate_TSR_252D
+ - EVT_EPSActual_RAW
+ - EVT_IsMissingEPS_CSR
+ - EVT_IsMissingEPS_SNZ
+ - GOV_MarketSegment_RAW
+ - QLT_EquityRatio_CSZ
+ - QLT_OperatingProfitGrowthYOY_SNZ
+ - QLT_OPMargin_CSR
+ - QLT_OPMargin_CSZ
+ - QLT_OPMargin_RAW
+ - QLT_OPMargin_SNZ
+ - QLT_ROA_RAW
+ - SEA_Quarter_RAW
+ - SPD_MarketIndividualBuy_RAW
+ - SPD_VWAPDev_CSZ
+ - SPD_VWAPDev_RAW
+ - VAL_EarningsYield_CSR
+ - VAL_EarningsYield_RAW
+ - VAL_LogPBR_CSR
+ - VAL_LogPBR_CSZ
+ - VAL_LogPBR_RAW
+ - VAL_LogPBR_TSR_252D
+ - VOL_DownsideDev60_CSR
+ - VOL_VolumeMA25_CSR
+ - VOL_VolumeMA25_RAW
+cat_cols:
+ - GOV_MarketSegment_RAW
+ - SEA_Quarter_RAW

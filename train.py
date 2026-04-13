@@ -51,6 +51,11 @@ def train(cfg: DictConfig) -> float:
         cv_summaries = []   # foldごとの期間情報を貯めて、最後にMLflow artifactにする
         mlflow.log_params(params)
         mlflow.log_dict({"feature_cols": feature_cols}, "configs/feature_cols.json")
+
+        direction = cfg.get("optimization_direction", "maximize")
+        fallback_score = 999.0 if direction == "minimize" else -999.0
+        fallback_metric = 999.0 if direction == "minimize" else -1.0
+
         print("\n" + "="*60)
         print('🚀 Start training model...')
         print("="*60)
@@ -85,10 +90,16 @@ def train(cfg: DictConfig) -> float:
         # ユニバース選定
         train_val_meta = meta_df[mask].copy()
         if train_val_meta.empty:
-            print(f"⚠️ WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score -999.0.")
-            return -999.0
+            print(f"⚠️ WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score {fallback_score}.")
+            return fallback_score
         # T1（ホライズン終了日）の追加
         train_val_meta = add_t1_column(train_val_meta, horizon)
+        # 目的変数と評価用リターンが欠損しているサンプルを除外
+        target_col = cfg.target.column
+        train_val_meta = train_val_meta.dropna(subset=[target_col, 'Future_Close'])
+        if train_val_meta.empty:
+            print(f"⚠️ WARNING: No valid samples left after dropping NaNs for {target_col}. Skipping.")
+            return fallback_score
         
         # --- データ分割・CV ---
         # エンバーゴ（Embargo）日数の設定
@@ -142,7 +153,6 @@ def train(cfg: DictConfig) -> float:
         
         # --- モデルの学習 ---
         print(f"🤖 Training model: {cfg.model.name}")
-        target_col = cfg.target.column
         models = []
         all_results = []
         valid_metrics = []
@@ -154,9 +164,9 @@ def train(cfg: DictConfig) -> float:
             print(f"\n{'-'*25} Fold {i} {'-'*25}")
             
             # --- 学習データのみ日付間引きを適用 ---
-            train_meta_subset = meta_df.loc[train_idx].copy()
-            train_meta_sampled = apply_sampling(train_meta_subset, interval)
-            train_idx = train_meta_sampled.index
+            # train_meta_subset = meta_df.loc[train_idx].copy()
+            # train_meta_sampled = apply_sampling(train_meta_subset, interval)
+            # train_idx = train_meta_sampled.index
             
             # CVサマリー
             if tr_pos is not None and val_pos is not None:
@@ -229,9 +239,9 @@ def train(cfg: DictConfig) -> float:
                 # model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i, **fit_kwargs)
                 model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
             except optuna.exceptions.TrialPruned:
-                print(f"  ✂️  Trial pruned at Fold {i}. Stopping trial and returning -999.0.")
-                mlflow.log_metric("avg_valid_metrics", -999.0)
-                return -999.0
+                print(f"  ✂️  Trial pruned at Fold {i}. Stopping trial and returning {fallback_score}.")
+                mlflow.log_metric("avg_valid_metrics", fallback_score)
+                return fallback_score
                 
             # 予測の実行
             preds = {
@@ -246,33 +256,47 @@ def train(cfg: DictConfig) -> float:
                 abs_shap = calculate_shap(model, X_valid)
                 all_fold_shap_values.append(abs_shap)
 
+            # 最適化に使用するメトリクスをconfigから取得（デフォルトは 'ic'）
+            # カスタムブレンド等の場合は、ベースとして取り出す指標名（例: ndcg_10）を指定する
+            opt_metric_name = cfg.get("optimization_metric", "ic")
+            if opt_metric_name == "custom_ndcg_blend":
+                base_metric_for_blend = f"ndcg_{cfg.get('ndcg_k', 10)}"
+                extract_metric = base_metric_for_blend
+            else:
+                extract_metric = opt_metric_name
+                
             # メトリクス算出 (Train / Valid / Test)
-            valid_ic = None
+            valid_score = None
             for phase in ['train', 'valid', 'test']:
                 if preds[phase] is not None:
                     idx = locals()[f'{phase}_idx']
                     y_true = locals()[f'y_{phase}']
                     # 評価用ICの計算対象として生リターン（Future_Close）を取得
                     y_ret = meta_df.loc[idx, 'Future_Close'].values
-                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col)
+                    dates = meta_df.loc[idx, 'date'].values
+                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10))
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
-                    # ValidのSharpe Ratioを収集
+                    # Validの指定メトリクスを収集
                     if phase == 'valid':
-                        valid_metrics.append(m['ic'])
-                        valid_ic = m['ic']
+                        score = m.get(extract_metric, np.nan)
+                        valid_metrics.append(score)
+                        valid_score = score
+            
             # 特徴量精査 (MDA) ロジックの追加
             if cfg.get("mode") == "feature_select":
                 print(f"  🔹 [Selection] Calculating MDA for Fold {i}...")
-                baseline_score = valid_ic
+                baseline_score = valid_score
                 y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values
                 dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
                 fold_mda = calculate_mda(
                     model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
                     dates_for_shuffle=dates_for_shuffle, feature_cols=feature_cols,
-                    baseline_score=baseline_score, task_type=cfg.target.task_type, target_col=target_col
+                    baseline_score=baseline_score, task_type=cfg.target.task_type, target_col=target_col,
+                    opt_metric=opt_metric
                 )
                 all_fold_mda_values.append(fold_mda)
+            
             # ビン分析用データの蓄積 
             # メタデータ(Future_High/Low/Close)を含めてDataFrame化
             for phase in ['valid', 'test']:
@@ -307,6 +331,7 @@ def train(cfg: DictConfig) -> float:
                 shap_df.to_csv(output_filename)
                 mlflow.log_artifact(output_filename)
                 print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
+        
         # MDA (Feature Sharpe) の集計と保存 ---
         if cfg.get("mode") == "feature_select" and all_fold_mda_values:
             mda_df = pd.DataFrame(all_fold_mda_values) # rows=folds, cols=features
@@ -314,20 +339,28 @@ def train(cfg: DictConfig) -> float:
             mda_df.to_csv(output_filename)
             mlflow.log_artifact(output_filename)
             print(f"✅ Feature Sharpe results saved to {output_filename} (Group Threshold check needed).")
+        
         # 最適化スコアの算出
         if valid_metrics:
             # nan を無視して平均と標準偏差を計算する
-            mean_ic = np.nanmean(valid_metrics)
-            std_ic = np.nanstd(valid_metrics)
-            avg_valid_metrics = mean_ic - std_ic
+            mean_score = np.nanmean(valid_metrics)
+            std_score = np.nanstd(valid_metrics)
+            min_score = np.nanmin(valid_metrics)
+            # カスタムブレンド指標の計算: Mean + 0.5 * Min - 0.2 * Std
+            if cfg.get("optimization_metric") == "custom_ndcg_blend":
+                avg_valid_metrics = mean_score + 0.5 * min_score - 0.2 * std_score
+            else:
+                if direction == "minimize":
+                    avg_valid_metrics = mean_score + std_score
+                else:
+                    avg_valid_metrics = mean_score - std_score
             # すべてが nan だった場合（定数予測など）のフォールバック
             if np.isnan(avg_valid_metrics):
-                avg_valid_metrics = -1.0
+                avg_valid_metrics = fallback_metric
         else:
-            print("⚠️ WARNING: No valid metrics (sharpe/corr) found in validation results.")
-            avg_valid_metrics = -1.0
+            print("⚠️ WARNING: No valid metrics found in validation results.")
+            avg_valid_metrics = fallback_metric
         mlflow.log_metric("avg_valid_metrics", avg_valid_metrics)
-        
 
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
@@ -339,6 +372,40 @@ def train(cfg: DictConfig) -> float:
             test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
             metadata_cols=['Future_High', 'Future_Low', 'Future_Close']
         )
+        
+        # --- Pooled OOF Metric の算出 ---
+        oof_df = full_res_df[full_res_df['phase'] == 'valid']
+        ndcg_k = cfg.get("ndcg_k", 10)
+        if not oof_df.empty:
+            print(f"  🔹 Calculating Pooled OOF Metrics...")
+            y_ret_pooled = oof_df['Future_Close'].values if 'Future_Close' in oof_df.columns else None
+            pooled_metrics = evaluate_metrics(
+                y_true=oof_df['target'].values,
+                y_pred=oof_df['score'].values,
+                y_ret=y_ret_pooled,
+                task_type=cfg.target.task_type,
+                target_col=cfg.target.column,
+                dates=oof_df['date'].values,
+                ndcg_k=ndcg_k
+            )
+            # MLflowにロギング
+            mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
+        else:
+            pooled_metrics = {}
+            
+        # --- 最終的な最適化スコア（Optunaの戻り値）の決定 ---
+        opt_metric = cfg.get("optimization_metric", "ic")
+        if opt_metric.startswith("pooled_"):
+            target_metric = opt_metric.replace("pooled_", "")
+            if target_metric == "ndcg": # "pooled_ndcg" のようにKが指定されていない場合は設定値を使用
+                target_metric = f"ndcg_{ndcg_k}"
+            final_opt_score = pooled_metrics.get(target_metric, fallback_metric)
+            if np.isnan(final_opt_score):
+                final_opt_score = fallback_metric
+        else:
+            final_opt_score = avg_valid_metrics
+            
+        mlflow.log_metric("optimization_score", final_opt_score)
 
         # --- 成果物（Artifacts）の保存 ---
         with tempfile.TemporaryDirectory() as d:
@@ -352,7 +419,6 @@ def train(cfg: DictConfig) -> float:
                 fold_pipelines=fold_pipelines,
                 col_indices=col_indices
             )
-            
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
@@ -368,7 +434,6 @@ def train(cfg: DictConfig) -> float:
             finally:
                 mlflow_models_logger.setLevel(prev_models_level)
                 mlflow_pyfunc_logger.setLevel(prev_pyfunc_level)
-                
             # ビン分析
             bin_stats_path = os.path.join(d, "test_bin_analysis.csv")
             bin_stats.to_csv(bin_stats_path)
@@ -380,14 +445,14 @@ def train(cfg: DictConfig) -> float:
         os.remove(f.name)
         
         # --- final_sweep モード時の最高値更新・Staging昇格・OOF保存 ---
-        if cfg.get("mode") == "final_sweep" and avg_valid_metrics != -1.0:
+        if cfg.get("mode") == "final_sweep" and final_opt_score != fallback_metric:
             current_run_id = mlflow.active_run().info.run_id
             check_and_promote_model(
                 client=client, 
-            experiment_id=experiment_id, 
+                experiment_id=experiment_id, 
                 parent_run_id=parent_run_id, 
                 current_run_id=current_run_id, 
-                avg_valid_metrics=avg_valid_metrics, 
+                optimization_score=final_opt_score, 
                 full_res_df=full_res_df, 
                 cfg=cfg
             )
@@ -398,9 +463,9 @@ def train(cfg: DictConfig) -> float:
             print("✅ All artifacts have been bundled into a ZIP file and uploaded to MLflow.")
         
         print("\n" + "="*60)
-        print(f"🎯 Trial finished. Score: {avg_valid_metrics:.6f}")
+        print(f"🎯 Trial finished. Score: {final_opt_score:.6f}")
         print("="*60 + "\n")
-        return float(avg_valid_metrics)
+        return float(final_opt_score)
 
 @hydra.main(version_base=None, config_path="config", config_name="main")
 def main(cfg: DictConfig):

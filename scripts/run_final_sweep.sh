@@ -48,7 +48,8 @@ print(run.info.run_id)
         cv=purged_kfold \
         mlflow.experiment_name="${exp_name}" \
         sweep=${model}_${target} \
-        +mode=final_sweep
+        +mode=final_sweep \
+        $gpu_args
         
     echo "Finished Feature Selection for $model ($domain)."
     echo ""

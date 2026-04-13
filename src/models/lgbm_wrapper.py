@@ -17,7 +17,6 @@ class LGBMWrapper(BaseModelWrapper):
         # カスタム目的関数および評価関数のパスを取得
         self.custom_objective_path = params.pop("custom_objective", None)
         self.custom_metric_path = params.pop("custom_metric", None)
-        
         # デフォルトの目的関数と評価指標を設定
         if self.task_type == "classification":
             params["objective"] = params.get("objective", "binary")
@@ -28,10 +27,16 @@ class LGBMWrapper(BaseModelWrapper):
         else:
             params["objective"] = params.get("objective", "regression")
             params["metric"] = params.get("metric", "rmse")
-        # もしカスタム目的関数のパスが指定されていれば、それで上書き
+            
+        # カスタム評価関数が指定された場合はLGBM組み込みの評価指標を無効化する
+        # （first_metric_only=Trueの監視対象を確実にカスタム関数にするため）
+        if self.custom_metric_path:
+            params["metric"] = "None"
+            
+        # カスタム目的関数のパスが指定されていれば、params['objective'] に直接セットする (LightGBM 4.0.0以降の仕様)
         if self.custom_objective_path:
             params['objective'] = get_method(self.custom_objective_path)
-
+            
         self.params = params
         self.model = None
         self.classes_ = None
@@ -47,15 +52,21 @@ class LGBMWrapper(BaseModelWrapper):
             if y_valid is not None:
                 y_valid = np.searchsorted(self.classes_, y_valid)
         
+        # paramsからEarly Stoppingとイテレーション数の設定を取り出す（内部コールバックとの競合を防ぐため）
+        patience = self.params.pop("early_stopping_round", 50)
+        patience = self.params.pop("early_stopping_rounds", patience)
+        num_boost_round = self.params.pop("n_estimators", self.params.pop("num_boost_round", 1000))
         # LGBM専用のDataset構造に変換
+        # Early Stoppingの対象を正しく認識させるため、valid_setを先頭に配置する
         train_set = lgb.Dataset(X_train, label=y_train, weight=sample_weight)
-        valid_sets = [train_set]
-        valid_names = ["train"]
+        valid_sets = []
+        valid_names = []
         if X_valid is not None:
             valid_set = lgb.Dataset(X_valid, label=y_valid, reference=train_set)
             valid_sets.append(valid_set)
             valid_names.append("valid")
-            
+        valid_sets.append(train_set)
+        valid_names.append("train")
         # --- カスタム評価関数 (簡易IC) ---
         def custom_ic_eval(preds, train_data):
             labels = train_data.get_label()
@@ -73,23 +84,17 @@ class LGBMWrapper(BaseModelWrapper):
                 return 'ic', calculate_spearman_ic(pred_scores, orig_labels), True
             else:
                 return 'ic', calculate_spearman_ic(preds, labels), True
-            
         # --- Configで指定されたカスタム関数の動的読み込み ---
-        fevals = [custom_ic_eval]
+        fevals = []
         if self.custom_metric_path:
             fevals.append(get_method(self.custom_metric_path))
-
+        fevals.append(custom_ic_eval)
         # 学習の実行
         evals_result = {}
         verbose_val = self.params.get("verbose", -1)
         callbacks = [lgb.record_evaluation(evals_result)]
-        # first_metric_only=True にすることで、元の目的関数のスコアでEarly Stoppingを判定させます
-        callbacks.append(lgb.early_stopping(stopping_rounds=50, first_metric_only=True))
-        # - verboseが0以上の場合のみ、ログ出力コールバックを追加
-        if verbose_val >= 0:
-            # - 例えば 100 イテレーションごとにログを出す設定
-            callbacks.append(lgb.log_evaluation(period=100))
-            
+        callbacks.append(lgb.early_stopping(stopping_rounds=patience, first_metric_only=True))
+        callbacks.append(lgb.log_evaluation(period=10)) # 10イテレーションごとに進捗ログを出力
         # --- Epoch Callback (Pruning等) と MLflow Logging の実行 ---
         def lgbm_mlflow_callback(env):
             metrics = {}
@@ -99,22 +104,22 @@ class LGBMWrapper(BaseModelWrapper):
                     current_ic = eval_result
                 elif eval_name != 'ic':
                     metrics[f"{dataset_name}_{eval_name}"] = eval_result
-            
             if epoch_callback is not None and X_valid is not None:
                 epoch_callback(epoch=env.iteration, current_score=current_ic)
             if metrics:
                 log_epoch_metrics(model_idx, env.iteration, metrics)
         callbacks.append(lgbm_mlflow_callback)
-        
         self.model = lgb.train(
             params=self.params,
             train_set=train_set,
             valid_sets=valid_sets,
             valid_names=valid_names,
-            num_boost_round=self.params.get("num_boost_round", 1000),
+            num_boost_round=num_boost_round,
             feval=fevals,
             callbacks=callbacks # 履歴を記録
         )
+        print(f"=== Best Iteration: {self.model.best_iteration} ===")
+        
         # 重要度の作成と保存
         self._create_feature_importance_df()
         # Feature Importanceの抽出とMLflow保存
