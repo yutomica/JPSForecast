@@ -5,14 +5,15 @@ hydra:
   sweeper:
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
+    n_trials: 72
     params:
       # --- アーキテクチャ・アンカー (Grid Search) ---
       hparams.n_layers: choice(3, 4, 5)
-      hparams.num_channel: choice(32, 64)
+      hparams.num_channel: choice(16, 32, 64)
       hparams.kernel_size: choice(3, 5)
+      hparams.dropout: choice(0.1, 0.3)
       # --- 学習の安定化用固定値 (ノイズを排除) ---
       hparams.lr: 0.001
-      hparams.dropout: 0.2
       hparams.weight_decay: 1e-4
       hparams.batch_size: 1024
       # 固定値

@@ -1,11 +1,11 @@
-# config/hparams/lgbm_tac_rnk.yaml
+# config/hparams/lgbm_tac_vol_scaled_asym_return_anc.yaml
 # anchor parameters
 n_jobs: -1
 random_state: 42
 learning_rate: 0.01
-num_leaves: 31
-max_depth: -1
-min_child_samples: 300
+num_leaves: 15
+max_depth: 7
+min_child_samples: 500
 bagging_fraction: 0.8
 feature_fraction: 1.0
 lambda_l1: 1.0

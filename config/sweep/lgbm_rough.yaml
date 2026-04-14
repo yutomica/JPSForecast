@@ -5,6 +5,7 @@ hydra:
   sweeper:
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
+    n_trials: 48
     params:
       # ======================================================
       # 【探索対象】 木構造の骨格（アンカーパラメータ）
