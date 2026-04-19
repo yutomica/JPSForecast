@@ -8,17 +8,17 @@ dilation_base: 2       # 【追加】指数的な受容野拡大のベース
 dropout: 0.3           # 【更新】金融データのノイズ対策として0.2から引き上げ
 
 # --- 学習制御 ---
-lr: 0.001   # Adamの標準的な初期値
+lr: 0.0001   # Adamの標準的な初期値
 weight_decay: 0.001    # 【更新】1e-4から引き上げ。過学習抑制を強化
 gradient_clip_val: 0.5 # 【追加】TCNの勾配爆発を防ぎ、学習を安定化
 batch_size: 512        # 【更新】8GB RAMでのOOM回避と勾配の安定性のバランス
 
 # --- 最適化・評価 ---
 max_epochs: 100            # 最大エポック。Early Stoppingがあるため多めに設定
-early_stopping_patience: 5 # 【更新】TabNetの設定と合わせ、収束を見極める
+patience: 5 # 【更新】TabNetの設定と合わせ、収束を見極める
 min_delta: 0.0001
 metric_direction: "maximize" # ランクIC等のスコアを最大化
 use_time_decay: false   # 直近データの重みを重視
 time_decay_rate: 0.9999
 random_state: 42
-device_name: "cpu"     # Mac M2環境。必要に応じて "mps" への対応を検討
+device_name: "mps"     # Mac M2環境。必要に応じて "mps" への対応を検討

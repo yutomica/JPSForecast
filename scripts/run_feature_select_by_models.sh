@@ -25,7 +25,7 @@ run_feature_select() {
     echo "Starting Feature Selection: $model ($domain)"
     echo "============================================================"
 
-    python train.py \
+    uv run python train.py \
         domain=${domain} \
         target=${target} \
         data=master \

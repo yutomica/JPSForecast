@@ -10,9 +10,7 @@ step_size: 252
 # None のままなら真の Anchored Expanding Window
 max_train_size: null
 
-# Anchored WFV では classic embargo は未来側trainが無いため効きにくい。
-# ここでは validation 直前ギャップとして扱う。
-pct_embargo: 0.0
-
 # 末尾が val_size 未満でも最後のfoldを使いたい場合のみ true
 allow_incomplete_last_fold: false
+train_start_date: ${period.train_start_date}
+test_start_date: ${period.test_start_date}

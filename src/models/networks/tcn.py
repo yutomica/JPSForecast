@@ -1,104 +1,209 @@
-# src/models/networks/tcn.py
+import math
 import torch
 import torch.nn as nn
-from torch.nn.utils.parametrizations import weight_norm
+import torch.nn.functional as F
 
-class Chomp1d(nn.Module):
-    def __init__(self, chomp_size):
-        super(Chomp1d, self).__init__()
-        self.chomp_size = chomp_size
-    def forward(self, x):
-        return x[:, :, :-self.chomp_size].contiguous()
+
+class CausalConv1d(nn.Module):
+    """Left-padded causal Conv1d."""
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int = 1, bias: bool = True):
+        super().__init__()
+        self.left_padding = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=0,
+            bias=bias,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.left_padding > 0:
+            x = F.pad(x, (self.left_padding, 0))
+        return self.conv(x)
+
 
 class TemporalBlock(nn.Module):
-    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
-        super(TemporalBlock, self).__init__()
-        self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
-                                           stride=stride, padding=padding, dilation=dilation))
-        self.chomp1 = Chomp1d(padding)
-        self.relu1 = nn.LeakyReLU(0.01)
-        self.dropout1 = nn.Dropout(dropout)
-        self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
-                                           stride=stride, padding=padding, dilation=dilation))
-        self.chomp2 = Chomp1d(padding)
-        self.relu2 = nn.LeakyReLU(0.01)
-        self.dropout2 = nn.Dropout(dropout)
-        self.net = nn.Sequential(self.conv1, self.chomp1, self.relu1, self.dropout1,
-                                 self.conv2, self.chomp2, self.relu2, self.dropout2)
-        self.downsample = nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
-        self.relu = nn.LeakyReLU(0.01)
-        self.init_weights()
+    """
+    Standard TCN residual block:
+    causal conv -> norm -> activation -> dropout -> causal conv -> norm -> residual add
+    """
 
-    def init_weights(self):
-        nn.init.kaiming_normal_(self.conv1.weight, nonlinearity='leaky_relu')
-        nn.init.kaiming_normal_(self.conv2.weight, nonlinearity='leaky_relu')
-        if self.downsample is not None:
-            nn.init.kaiming_normal_(self.downsample.weight, nonlinearity='leaky_relu')
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dilation: int,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        use_weight_norm: bool = False,
+        norm_type: str = "group",
+    ):
+        super().__init__()
 
-    def forward(self, x):
-        out = self.net(x)
-        res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res)
+        conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation)
+        conv2 = CausalConv1d(out_channels, out_channels, kernel_size, dilation=dilation)
+
+        if use_weight_norm:
+            conv1.conv = nn.utils.weight_norm(conv1.conv)
+            conv2.conv = nn.utils.weight_norm(conv2.conv)
+
+        self.conv1 = conv1
+        self.conv2 = conv2
+        self.norm1 = self._build_norm(out_channels, norm_type)
+        self.norm2 = self._build_norm(out_channels, norm_type)
+        self.act = self._build_activation(activation)
+        self.dropout = nn.Dropout(dropout)
+        self.downsample = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+        self.reset_parameters()
+
+    @staticmethod
+    def _build_activation(name: str) -> nn.Module:
+        name = (name or "relu").lower()
+        if name == "relu":
+            return nn.ReLU()
+        if name == "gelu":
+            return nn.GELU()
+        if name in {"silu", "swish"}:
+            return nn.SiLU()
+        raise ValueError(f"Unsupported activation: {name}")
+
+    @staticmethod
+    def _build_norm(channels: int, norm_type: str) -> nn.Module:
+        norm_type = (norm_type or "group").lower()
+        if norm_type == "none":
+            return nn.Identity()
+        if norm_type == "batch":
+            return nn.BatchNorm1d(channels)
+        if norm_type == "layer":
+            return nn.GroupNorm(1, channels)
+        if norm_type == "group":
+            return nn.GroupNorm(1, channels)
+        raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = self.downsample(x)
+
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act(out)
+        out = self.dropout(out)
+
+        out = self.conv2(out)
+        out = self.norm2(out)
+        out = self.act(out)
+        out = self.dropout(out)
+
+        return out + residual
+
 
 class TCN(nn.Module):
-    def __init__(self, input_size, output_size, n_layers, num_channel, kernel_size=2, dropout=0.2, embedding_info=None):
-        """
-        Args:
-            input_size (int): 連続変数の特徴量数
-            output_size (int): 出力次元数
-            n_layers (int): レイヤ層数
-            num_channel (int): 各レイヤのチャネル数
-            kernel_size (int): カーネルサイズ
-            dropout (float): ドロップアウト率
-            embedding_info (list of dict): 各カテゴリ変数の設定 
-                             例: [{'num_categories': 33, 'embedding_dim': 8}, ...]
-        """
-        super(TCN, self).__init__()
-        
-        # レイヤ層数とチャネル数からリストを生成
-        num_channels = [num_channel] * n_layers
-            
-        # カテゴリ変数のためのEmbedding層の構築
-        self.embeddings = nn.ModuleList()
-        total_emb_dim = 0
-        if embedding_info:
-            for info in embedding_info:
-                emb = nn.Embedding(info['num_categories'], info['embedding_dim'])
-                # 金融データはスパースになりやすいため、正規分布で初期化
-                nn.init.normal_(emb.weight, std=0.01)
-                self.embeddings.append(emb)
-                total_emb_dim += info['embedding_dim']
-        # TCNバックボーンへの最終的な入力次元数
-        self.total_input_size = input_size + total_emb_dim
-        layers = []
-        num_levels = len(num_channels)
-        for i in range(num_levels):
-            dilation_size = 2 ** i
-            in_channels = self.total_input_size if i == 0 else num_channels[i-1]
-            out_channels = num_channels[i]
-            padding = (kernel_size - 1) * dilation_size
-            layers += [TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
-                                     padding=padding, dropout=dropout)]
-        self.network = nn.Sequential(*layers)
-        self.fc = nn.Linear(num_channels[-1], output_size)
+    """
+    Full-scratch Temporal Convolutional Network for sequence-to-one prediction.
 
-    def forward(self, x_cont, x_cat=None):
-        """
-        Args:
-            x_cont: 連続変数テンソル [Batch, SeqLen, InputSize]
-            x_cat: カテゴリ変数テンソル [Batch, SeqLen, NumCatFeatures] (整数型)
-        """
-        # カテゴリ変数の処理と結合
-        if x_cat is not None and len(self.embeddings) > 0:
-            emb_outs = []
-            for i, emb in enumerate(self.embeddings):
-                # 各カテゴリ変数をembeddingし、[Batch, SeqLen, EmbDim]を得る
-                emb_outs.append(emb(x_cat[:, :, i]))
-            # 全ての入力を特徴量方向に結合
-            x = torch.cat([x_cont] + emb_outs, dim=-1)
+    Input:  [batch, seq_len, input_dim]
+    Output: [batch, output_dim]
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int = 1,
+        num_channels=None,
+        kernel_size: int = 3,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        use_weight_norm: bool = False,
+        norm_type: str = "group",
+        pooling: str = "last",
+        head_hidden_dim: int = 0,
+        head_dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive.")
+
+        if num_channels is None:
+            num_channels = [64, 64, 64]
+        if not isinstance(num_channels, (list, tuple)) or len(num_channels) == 0:
+            raise ValueError("num_channels must be a non-empty list or tuple.")
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.num_channels = list(num_channels)
+        self.kernel_size = kernel_size
+        self.dropout = dropout
+        self.pooling = pooling.lower()
+
+        layers = []
+        in_channels = input_dim
+        for i, out_channels in enumerate(self.num_channels):
+            dilation = 2 ** i
+            layers.append(
+                TemporalBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                    activation=activation,
+                    use_weight_norm=use_weight_norm,
+                    norm_type=norm_type,
+                )
+            )
+            in_channels = out_channels
+        self.backbone = nn.Sequential(*layers)
+
+        head_layers = []
+        if head_hidden_dim and head_hidden_dim > 0:
+            head_layers.extend([
+                nn.Linear(in_channels, head_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(head_hidden_dim, output_dim),
+            ])
         else:
-            x = x_cont
-        # TCNの入力形式 [Batch, Channels, SeqLen] に変換
-        x = x.permute(0, 2, 1)
-        y = self.network(x)
-        return self.fc(y[:, :, -1])
+            head_layers.append(nn.Linear(in_channels, output_dim))
+        self.head = nn.Sequential(*head_layers)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _pool(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, T]
+        if self.pooling == "last":
+            return x[:, :, -1]
+        if self.pooling == "mean":
+            return x.mean(dim=-1)
+        if self.pooling == "max":
+            return x.max(dim=-1).values
+        raise ValueError(f"Unsupported pooling: {self.pooling}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"TCN expects 3D input [B, T, F], but got shape={tuple(x.shape)}")
+
+        # [B, T, F] -> [B, F, T]
+        x = x.transpose(1, 2).contiguous()
+        x = self.backbone(x)
+        x = self._pool(x)
+        x = self.head(x)
+        return x

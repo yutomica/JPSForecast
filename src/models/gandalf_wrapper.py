@@ -41,7 +41,16 @@ class GANDALFWrapper(BaseModelWrapper):
 
         self.model: Optional[GANDALFNet] = None
         self.model_init_kwargs: Optional[Dict[str, Any]] = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_name = self.params.pop("device_name", "auto")
+        if device_name == "auto":
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
+        else:
+            self.device = torch.device(device_name)
         self.history: Dict[str, list] = {"train_loss": [], "valid_loss": []}
         self.feature_importances_ = None
         self.feature_names_ = None
@@ -64,7 +73,6 @@ class GANDALFWrapper(BaseModelWrapper):
             sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
             sample_weight = np.clip(sample_weight, 0.0, None)
             train_mask &= (sample_weight > 0)
-        
         dropped_train = len(y_train_np) - np.sum(train_mask)
         if dropped_train > 0:
             print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
@@ -249,7 +257,8 @@ class GANDALFWrapper(BaseModelWrapper):
                 optimizer.zero_grad(set_to_none=True)
                 out = self.model(xb).squeeze(-1)
                 loss_vec = self._loss_vector(out, yb)
-                loss = (loss_vec * wb).sum() / wb.sum().clamp_min(1e-8)
+                # wb.sum()によるゼロ除算/Loss爆発を防ぐためmeanを使用
+                loss = (loss_vec * wb).mean()
                 loss.backward()
 
                 if gradient_clip_val > 0:

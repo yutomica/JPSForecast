@@ -43,22 +43,22 @@ def _resolve_size(value: Optional[float | int], n_samples: int, name: str) -> Op
 
 def _purge_by_interval(
     train_idx: np.ndarray,
-    t1: np.ndarray,
     valid_start: int,
     valid_end: int,
+    purge_days: int = 0
 ) -> np.ndarray:
     """
-    Remove train samples whose interval [i, t1[i]] intersects
+    Remove train samples whose interval [i, i + purge_days] intersects
     validation interval [valid_start, valid_end].
 
     Intersects iff:
-      (i <= valid_end) & (t1[i] >= valid_start)
+      (i <= valid_end) & (i + purge_days >= valid_start)
     """
     if train_idx.size == 0:
         return train_idx
 
     i = train_idx
-    i_end = t1[i]
+    i_end = i + purge_days
     keep = ~((i <= valid_end) & (i_end >= valid_start))
     return i[keep]
 
@@ -110,9 +110,6 @@ class AnchoredWalkForwardPurgedCV:
         Optional cap on train size. If None, uses true anchored expanding window.
         If set, the latest max_train_size observations are used from the anchored
         history after purge/gap constraints.
-    pct_embargo : float, default 0.0
-        Additional safety margin expressed as a fraction of total samples.
-        In anchored WFV this is applied as a *pre-validation gap*.
     allow_incomplete_last_fold : bool, default False
         If True, the final fold may use a shorter validation window when the
         remaining tail is smaller than val_size.
@@ -124,14 +121,15 @@ class AnchoredWalkForwardPurgedCV:
     val_size: int | float
     step_size: int | float | None = None
     max_train_size: int | float | None = None
-    pct_embargo: float = 0.0
+    purge_days: int = 0
+    embargo_days: int = 0
     allow_incomplete_last_fold: bool = False
+    train_start_date: str | None = None
+    test_start_date: str | None = None
 
     def __post_init__(self) -> None:
         if self.n_splits < 1:
             raise ValueError("n_splits must be >= 1")
-        if not (0.0 <= self.pct_embargo < 1.0):
-            raise ValueError("pct_embargo must be in [0,1)")
         if not np.issubdtype(self.samples_info_sets.index.dtype, np.integer):
             raise TypeError("samples_info_sets.index must be integer positions")
         if not np.issubdtype(self.samples_info_sets.dtype, np.integer):
@@ -151,49 +149,62 @@ class AnchoredWalkForwardPurgedCV:
                 f"groups has {len(groups)} elements but X has {n_samples} samples"
             )
 
-        min_train_size = _resolve_size(self.min_train_size, n_samples, "min_train_size")
-        val_size = _resolve_size(self.val_size, n_samples, "val_size")
-        step_size = _resolve_size(self.step_size, n_samples, "step_size") if self.step_size is not None else val_size
-        max_train_size = _resolve_size(self.max_train_size, n_samples, "max_train_size")
+        all_idx = np.arange(n_samples, dtype=np.int64)
+        valid_indices = all_idx
+
+        if self.train_start_date is not None and self.test_start_date is not None:
+            if groups is None:
+                raise ValueError("groups (dates) must be provided to filter by train_start_date and test_start_date.")
+            dates_s = pd.to_datetime(groups)
+            mask = (dates_s >= pd.to_datetime(self.train_start_date)) & (dates_s < pd.to_datetime(self.test_start_date))
+            valid_indices = all_idx[mask]
+
+        n_valid = len(valid_indices)
+        if n_valid == 0:
+            raise ValueError("No valid samples remain after applying date filters.")
+
+        min_train_size = _resolve_size(self.min_train_size, n_valid, "min_train_size")
+        val_size = _resolve_size(self.val_size, n_valid, "val_size")
+        step_size = _resolve_size(self.step_size, n_valid, "step_size") if self.step_size is not None else val_size
+        max_train_size = _resolve_size(self.max_train_size, n_valid, "max_train_size")
 
         if min_train_size is None or val_size is None or step_size is None:
             raise ValueError("min_train_size, val_size, and step_size must resolve to integers")
 
-        if min_train_size >= n_samples:
+        if min_train_size >= n_valid:
             raise ValueError(
-                f"min_train_size ({min_train_size}) must be smaller than n_samples ({n_samples})"
+                f"min_train_size ({min_train_size}) must be smaller than valid samples ({n_valid})"
             )
 
-        t1 = self.samples_info_sets.to_numpy(dtype=np.int64, copy=False)
-        gap_size = int(round(self.pct_embargo * n_samples))
+        gap_size = self.purge_days + self.embargo_days
 
         yielded = 0
         for fold in range(self.n_splits):
-            valid_start = min_train_size + fold * step_size
-            if valid_start >= n_samples:
+            valid_start_pos = min_train_size + fold * step_size
+            if valid_start_pos >= n_valid:
                 break
 
-            valid_stop = valid_start + val_size
-            if valid_stop > n_samples:
+            valid_stop_pos = valid_start_pos + val_size
+            if valid_stop_pos > n_valid:
                 if not self.allow_incomplete_last_fold:
                     break
-                valid_stop = n_samples
+                valid_stop_pos = n_valid
 
-            if valid_stop <= valid_start:
+            if valid_stop_pos <= valid_start_pos:
                 break
 
-            val_idx = np.arange(valid_start, valid_stop, dtype=np.int64)
+            val_idx = valid_indices[valid_start_pos:valid_stop_pos]
 
             # Anchored expanding history: [0 .. valid_start-1]
-            train_idx = np.arange(valid_start, dtype=np.int64)
+            train_idx = valid_indices[:valid_start_pos]
+            valid_start_abs = val_idx[0]
 
             # Optional pre-validation gap (safety margin)
-            train_idx = _apply_pre_valid_gap(train_idx, valid_start, gap_size)
+            train_idx = _apply_pre_valid_gap(train_idx, valid_start_abs, gap_size)
 
             # Purge overlap against the realized validation interval
-            # valid_end is max(t1) inside validation window to reflect label horizon.
-            valid_end = int(np.max(t1[val_idx]))
-            train_idx = _purge_by_interval(train_idx, t1, valid_start=valid_start, valid_end=valid_end)
+            valid_end = int(val_idx[-1])
+            train_idx = _purge_by_interval(train_idx, valid_start=valid_start_abs, valid_end=valid_end, purge_days=self.purge_days)
 
             # Optional cap on train length. Keep the most recent train observations.
             if max_train_size is not None and train_idx.size > max_train_size:

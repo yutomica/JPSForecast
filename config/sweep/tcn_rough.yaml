@@ -5,6 +5,7 @@ hydra:
   sweeper:
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
     n_trials: 72
     params:
       # --- アーキテクチャ・アンカー (Grid Search) ---
@@ -18,4 +19,4 @@ hydra:
       hparams.batch_size: 1024
       # 固定値
       hparams.max_epochs: 30
-      hparams.early_stopping_patience: 3
+      hparams.patience: 3

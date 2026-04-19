@@ -4,7 +4,7 @@ import pandas as pd
 
 def main():
     parser = argparse.ArgumentParser(description="Export Optuna study history for LLM evaluation.")
-    parser.add_argument("--storage", type=str, default="sqlite:////Users/yuu/JPSForecast/optuna.db", help="Optuna DB path")
+    parser.add_argument("--storage", type=str, default="sqlite:////Users/yuu/Projects/JPSForecast/optuna.db", help="Optuna DB path")
     parser.add_argument("--study-name", type=str, required=True, help="Optuna study name")
     parser.add_argument("--out", type=str, default="optuna_history_clean.csv", help="Output CSV path")
     args = parser.parse_args()

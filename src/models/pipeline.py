@@ -1,4 +1,5 @@
 import joblib
+import pandas as pd
 import numpy as np
 import mlflow
 
@@ -14,7 +15,7 @@ class EnsembleInferencePipeline(mlflow.pyfunc.PythonModel):
         self.fold_pipelines = fold_pipelines # List[FoldPipeline]
         self.col_indices = col_indices
 
-    def predict(self, context, model_input):
+    def predict(self, context: mlflow.pyfunc.PythonModelContext, model_input: pd.DataFrame) -> np.ndarray:
         """
         MLflow pyfunc interface.
         model_input: A pandas DataFrame with the features.

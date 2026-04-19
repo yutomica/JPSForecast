@@ -8,7 +8,9 @@ tol: 0.0001
 selection: cyclic
 random_state: 42
 positive: false
-warm_start: false
+warm_start: true
+patience: 100
+verbose: 1
 
 # train.py 側との互換パラメータ
 use_time_decay: false

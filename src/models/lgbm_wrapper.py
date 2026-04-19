@@ -1,4 +1,5 @@
 import os
+import tempfile
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
@@ -53,8 +54,7 @@ class LGBMWrapper(BaseModelWrapper):
                 y_valid = np.searchsorted(self.classes_, y_valid)
         
         # paramsからEarly Stoppingとイテレーション数の設定を取り出す（内部コールバックとの競合を防ぐため）
-        patience = self.params.pop("early_stopping_round", 50)
-        patience = self.params.pop("early_stopping_rounds", patience)
+        patience = self.params.pop("early_stopping_rounds", self.params.pop("early_stopping_round", self.params.pop("patience", 50)))
         num_boost_round = self.params.pop("n_estimators", self.params.pop("num_boost_round", 1000))
         # LGBM専用のDataset構造に変換
         # Early Stoppingの対象を正しく認識させるため、valid_setを先頭に配置する
@@ -129,19 +129,20 @@ class LGBMWrapper(BaseModelWrapper):
 
     def _log_learning_curve(self, evals_result, model_idx):
         """lgb.plot_metric を使用して学習曲線を保存し MLflow にアップロード"""
-        # plot_metric を実行
-        lgb.plot_metric(evals_result)
-        plt.title("Learning Curve")
-        plt.tight_layout()
-        # 一時ファイルとして保存
-        temp_path = f"learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
-        # MLflow に保存
-        if mlflow.active_run():
+        if not mlflow.active_run():
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # plot_metric を実行
+            lgb.plot_metric(evals_result)
+            plt.title("Learning Curve")
+            plt.tight_layout()
+            # 一時ファイルとして保存
+            temp_path = os.path.join(tmpdir, f"learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
+            # MLflow に保存
             mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
     def _create_feature_importance_df(self):
         """重要度をデータフレーム形式で作成して属性に保持する"""
@@ -154,35 +155,32 @@ class LGBMWrapper(BaseModelWrapper):
 
     def _log_feature_importance(self, model_idx):
         """特徴量重要度を計算・可視化し、MLflowのArtifactとして保存する"""
-        if self.model is None:
+        if self.model is None or not mlflow.active_run():
             return
-        # 重要度の取得 (Gain: 目的関数の減少にどれだけ寄与したか)
-        importance_df = pd.DataFrame({
-            'feature': self.model.feature_name(),
-            'importance': self.model.feature_importance(importance_type='gain')
-        }).sort_values(by='importance', ascending=False)
-        # 上位30項目に絞ってプロット
-        top_n = 30
-        plot_df = importance_df.head(top_n)
-        # プロットの作成
-        plt.barh(plot_df['feature'], plot_df['importance'])
-        plt.xlabel('Importance (Gain)')
-        plt.title(f'Top {top_n} Feature Importance')
-        plt.gca().invert_yaxis()  # 上位が上に来るように
-        plt.tight_layout()
 
-        # 一時ファイルとして保存
-        temp_path = f"feature_importance_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close() # メモリ解放
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 重要度の取得 (Gain: 目的関数の減少にどれだけ寄与したか)
+            importance_df = pd.DataFrame({
+                'feature': self.model.feature_name(),
+                'importance': self.model.feature_importance(importance_type='gain')
+            }).sort_values(by='importance', ascending=False)
+            # 上位30項目に絞ってプロット
+            top_n = 30
+            plot_df = importance_df.head(top_n)
+            # プロットの作成
+            plt.barh(plot_df['feature'], plot_df['importance'])
+            plt.xlabel('Importance (Gain)')
+            plt.title(f'Top {top_n} Feature Importance')
+            plt.gca().invert_yaxis()  # 上位が上に来るように
+            plt.tight_layout()
 
-        # MLflowに画像をアップロード
-        if mlflow.active_run():
+            # 一時ファイルとして保存
+            temp_path = os.path.join(tmpdir, f"feature_importance_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close() # メモリ解放
+
+            # MLflowに画像をアップロード
             mlflow.log_artifact(temp_path, artifact_path="plots/importance")
-        
-        # 不要な一時ファイルを削除
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
     def predict(self, X):
         if self.model is None:

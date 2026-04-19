@@ -35,9 +35,9 @@ class RRVPurgedCV:
             tr_pos = block_pos[:split_idx]
             va_pos = block_pos[split_idx:]
             
-            # 厳密なパージ: Valの開始日より前に終了(t1)していないTrainサンプルを削除
+            # パージ: Trainサンプルの位置 i + purge_days が Valの開始位置より前になるように削除
             val_start_pos = va_pos[0]
-            # samples_info[i] は i番目のサンプルの影響終了位置
-            actual_tr_pos = [i for i in tr_pos if self.samples_info_sets[i] < val_start_pos]
+            # (今回はhorizonを無視するためインデックスを直接利用)
+            actual_tr_pos = [i for i in tr_pos if i + self.purge_days < val_start_pos]
             
             yield np.array(actual_tr_pos), va_pos

@@ -1,0 +1,31 @@
+[project]
+name = "jpsforecast"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "hydra-core>=1.3.2",
+    "hydra-joblib-launcher>=1.2.0",
+    "hydra-optuna-sweeper>=1.3.0.dev0",
+    "jquants-api-client>=2.0.1",
+    "lightgbm>=4.6.0",
+    "mlflow>=3.11.1",
+    "mysqlclient>=2.2.8",
+    "optuna>=4.0.0",
+    "pandas>=2.3.3",
+    "pandas-ta-classic>=0.4.47",
+    "scikit-learn>=1.8.0",
+    "shap>=0.51.0",
+    "sqlalchemy<2.0",
+    "ta-lib>=0.6.8",
+    "torch>=2.11.0",
+]
+[tool.uv]
+# 修正後: 'overrides' ではなく 'override-dependencies' を使用
+override-dependencies = [
+    "optuna>=4.0.0"
+]
+
+# 追加推奨: M5 Pro (arm64) 以外の解決で悩まないように制限
+environments = ["platform_machine == 'arm64' and sys_platform == 'darwin'"]

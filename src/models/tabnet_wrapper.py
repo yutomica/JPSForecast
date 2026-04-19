@@ -44,6 +44,17 @@ class TabNetWrapper(BaseModelWrapper):
         self.cat_idxs = params.pop("cat_idx", [])
         self.cat_dims = params.pop("cat_dim", []) # preprocessor側と名称を合わせる
         self.use_pretrain = params.pop("use_pretrain", False)
+        
+        self.device_name = params.pop("device_name", "auto")
+        if self.device_name == "auto":
+            if torch.cuda.is_available():
+                self.device_name = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device_name = "mps"
+            else:
+                self.device_name = "cpu"
+                
+        self.device = torch.device(self.device_name)
         # 残りのハイパーパラメータを保持
         self.params = params
         self.model = None
@@ -65,7 +76,6 @@ class TabNetWrapper(BaseModelWrapper):
         y_train = y_train[train_mask]
         if sample_weight is not None:
             sample_weight = sample_weight[train_mask]
-
         if X_valid is not None and y_valid is not None:
             valid_mask = ~np.isnan(y_valid) & ~np.isinf(y_valid)
             dropped_valid = len(y_valid) - np.sum(valid_mask)
@@ -90,7 +100,7 @@ class TabNetWrapper(BaseModelWrapper):
             'optimizer_params': dict(lr=self.params['optimizer_params']['lr']),
             'mask_type': self.params.get('mask_type', 'entmax'),
             'seed': self.params.get('random_state', 42),
-            'device_name': 'cpu',
+            'device_name': self.device_name,
             'verbose': 1
         }
         if self.task_type == "classification":

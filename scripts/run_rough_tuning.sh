@@ -4,11 +4,9 @@
 set -e
 
 # MLflowのバックエンドをtrain.pyと合わせる
-export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
+DB_ABS_PATH="$(pwd)/mlflow.db"
+export MLFLOW_TRACKING_URI="sqlite:///${DB_ABS_PATH}"
 export exp_name="Rough_Tuning"
-
-# GPU使用フラグ (例: USE_GPU=1 ./scripts/run_rough_tuning.sh)
-USE_GPU=${USE_GPU:-0}
 
 # Sweep実行用の共通関数
 run_sweep() {
@@ -16,15 +14,21 @@ run_sweep() {
     local model=$2
     local target=$3
     local features=$4
-    # 最初の4つの引数をシフトし、残りの引数を配列として保持する
-    shift 4
+    local n_jobs=$5
+    local use_gpu=$6
+    # 最初の6つの引数をシフトし、残りの引数を配列として保持する
+    shift 6
     local extra_args=("$@")
     local timestamp=$(date +"%Y%m%d_%H%M%S")
 
-    # LGBM向けにGPUを有効化する引数を追加
+    # GPUを有効化する引数を追加 (LGBMとPyTorchモデルで分岐)
     local gpu_args=""
-    if [ "$USE_GPU" -eq 1 ] && [ "$model" = "lgbm" ]; then
-        gpu_args="++hparams.device_type=gpu"
+    if [ "$use_gpu" -eq 1 ]; then
+        if [ "$model" = "lgbm" ]; then
+            gpu_args="++hparams.device_type=gpu"
+        else
+            gpu_args="++hparams.device_name=auto"
+        fi
     fi
 
     echo "============================================================"
@@ -33,7 +37,7 @@ run_sweep() {
     echo "Creating Parent Run for $exp_name..."
 
     # 親ランを作成し、Run IDを取得
-    local parent_run_id=$(python -c "
+    local parent_run_id=$(uv run python -c "
 import mlflow
 from mlflow.tracking import MlflowClient
 import datetime
@@ -49,87 +53,139 @@ print(run.info.run_id)
 
     echo "Parent Run ID: $parent_run_id"
 
-    # Hydraを実行。環境変数経由で親IDをPython側に渡す
-    MLFLOW_PARENT_RUN_ID=$parent_run_id python train.py -m \
-        domain=${domain} \
-        cv=purged_kfold \
-        data=master \
-        model=${model} \
-        period=${domain}_standard \
-        features=${features} \
-        target=${target} \
-        hparams=${model}_default \
-        sweep=${model}_rough \
-        mlflow.experiment_name="${exp_name}" \
-        hydra.sweeper.study_name=rough_tuning_${model}_${target}_${timestamp} \
-        $gpu_args \
-        "${extra_args[@]}"
+    # Hydraを実行。n_jobs > 1 の場合のみjoblibランチャーを使用
+    if [ "${n_jobs}" -gt 1 ]; then
+        echo "Running with joblib launcher (n_jobs=${n_jobs})"
+        MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py -m \
+            hydra/launcher=joblib \
+            hydra.sweeper.n_jobs=${n_jobs} \
+            ++hparams.num_threads=1 \
+            domain=${domain} \
+            cv=purged_kfold \
+            data=master_select \
+            model=${model} \
+            period=${domain}_standard \
+            features=${features} \
+            target=${target} \
+            hparams=${model}_default \
+            sweep=${model}_rough \
+            mlflow.experiment_name="${exp_name}" \
+            hydra.sweeper.study_name=rough_tuning_${model}_${target}_${timestamp} \
+            $gpu_args \
+            "${extra_args[@]}"
+    else
+        echo "Running sequentially (n_jobs=${n_jobs})"
+        MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py -m \
+            domain=${domain} \
+            cv=purged_kfold \
+            data=master_select \
+            model=${model} \
+            period=${domain}_standard \
+            features=${features} \
+            target=${target} \
+            hparams=${model}_default \
+            sweep=${model}_rough \
+            mlflow.experiment_name="${exp_name}" \
+            hydra.sweeper.study_name=rough_tuning_${model}_${target}_${timestamp} \
+            $gpu_args \
+            "${extra_args[@]}"
+    fi
         
     echo "Finished $model ($domain)."
     echo ""
 }
 
-# -- LGBM
-# run_sweep "tac" "lgbm" "tac_vol_scaled_asym_return" "features_lgbm_tac_vol_scaled_asym_return_rough" \
+# run_sweep "tac" "lgbm" "tac_vol_scaled_asym_return" "features_lgbm_tac_vol_scaled_asym_return_rough" "8" "0" \
+#     ++hparams.num_boost_round=1000 \
 #     ++hparams.custom_objective="src.models.custom_objectives.custom_asymmetric_mse" \
 #     ++hparams.custom_metric="src.models.custom_objectives.custom_asymmetric_mse_eval"
 
-# run_sweep "tac" "lgbm" "tac_max_neg_path" "features_lgbm_tac_max_neg_path_rough" \
+# run_sweep "tac" "lgbm" "tac_max_neg_path" "features_lgbm_tac_max_neg_path_rough" "8" "0" \
+#     ++hparams.num_boost_round=1000 \
 #     ++hparams.objective="quantile" \
 #     ++hparams.metric="quantile" \
-#     ++hparams.alpha=0.1 \
-#     ++hparams.min_child_samples=10
+#     ++hparams.alpha=0.1
 
-run_sweep "str" "lgbm" "str_sharpe_adj" "features_lgbm_str_sharpe_adj_rough" \
+run_sweep "tac" "tcn" "tac_vol_scaled_asym_return" "features_tcn_tac_vol_scaled_asym_return_rough" "1" "1" \
+    ++hparams.objective="asymmetric_mse" \
+    ++preprocess.target_stratified_sampling.mode=mode_2 \
+    ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
+    ++preprocess.target_stratified_sampling.other_keep_ratio=0.5 \
+    model.window_size.tac="choice(20,90)"
+
+run_sweep "tac" "ft_transfomer" "tac_vol_scaled_asym_return" "features_ft_transfomer_tac_vol_scaled_asym_return_rough" "1" "1" \
+    ++hparams.objective="asymmetric_mse" \
+    ++preprocess.target_stratified_sampling.mode=mode_2 \
+    ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
+    ++preprocess.target_stratified_sampling.other_keep_ratio=0.5
+
+run_sweep "tac" "tcn" "tac_max_neg_path" "features_tcn_tac_max_neg_path_rough" "1" "1" \
+    ++hparams.objective="quantile" \
+    ++hparams.metric="quantile" \
+    ++hparams.alpha=0.1 \
+    ++preprocess.target_stratified_sampling.mode=mode_2 \
+    ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
+    ++preprocess.target_stratified_sampling.other_keep_ratio=0.5 \
+    model.window_size.tac="choice(20,90)"
+
+run_sweep "tac" "ft_transfomer" "tac_max_neg_path" "features_ft_transfomer_tac_max_neg_path_rough" "1" "1" \
+    ++hparams.objective="quantile" \
+    ++hparams.metric="quantile" \
+    ++hparams.alpha=0.1 \
+    ++preprocess.target_stratified_sampling.mode=mode_2 \
+    ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
+    ++preprocess.target_stratified_sampling.other_keep_ratio=0.5
+
+run_sweep "str" "lgbm" "str_sharpe_adj" "features_lgbm_str_sharpe_adj_rough" "8" "0" \
+    ++preprocess.target_stratified_sampling.mode=mode_3 \
+    '++preprocess.target_stratified_sampling.weight_dict={tail:1.5,center:0.5,other:1.0}' \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    ++hparams.num_boost_round=1000 \
     ++hparams.objective="fair" \
     ++hparams.metric="fair" \
     ++hparams.fair_c=10.0
 
-run_sweep "str" "lgbm" "str_mdd" "features_lgbm_str_mdd_rough" \
+run_sweep "str" "lgbm" "str_mdd" "features_lgbm_str_mdd_rough" "8" "0" \
+    ++preprocess.target_stratified_sampling.mode=mode_3 \
+    '++preprocess.target_stratified_sampling.weight_dict={tail:3.0,center:0.5,other:1.0}' \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    ++hparams.num_boost_round=1000 \
     ++hparams.objective="tweedie" \
     ++hparams.metric="tweedie" \
     ++hparams.tweedie_variance_power=1.2
 
-# -- TCN
-# run_sweep "tac" "tcn" "tac_vol_scaled_asym_return" "features_tcn_tac_vol_scaled_asym_return_rough" \
-#     ++hparams.objective="asymmetric_mse" \
-#     +hydra.sweeper.params.model.window_size.tac="choice(20,90)"
+run_sweep "str" "tcn" "str_sharpe_adj" "features_tcn_str_sharpe_adj_rough" "1" "1" \
+    ++hparams.objective="fair" \
+    ++hparams.metric="fair" \
+    ++hparams.fair_c=10.0 \
+    ++preprocess.target_stratified_sampling.enabled=false \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    model.window_size.str="choice(126,252)"
 
-# run_sweep "tac" "tcn" "tac_max_neg_path" "features_tcn_tac_max_neg_path_rough" \
-#     ++hparams.objective="quantile" \
-#     ++hparams.metric="quantile" \
-#     ++hparams.alpha=0.1 \
-#     ++hparams.min_child_samples=10 \
-#     +hydra.sweeper.params.model.window_size.tac="choice(20,90)"
+run_sweep "str" "ft_transfomer" "str_sharpe_adj" "features_ft_transfomer_str_sharpe_adj_rough" "1" "1" \
+    ++hparams.objective="fair" \
+    ++hparams.metric="fair" \
+    ++hparams.fair_c=10.0 \
+    ++preprocess.target_stratified_sampling.enabled=false \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11
 
-# run_sweep "str" "tcn" "str_sharpe_adj" "features_tcn_str_sharpe_adj_rough" \
-#     ++hparams.objective="fair" \
-#     ++hparams.metric="fair" \
-#     ++hparams.fair_c=10.0 \
-#     +hydra.sweeper.params.model.window_size.str="choice(126,252)"
+run_sweep "str" "tcn" "str_mdd" "features_tcn_str_mdd_rough" "1" "1" \
+    ++hparams.objective="tweedie" \
+    ++hparams.metric="tweedie" \
+    ++hparams.tweedie_variance_power=1.2 \
+    ++preprocess.target_stratified_sampling.enabled=false \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    model.window_size.str="choice(126,252)"
 
-# run_sweep "str" "tcn" "str_mdd" "features_tcn_str_mdd_rough" \
-#     ++hparams.objective="tweedie" \
-#     ++hparams.metric="tweedie" \
-#     ++hparams.tweedie_variance_power=1.2 \
-#     +hydra.sweeper.params.model.window_size.str="choice(126,252)"
-
-# -- FT-Transformer
-# run_sweep "tac" "ft_transfomer" "tac_vol_scaled_asym_return" "features_ft_transfomer_tac_vol_scaled_asym_return_rough" \
-#     ++hparams.objective="asymmetric_mse"
-
-# run_sweep "tac" "ft_transfomer" "tac_max_neg_path" "features_ft_transfomer_tac_max_neg_path_rough" \
-#     ++hparams.objective="quantile" \
-#     ++hparams.metric="quantile" \
-#     ++hparams.alpha=0.1 \
-#     ++hparams.min_child_samples=10
-
-# run_sweep "str" "ft_transfomer" "str_sharpe_adj" "features_ft_transfomer_str_sharpe_adj_rough" \
-#     ++hparams.objective="fair" \
-#     ++hparams.metric="fair" \
-#     ++hparams.fair_c=10.0
-
-# run_sweep "str" "ft_transfomer" "str_mdd" "features_ft_transfomer_str_mdd_rough" \
-#     ++hparams.objective="tweedie" \
-#     ++hparams.metric="tweedie" \
-#     ++hparams.tweedie_variance_power=1.2
+run_sweep "str" "ft_transfomer" "str_mdd" "features_ft_transfomer_str_mdd_rough" "1" "1" \
+    ++hparams.objective="tweedie" \
+    ++hparams.metric="tweedie" \
+    ++hparams.tweedie_variance_power=1.2 \
+    ++preprocess.target_stratified_sampling.enabled=false \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11

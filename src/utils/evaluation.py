@@ -84,6 +84,9 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             df_cols['ret'] = y_ret
         df_tmp = pd.DataFrame(df_cols)
         
+        # groupbyのキーとrebalance_datesの型を一致させるため、日付(date)型に統一
+        df_tmp['date'] = pd.to_datetime(df_tmp['date']).dt.date
+        
         spreads = []
         ndcgs = []
         rank_ics_reb = []

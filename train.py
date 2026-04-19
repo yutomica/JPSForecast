@@ -15,13 +15,13 @@ from hydra.utils import instantiate, get_class
 from hydra.core.hydra_config import HydraConfig
 from src.cv.cv_utils import add_t1_column, prepare_purged_cv_input
 from src.cv.cv_viz import log_split_info
-from src.preprocess.sampling import apply_sampling
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
 from src.utils.evaluation import evaluate_metrics, calculate_bin_stats
 from src.utils.feature_selection import calculate_shap, calculate_mda
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
+from src.utils.sampling import apply_sampling, apply_target_stratified_sampling
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
 # alembic のロガーを取得し、ログレベルを WARNING に上げる
@@ -88,7 +88,9 @@ def train(cfg: DictConfig) -> float:
         
         # --- サンプリング ---
         # ユニバース選定
+        initial_count = len(meta_df)
         train_val_meta = meta_df[mask].copy()
+        print(f"  - Domain filtering: {initial_count:,} -> {len(train_val_meta):,} rows")
         if train_val_meta.empty:
             print(f"⚠️ WARNING: No valid samples found for domain: {cfg.domain.name}. Skipping trial with score {fallback_score}.")
             return fallback_score
@@ -96,7 +98,9 @@ def train(cfg: DictConfig) -> float:
         train_val_meta = add_t1_column(train_val_meta, horizon)
         # 目的変数と評価用リターンが欠損しているサンプルを除外
         target_col = cfg.target.column
+        count_before_dropna = len(train_val_meta)
         train_val_meta = train_val_meta.dropna(subset=[target_col, 'Future_Close'])
+        print(f"  - Dropping NaNs in target/return: {count_before_dropna:,} -> {len(train_val_meta):,} rows")
         if train_val_meta.empty:
             print(f"⚠️ WARNING: No valid samples left after dropping NaNs for {target_col}. Skipping.")
             return fallback_score
@@ -121,7 +125,12 @@ def train(cfg: DictConfig) -> float:
         else:
             samples_info, date_to_indices, unique_dates = prepare_purged_cv_input(train_val_meta)
             pos_to_date = pd.Series(unique_dates, index=np.arange(len(unique_dates)))
-            cv = instantiate(cfg.cv, samples_info_sets=samples_info)
+            cv = instantiate(
+                cfg.cv, 
+                samples_info_sets=samples_info,
+                purge_days=cfg.period.purge_days,
+                embargo_days=cfg.period.embargo_days
+            )
             splits = []
             cv_input = np.zeros((len(unique_dates), 1)) # posベースのダミー入力
             for tr_pos, val_pos in cv.split(X=cv_input, groups=unique_dates):
@@ -144,13 +153,48 @@ def train(cfg: DictConfig) -> float:
         print(f"  - Num of features: {len(feature_cols):,}")
         # print(f"  - Num of cat features: {len(cat_cols):,}")
         # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
+        features_npy_path = master_dir / "features.npy"
+        expected_size = len(meta_df) * len(all_features) * 4
+        actual_size = os.path.getsize(features_npy_path)
+        if actual_size != expected_size:
+            actual_cols = actual_size // (len(meta_df) * 4)
+            raise ValueError(
+                f"Data shape mismatch in {features_npy_path.name}!\n"
+                f" - Expected columns (from feature_names.json): {len(all_features)}\n"
+                f" - Actual columns (from file size): {actual_cols}\n"
+                "※ features.npy と feature_names.json の特徴量数が一致していません。軽量化データを作成した際、names.json の置き換えを忘れていないか確認してください。"
+            )
         features_mmap = np.memmap(
-            master_dir / "features.npy", 
+            features_npy_path, 
             dtype='float32', 
             mode='r', 
             shape=(len(meta_df), len(all_features))
         )
         
+        # --- プリプロセッサの初期化と事前学習 (Fold間で共通) ---
+        print(f"🔹 Fitting preprocessor (Sampling 100k)...")
+        prep_params = {
+            "save_dir": ".",
+            "feature_cols": feature_cols,
+            "cat_cols": cat_cols
+        }
+        if cfg.model.data_category == 'timeseries':
+            prep_params['window_size'] = cfg.model.window_size.tac if cfg.domain.name == 'TAC' else cfg.model.window_size.str
+        preprocessor_class = get_class(cfg.model.preprocessor_target)
+        base_preprocessor = preprocessor_class(**prep_params)
+        
+        sample_data = features_mmap[:100000, col_indices]
+        base_preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
+        
+        # fitパラメータのアップデート
+        model_meta_params = {}
+        if hasattr(base_preprocessor, 'cat_idx'): # TabNet
+            model_meta_params['cat_idx'] = base_preprocessor.cat_idx
+        if hasattr(base_preprocessor, 'cat_dims'): # TabNet
+            model_meta_params['cat_dims'] = base_preprocessor.cat_dims
+        full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
+        full_params.update(model_meta_params)
+
         # --- モデルの学習 ---
         print(f"🤖 Training model: {cfg.model.name}")
         models = []
@@ -163,45 +207,67 @@ def train(cfg: DictConfig) -> float:
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
             print(f"\n{'-'*25} Fold {i} {'-'*25}")
             
-            # --- 学習データのみ日付間引きを適用 ---
-            # train_meta_subset = meta_df.loc[train_idx].copy()
-            # train_meta_sampled = apply_sampling(train_meta_subset, interval)
-            # train_idx = train_meta_sampled.index
-            
             # CVサマリー
             if tr_pos is not None and val_pos is not None:
                 info = log_split_info(i, tr_pos, val_pos, pos_to_date)
                 cv_summaries.append(info)
-            # プリプロセッサのインスタンス化
-            prep_params = {
-                "save_dir": ".",
-                "feature_cols": feature_cols,
-                "cat_cols": cat_cols
-            }
-            if cfg.model.data_category == 'timeseries':
-                prep_params['window_size'] = cfg.model.window_size.tac if cfg.domain.name == 'TAC' else cfg.model.window_size.str
-            preprocessor_class = get_class(cfg.model.preprocessor_target)
-            preprocessor = preprocessor_class(**prep_params)
-            # fitパラメータのアップデート
-            model_meta_params = {}
-            if hasattr(preprocessor, 'cat_idx'): # TabNet
-                model_meta_params['cat_idx'] = preprocessor.cat_idx
-            if hasattr(preprocessor, 'cat_dims'): # TabNet
-                model_meta_params['cat_dims'] = preprocessor.cat_dims
-            full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
-            full_params.update(model_meta_params)
-            print(f"  🔹 Fitting preprocessor (Sampling 100k)...")
-            sample_data = features_mmap[:100000, col_indices]
-            preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
-            # ウェイトの計算 (weights.py のロジックを使用)
+            
+            # --- 学習データのみ Date-interval サンプリングを適用 ---
+            if cfg.get("preprocess", {}).get("sampling", {}).get("enabled", False):
+                print("  🔹 Applying date-interval sampling...")
+                count_before_sampling = len(train_idx)
+                sampling_interval = cfg.preprocess.sampling.get("interval", interval)
+                train_meta_subset = meta_df.loc[train_idx].copy()
+                train_meta_processed = apply_sampling(train_meta_subset, sampling_interval)
+                train_idx = train_meta_processed.index
+                print(f"    - Samples reduced: {count_before_sampling:,} -> {len(train_idx):,}")
+
+            # --- 学習データのみターゲット層化サンプリングを適用 ---
+            stratified_sampling_weights = None
+            if cfg.get("preprocess", {}).get("target_stratified_sampling", {}).get("enabled", False):
+                sampling_cfg = cfg.preprocess.target_stratified_sampling
+                mode = sampling_cfg.get('mode', 'mode_1')
+                print(f"  🔹 Applying target stratified sampling (mode: {mode})...")
+                count_before_stratified = len(train_idx)
+                train_meta_subset = meta_df.loc[train_idx].copy()
+                train_meta_processed = apply_target_stratified_sampling(
+                    df=train_meta_subset,
+                    target_col=target_col,
+                    date_col='date',
+                    scode_col='scode',
+                    mode=mode,
+                    center_keep_ratio=sampling_cfg.get("center_keep_ratio", 0.25),
+                    other_keep_ratio=sampling_cfg.get("other_keep_ratio", 1.0),
+                    weight_dict=sampling_cfg.get("weight_dict", None),
+                    random_state=cfg.get("seed", 42) + i
+                )
+                if mode in ['mode_1', 'mode_2']:
+                    # サンプリングモードの場合はインデックスを更新
+                    train_idx = train_meta_processed.index
+                    print(f"    - Samples reduced: {count_before_stratified:,} -> {len(train_idx):,}")
+                elif mode == 'mode_3':
+                    # 重み付けモードの場合は、重みを後で適用するために取得
+                    # train_idx は変更されない
+                    stratified_sampling_weights = train_meta_processed.loc[train_idx, 'sample_weight'].values
+                    print(f"    - Weighting mode enabled. Sample count remains {len(train_idx):,}.")
+
+            # --- ウェイトの計算 ---
             w_train = np.ones(len(train_idx))
+            # log_market_capによるウエイト（STRのウエイトを軽くする）
+            w_train *= calculate_sample_weights(meta_df.loc[train_idx, 'log_market_cap'].values, cfg.domain.name)
+            # Time Decay
             if cfg.hparams.use_time_decay:
                 # 学習セットの日付のみを抽出してウェイトを算出 decay_rate は config から取得 (デフォルト: 0.9999)
                 decay_rate = cfg.hparams.get('time_decay_rate', 0.9999)
                 w_train *= calculate_time_decay_weights(meta_df.loc[train_idx, 'date'], decay_rate=decay_rate)
-            w_train *= calculate_sample_weights(meta_df.loc[train_idx, 'log_market_cap'].values, cfg.domain.name)
+            # 層化サンプリングの重みを適用 (mode_3の場合)
+            if stratified_sampling_weights is not None:
+                w_train *= stratified_sampling_weights
+
             # memmap から必要な行のみを読み出し
             print(f"  🔹 Transforming data...")
+            # 各Foldごとに独立したインスタンスを使用するためディープコピー
+            preprocessor = copy.deepcopy(base_preprocessor)
             X_train = preprocessor.transform(features_mmap, row_indices=train_idx, col_indices=col_indices)
             X_valid = preprocessor.transform(features_mmap, row_indices=valid_idx, col_indices=col_indices)
             y_train = meta_df.loc[train_idx, target_col].values
@@ -217,6 +283,9 @@ def train(cfg: DictConfig) -> float:
             # モデルのインスタンス化と学習
             model_class = get_class(cfg.model.model_target)
             model = model_class(task_type=cfg.target.task_type, **full_params)
+            if hasattr(model, 'device'):
+                print(f"  🔹 Using device: {model.device}")
+
             # --- エポック単位の枝刈り用コールバックの設定 (Sweep時) ---
             # 各Foldのエポックにおいて、それまでのFoldの確定スコアと
             # 現在のエポックスコアの平均（蓄積スコア）を計算して判定する
@@ -272,7 +341,7 @@ def train(cfg: DictConfig) -> float:
                     idx = locals()[f'{phase}_idx']
                     y_true = locals()[f'y_{phase}']
                     # 評価用ICの計算対象として生リターン（Future_Close）を取得
-                    y_ret = meta_df.loc[idx, 'Future_Close'].values
+                    y_ret = meta_df.loc[idx, 'Future_Close'].values - 1.0
                     dates = meta_df.loc[idx, 'date'].values
                     m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10))
                     # MLflowにフォールドごとの結果を記録
@@ -378,7 +447,7 @@ def train(cfg: DictConfig) -> float:
         ndcg_k = cfg.get("ndcg_k", 10)
         if not oof_df.empty:
             print(f"  🔹 Calculating Pooled OOF Metrics...")
-            y_ret_pooled = oof_df['Future_Close'].values if 'Future_Close' in oof_df.columns else None
+            y_ret_pooled = oof_df['Future_Close'].values - 1.0 if 'Future_Close' in oof_df.columns else None
             pooled_metrics = evaluate_metrics(
                 y_true=oof_df['target'].values,
                 y_pred=oof_df['score'].values,

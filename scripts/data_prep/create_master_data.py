@@ -9,7 +9,6 @@ from scipy.special import erfinv
 from tqdm import tqdm
 import random
 import pyarrow.parquet as pq
-import polars as pl
 from pathlib import Path
 from src.features.engineer import FeatureEngineer
 from src.data_loader.loader import DataLoader
@@ -60,7 +59,8 @@ def main(mode = "full"):
     num_features = len(feature_cols)
     total_rows = 0
     for f in chunk_files:
-        tmp_meta = pd.read_parquet(f, columns=['scode']) # メモリ節約のため scode のみ
+        tmp_meta = pd.read_parquet(f, columns=['scode', 'date']) # フィルタリングのため date も読み込む
+        tmp_meta = tmp_meta[tmp_meta['date'] >= pd.to_datetime('2017-01-01')]
         if mode == "sample":
             total_rows += tmp_meta['scode'].isin(selected_scodes).sum()
         else:
@@ -137,6 +137,12 @@ def main(mode = "full"):
             gc.collect()
             # バッファ更新 (生のdfを使用)
             raw_buffer_df = pd.concat([raw_buffer_df, df[filter_cols]], axis=0, ignore_index=True)
+
+            # 2017年1月1日以降のデータのみ残す
+            df = df[df['date'] >= pd.to_datetime('2017-01-01')].reset_index(drop=True)
+            if len(df) == 0:
+                continue
+
             # フィルタ通過状況のログ出力
             n_tac = df['is_candidate_tac'].sum()
             n_str = df['is_candidate_str'].sum()

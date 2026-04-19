@@ -6,6 +6,7 @@ hydra:
     # Optunaの設定
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
     n_trials: 32
     params:
       hparams.n_blocks: choice(1,2,3,4)

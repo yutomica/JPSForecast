@@ -1,8 +1,8 @@
 # config/period/str_standard.yaml
 purge_days: 60
-embargo_days: 90
-pct_embargo: 0.01       # データの長さに対するエンバーゴの割合
-n_splits: 5             # 分割数
-n_test_chunks: 2        # CPCVでのテストチャンク数
-valid_start_date: "2024-01-01"
-test_start_date: "2025-01-01"
+embargo_days: 40
+n_splits: 6                     # 分割数
+n_test_chunks: 2                # CPCVでのテストチャンク数
+train_start_date: "2017-01-01" 
+valid_start_date: "2025-01-01"  # cv=fixのみ
+test_start_date: "2025-04-01"   # Step1 ~ 3のみ

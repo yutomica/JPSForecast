@@ -3,21 +3,19 @@
 # Selection Criteria (Updated with Stride=11 Sampling & Sampling Weights):
 #   1. Sharpe Ratio > 0.5 (Relaxed for regime dependency / structural breakdown detection)
 #   2. OR Max Gain > 85th percentile (0.00571014) to capture severe specific drawdown events
-model: lgbm
+model: tcn
 target: target_str_mdd
-total_features: 86
+total_features: 71
 feature_cols:
   - BET_Beta60_CSZ
   - BET_MarketHV20_CSR
   - BET_MarketHV20_CSZ
-  - BET_MarketHV20_RAW
   - BET_MarketHV20_TSR_252D
   - BET_MarketHV20_TSZ_20D
-  - BET_MarketTrendIdx_RAW
   - BET_MarketTrendIdx_TSR_252D
   - BET_MarketVolChange_CSZ
   - BET_MarketVolChange_TSZ_20D
-  - BET_SectorMomentum5d_RAW
+  - BET_SectorMomentum5d_TSR_252D
   - BET_SectorRel_CSR
   - BET_SectorRel_SNZ
   - CON_RevisionRate_CSR
@@ -27,41 +25,33 @@ feature_cols:
   - LIQ_AmihudIlliq_CSZ
   - LIQ_TurnoverRatio_CSZ
   - LIQ_VolumeLog_CSR
-  - LIQ_VolumeLog_RAW
   - MOM_DistSMA75_CSR
-  - MOM_DistSMA75_RAW
   - MOM_LinRegSlope10_CSR
-  - MOM_LogReturn_RAW
+  - MOM_LogReturn_TSR_252D
+  - MOM_LogReturn_TSZ_20D
   - MOM_MADev200_CSR
-  - MOM_MADev200_RAW
   - MOM_MADev200_SNZ
   - MOM_MADev75_CSR
-  - MOM_MADev75_RAW
   - MOM_Momentum12-1_CSR
   - MOM_Return12m_CSR
   - MOM_Return12m_CSZ
   - MOM_Return12m_SNZ
-  - MOM_Return5d_RAW
+  - MOM_Return5d_TSR_252D
+  - MOM_Return5d_TSZ_20D
   - MOM_Return6m_CSR
-  - MOM_Return6m_RAW
   - MOM_Return6m_SNZ
   - QLT_ROA_TSR_252D
   - SEA_Quarter_RAW
   - SPD_FlowAccel_CSR
   - SPD_FlowAccel_CSZ
-  - SPD_FlowAccel_RAW
   - SPD_MarginBuyImpact_CSZ
   - SPD_MarginRatio_CSR
   - SPD_MarginRatio_CSZ
-  - SPD_MarginRatio_RAW
   - SPD_MarketForeignBuy_CSZ
-  - SPD_MarketForeignBuy_RAW
   - SPD_MarketForeignBuy_TSZ_20D
   - SPD_MarketIndividualBuy_CSR
-  - SPD_MarketIndividualBuy_RAW
   - SPD_MarketIndividualBuy_TSR_252D
   - SPD_MarketIndividualBuy_TSZ_20D
-  - SPD_OverseaFlowTrend_RAW
   - SPD_OverseaFlowTrend_TSR_252D
   - SPD_OverseaFlowTrend_TSZ_20D
   - SPD_VWAPDev_CSZ
@@ -69,16 +59,13 @@ feature_cols:
   - VAL_EarningsYield_CSZ
   - VAL_LogPBR_CSR
   - VAL_LogPBR_CSZ
-  - VAL_LogPBR_RAW
   - VAL_LogPBR_SNZ
   - VOL_ATRRatio_CSR
   - VOL_ATRRatio_CSZ
-  - VOL_ATRRatio_RAW
   - VOL_ATRRatio_SNZ
   - VOL_ATRRatio_TSR_252D
   - VOL_DownsideDev60_CSR
   - VOL_DownsideDev60_CSZ
-  - VOL_DownsideDev60_RAW
   - VOL_HV30_CSR
   - VOL_HV30_CSZ
   - VOL_HistVol20_CSR
@@ -87,12 +74,10 @@ feature_cols:
   - VOL_LargeMoveCount_TSR_252D
   - VOL_Volatility60_CSR
   - VOL_Volatility60_CSZ
-  - VOL_Volatility60_RAW
   - VOL_VolatilityParkinson_CSR
   - VOL_VolatilityParkinson_CSZ
   - VOL_VolumeMA25_CSR
   - VOL_VolumeMA25_CSZ
-  - VOL_VolumeMA25_RAW
 cat_cols:
   - EVT_IsMissingEPS_RAW
   - GOV_MarketSegment_RAW

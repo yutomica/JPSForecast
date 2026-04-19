@@ -14,5 +14,7 @@ lambda_l2: 6.423
 is_unbalance: true
 use_time_decay: true
 time_decay_rate: 0.9999
+num_boost_round: 10000
+patience: 50
 bagging_freq: 6
 verbose: -1

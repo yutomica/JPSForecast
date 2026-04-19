@@ -1,0 +1,50 @@
+target_name: target_tac_max_neg_path
+feature_count: 60
+feature_cols:
+  - BET_RS25_CSZ
+  - BET_RelSectorReturn1d_CSZ
+  - BET_RelSectorReturn5d_CSZ
+  - BET_SectorMomentum5d_CSZ
+  - BET_SectorRel_CSZ
+  - BET_SectorReturn_CSZ
+  - EVT_IsMissingEPS_RAW
+  - EVT_LogDaysSincePub_RAW
+  - LIQ_AbnormalVolume_CSZ
+  - LIQ_AmihudIlliq_CSZ
+  - LIQ_LogTradingCap_CSZ
+  - LIQ_MFI14_CSZ
+  - LIQ_TurnoverRatio_CSZ
+  - LIQ_VolRatio5d_CSZ
+  - LIQ_VolSpikeCount20_CSZ
+  - LIQ_VolUpDownRatio_CSZ
+  - LIQ_VolumeChange_CSZ
+  - LIQ_VolumeSlope5_CSZ
+  - SPD_DistVWAP5_CSZ
+  - SPD_DistVWAPSlope_CSZ
+  - SPD_FlowAccel_CSZ
+  - SPD_MarginBuyImpact_CSZ
+  - SPD_MarginRatioDelta4w_CSZ
+  - SPD_MarginRatio_CSZ
+  - SPD_MarketForeignBuy_CSZ
+  - SPD_MarketIndividualBuy_CSZ
+  - SPD_OverseaFlowTrend_CSZ
+  - SPD_VWAPDev_CSZ
+  - VOL_ATRChgRate_CSZ
+  - VOL_ATRRatio_CSZ
+  - VOL_ATRSqueezeBB_CSZ
+  - VOL_ATRSqueeze_CSZ
+  - VOL_BBWidth_CSZ
+  - VOL_DownsideRun_CSZ
+  - VOL_GapAbs_CSZ
+  - VOL_HVSlope_CSZ
+  - VOL_LargeMoveCount_CSZ
+  - VOL_MAE10_CSZ
+  - VOL_MAE5_CSZ
+  - VOL_RangeRatioLong_CSZ
+  - VOL_RealizedSkew20_CSZ
+  - VOL_ReturnKurtosis_CSZ
+  - VOL_ReturnSkewnessDiff_CSZ
+  - VOL_UlcerIndex14_CSZ
+  - VOL_VolRatioHV_CSZ
+cat_cols:
+  - EVT_IsMissingEPS_RAW

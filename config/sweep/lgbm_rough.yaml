@@ -3,8 +3,10 @@ defaults:
   - override /hydra/sweeper: optuna
 hydra:
   sweeper:
+    n_jobs: 4
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
     n_trials: 48
     params:
       # ======================================================
@@ -19,7 +21,6 @@ hydra:
       # ======================================================
       # 学習速度を優先し、やや高めに固定（Step 4のHPOで 0.01 などに下げる）
       hparams.learning_rate: 0.05 
-      # 特徴量とデータのサンプリングは標準的な値で固定し、安定性を担保
       hparams.feature_fraction: 0.8
       hparams.bagging_fraction: 0.8
       hparams.bagging_freq: 5
@@ -27,3 +28,5 @@ hydra:
       hparams.lambda_l2: 1.0
       hparams.min_split_gain: 0.1
       hparams.verbose: -1
+hparams:
+  num_threads: 4

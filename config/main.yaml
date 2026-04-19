@@ -1,7 +1,7 @@
 # config/main.yaml
 defaults:
   - domain: tac
-  - target: tac_rank
+  - target: tac_vol_scaled_asym_return
   - data: sample
   - features: all
   - model: lgbm
@@ -12,7 +12,21 @@ defaults:
   - mode: null 
   - _self_
 
+
+# mode (str): 動作モード。
+#  - 'mode_1': Tailは100%保持、Centerをサンプリング、Otherは100%保持。
+#  - 'mode_2': Tailは100%保持、CenterとOtherをそれぞれ指定したレートでサンプリング。
+#  - 'mode_3': サンプリングせず、'sample_weight'列を付与する。
+preprocess:
+  sampling:
+    enabled: false
+    interval: 5
+  target_stratified_sampling:
+    enabled: true              # 適用する場合は true
+    mode: mode_1
+    center_keep_ratio: 0.25    # センター部分の保持割合
+
 # MLflow設定（全実験共通）
 mlflow:
-  tracking_uri: "sqlite:////Users/yuu/JPSForecast/mlflow.db"
+  tracking_uri: "sqlite:////Users/yuu/Projects/JPSForecast/mlflow.db"
   experiment_name: "test"

@@ -17,3 +17,4 @@ data/
 .env
 logs/
 optuna.db
+.venv/

@@ -1,4 +1,5 @@
 # @package cv
 _target_: src.cv.purged_kfold.SimplePurgedKFold
 n_splits: ${period.n_splits}
-pct_embargo: ${period.pct_embargo}
+train_start_date: ${period.train_start_date}
+test_start_date: ${period.test_start_date}

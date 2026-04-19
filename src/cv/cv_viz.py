@@ -107,6 +107,23 @@ def summarize_split_for_logging(
 
     bar = timeline(tr_pos, va_pos, n_days=len(pos_to_date), width=timeline_width)
 
+    gap_before = None
+    gap_after = None
+    if va_segs and tr_pos.size > 0:
+        gaps_b = []
+        for v_start, _ in va_segs:
+            t_before = tr_pos[tr_pos < v_start]
+            if t_before.size > 0:
+                gaps_b.append(int(v_start - t_before.max()))
+        gap_before = min(gaps_b) if gaps_b else None
+        
+        gaps_a = []
+        for _, v_end in va_segs:
+            t_after = tr_pos[tr_pos > v_end]
+            if t_after.size > 0:
+                gaps_a.append(int(t_after.min() - v_end))
+        gap_after = min(gaps_a) if gaps_a else None
+
     return {
         "fold": int(fold),
         "train_days": int(tr_pos.size),
@@ -117,6 +134,8 @@ def summarize_split_for_logging(
         "train_end": str(tr_end),
         "valid_start": str(va_start),
         "valid_end": str(va_end),
+        "gap_before": gap_before,
+        "gap_after": gap_after,
         "train_segments_str": fmt_segments(tr_segs, "TR", pos_to_date),
         "valid_segments_str": fmt_segments(va_segs, "VA", pos_to_date),
         "timeline": bar,
@@ -141,11 +160,15 @@ def log_split_info(
         timeline_width=timeline_width,
     )
     
+    gap_b_str = f"{info['gap_before']}d" if info['gap_before'] is not None else "N/A"
+    gap_a_str = f"{info['gap_after']}d" if info['gap_after'] is not None else "N/A"
+
     print(
         f"[CV] fold={fold} | "
         f"TRAIN days={info['train_days']} segs={info['train_segs']} ({info['train_start']}..{info['train_end']}) | "
         f"VALID days={info['valid_days']} segs={info['valid_segs']} ({info['valid_start']}..{info['valid_end']})"
     )
+    print(f"      Gap Before Valid (Purge): {gap_b_str} | Gap After Valid (Purge + Embargo): {gap_a_str}")
     print(f"      {info['train_segments_str']}")
     print(f"      {info['valid_segments_str']}")
     print(f"      {info['timeline']}")

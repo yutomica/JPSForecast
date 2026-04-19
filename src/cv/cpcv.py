@@ -6,42 +6,40 @@ import numpy as np
 import pandas as pd
 
 
-def _make_contiguous_blocks(n_samples: int, n_splits: int) -> list[np.ndarray]:
-    """Split [0..n_samples-1] into n_splits contiguous blocks (time-ordered)."""
+def _make_contiguous_blocks(indices: np.ndarray, n_splits: int) -> list[np.ndarray]:
+    """Split indices into n_splits contiguous blocks (time-ordered)."""
     if n_splits <= 1:
         raise ValueError("n_splits must be >= 2")
-    idx = np.arange(n_samples, dtype=np.int64)
-    blocks = np.array_split(idx, n_splits)
+    blocks = np.array_split(indices, n_splits)
     return [b.astype(np.int64, copy=False) for b in blocks if len(b) > 0]
 
 
-def _blocks_to_intervals(blocks: list[np.ndarray], t1: np.ndarray) -> list[tuple[int, int]]:
+def _blocks_to_intervals(blocks: list[np.ndarray]) -> list[tuple[int, int]]:
     """
     For each contiguous block, return (start, end) interval in integer-time axis.
-    end is max(t1[i]) within that block.
     """
     intervals = []
     for b in blocks:
         start = int(b[0])
-        end = int(np.max(t1[b]))
+        end = int(b[-1])
         intervals.append((start, end))
     return intervals
 
 
 def _purge_by_intervals(
     train_idx: np.ndarray,
-    t1: np.ndarray,
     test_intervals: list[tuple[int, int]],
+    purge_days: int = 0
 ) -> np.ndarray:
     """
-    Remove train samples whose interval [i, t1[i]] intersects any test interval [s,e].
-    Intersection condition: (i <= e) & (t1[i] >= s)
+    Remove train samples whose interval [i, i + purge_days] intersects any test interval [s,e].
+    Intersection condition: (i <= e) & (i + purge_days >= s)
     """
     if len(train_idx) == 0:
         return train_idx
 
     i = train_idx
-    i_end = t1[i]
+    i_end = i + purge_days
 
     keep = np.ones(len(i), dtype=bool)
     for s, e in test_intervals:
@@ -81,13 +79,14 @@ class SimpleCombinatorialPurgedKFold:
     n_splits: int
     n_test_splits: int
     samples_info_sets: pd.Series
-    pct_embargo: float = 0.0
+    purge_days: int = 0
+    embargo_days: int = 0
+    train_start_date: str | None = None
+    test_start_date: str | None = None
 
     def __post_init__(self) -> None:
         if not (0 < self.n_test_splits < self.n_splits):
             raise ValueError("Require 0 < n_test_splits < n_splits")
-        if not (0.0 <= self.pct_embargo < 1.0):
-            raise ValueError("pct_embargo must be in [0,1)")
         # Expect integer axis
         if not np.issubdtype(self.samples_info_sets.index.dtype, np.integer):
             raise TypeError("samples_info_sets.index must be integer positions")
@@ -104,12 +103,20 @@ class SimpleCombinatorialPurgedKFold:
         if n_samples != len(self.samples_info_sets):
             raise ValueError(f"X has {n_samples} samples but samples_info_sets has {len(self.samples_info_sets)}")
 
-        blocks = _make_contiguous_blocks(n_samples, self.n_splits)
-        t1 = self.samples_info_sets.to_numpy(dtype=np.int64, copy=False)
-
-        embargo_size = int(round(self.pct_embargo * n_samples))
-
         all_idx = np.arange(n_samples, dtype=np.int64)
+        valid_indices = all_idx
+
+        if self.train_start_date is not None and self.test_start_date is not None:
+            if groups is None:
+                raise ValueError("groups (dates) must be provided to filter by train_start_date and test_start_date.")
+            dates_s = pd.to_datetime(groups)
+            mask = (dates_s >= pd.to_datetime(self.train_start_date)) & (dates_s < pd.to_datetime(self.test_start_date))
+            valid_indices = all_idx[mask]
+
+        if len(valid_indices) == 0:
+            raise ValueError("No valid samples remain after applying date filters.")
+
+        blocks = _make_contiguous_blocks(valid_indices, self.n_splits)
 
         # Enumerate combinations of test blocks
         for test_block_ids in combinations(range(len(blocks)), self.n_test_splits):
@@ -119,11 +126,12 @@ class SimpleCombinatorialPurgedKFold:
             # Train candidates are complement
             in_test = np.zeros(n_samples, dtype=bool)
             in_test[test_idx] = True
-            train_idx = all_idx[~in_test]
+            train_idx = valid_indices[~in_test[valid_indices]]
 
             # Build test intervals per block and purge + embargo
-            test_intervals = _blocks_to_intervals(test_blocks, t1)
-            train_idx = _purge_by_intervals(train_idx, t1, test_intervals)
+            test_intervals = _blocks_to_intervals(test_blocks)
+            train_idx = _purge_by_intervals(train_idx, test_intervals, self.purge_days)
+            embargo_size = self.purge_days + self.embargo_days
             train_idx = _apply_embargo(train_idx, test_intervals, embargo_size)
 
             # Safety: ensure disjoint

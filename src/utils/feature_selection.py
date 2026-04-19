@@ -7,7 +7,11 @@ def calculate_shap(model, X_valid):
     """
     Validデータを用いてSHAP値を計算し、特徴量ごとの平均絶対SHAP値を返す
     """
-    explainer = shap.TreeExplainer(model.model)
+    if "ElasticNet" in type(model).__name__:
+        explainer = shap.LinearExplainer(model.model, X_valid)
+    else:
+        explainer = shap.TreeExplainer(model.model)
+        
     shap_values = explainer.shap_values(X_valid)
     # 回帰の場合、shap_valuesはndarray。クラス分類の場合はリストの可能性あり
     if isinstance(shap_values, list):

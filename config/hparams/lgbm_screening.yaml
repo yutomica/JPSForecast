@@ -4,8 +4,8 @@ importance_type: gain
 n_jobs: -1
 random_state: 42
 learning_rate: 0.005        # 【修正】0.05は高すぎる。0.01〜0.005まで下げて「ゆっくり」学習させる
-n_estimators: 10000         # このままでOK（アーリーストッピングで止めるため）
-early_stopping_round: 100   # 【修正】学習率を下げたため、忍耐力（patience）を100〜200に増やす
+num_boost_round: 500         # このままでOK（アーリーストッピングで止めるため）
+early_stopping_round: 10   # 【修正】学習率を下げたため、忍耐力（patience）を100〜200に増やす
 max_depth: 3                # 【修正】4でも良いが、3にして「3次以上の相互作用」を完全に禁止する方が安全
 num_leaves: 7               # 【修正】max_depth=3の場合、最大葉数は 2^3=8。余裕を持たせて7以下にする
 subsample: 0.8
