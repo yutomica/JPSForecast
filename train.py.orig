@@ -146,31 +146,62 @@ def train(cfg: DictConfig) -> float:
                 valid_idx = pd.Index(np.concatenate([date_to_indices[pd.Timestamp(d)] for d in val_dates]))
                 splits.append((train_idx, valid_idx, None, tr_pos, val_pos))
         
-        # --- データロード＆前処理 (Sweep最適化版) ---
-        all_features = pd.read_json(master_dir / "feature_names.json", typ="series").tolist()
-        feature_cols = cfg.features.get("feature_cols", all_features)
-        feature_cols = list(dict.fromkeys(feature_cols))
+        # --- データロード＆前処理 ---
+        # 全特徴量名のロード
+        all_features = pd.read_json(master_dir / "feature_names.json", typ='series').tolist()
+        # 特徴量の指定
+        features_choice = HydraConfig.get().runtime.choices.features
+        print(f"🧬 Feature select: {features_choice}")
+        feature_cols = cfg.features.get('feature_cols', all_features)
+        feature_cols = list(dict.fromkeys(feature_cols)) # 特徴量の重複排除 (順序保持)
+        col_indices = [all_features.index(c) for c in feature_cols]
+        cat_cols = cfg.features.get('cat_cols',[])
+        print(f"  - Num of features: {len(feature_cols):,}")
+        # print(f"  - Num of cat features: {len(cat_cols):,}")
+
+        # Parquetチャンクから必要な特徴量のみをメモリにロード
+        # DL向けの並列処理や時系列ウィンドウ化を見据え、scode, date順にソートされたParquetチャンクを利用する
+        features_dir = master_dir / "features"
+        if not features_dir.exists():
+            raise FileNotFoundError(f"Features directory not found: {features_dir}")
+            
+        print("  - Preparing shared memory map for raw features...")
         cols_hash = hashlib.md5(",".join(feature_cols).encode()).hexdigest()[:8]
-        PERSISTENT_CACHE = master_dir / f"features_array_{cols_hash}.npy"
-        all_features = pd.read_json(master_dir / "feature_names.json", typ="series").tolist(); 
-        cat_cols = cfg.features.get("cat_cols", []); 
-        col_indices = [all_features.index(c) for c in feature_cols];
-        
-        if PERSISTENT_CACHE.exists():
-            print(f"✅ Persistent Cache Found: {PERSISTENT_CACHE.name}")
-            features_array = np.memmap(PERSISTENT_CACHE, dtype="float32", mode="r", shape=(len(meta_df), len(feature_cols)))
-        else:
-            print("⚠️ Cache missing. Building from Parquet (This takes ~10 mins)...")
-            features_dir = Path("/root/features_cache") if Path("/root/features_cache").exists() else (master_dir / "features")
-            features_array = np.empty((len(meta_df), len(feature_cols)), dtype="float32")
-            current_row = 0
-            for cf in sorted(features_dir.glob("features_chunk_*.parquet")):
-                df_chunk = pd.read_parquet(cf, columns=feature_cols)
-                features_array[current_row : current_row+len(df_chunk)] = df_chunk.values.astype("float32")
-                current_row += len(df_chunk)
-            np.save(PERSISTENT_CACHE, features_array)
-            print(f"✅ Cache persisted to: {PERSISTENT_CACHE}")
-        
+        features_mmap_path = master_dir / f"features_array_{cols_hash}.npy"
+        lock_path = master_dir / f"features_array_{cols_hash}.lock"
+
+        # 最初のプロセスのみが mmap キャッシュを作成し、他プロセスはそれを待機してアタッチする
+        if not features_mmap_path.exists() or lock_path.exists():
+            try:
+                lock_path.touch(exist_ok=False)
+                print(f"  - Building mmap cache: {features_mmap_path.name}")
+                chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+                
+                shape = (len(meta_df), len(feature_cols))
+                mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
+                
+                current_row = 0
+                for cf in chunk_files:
+                    df_chunk = pd.read_parquet(cf, columns=feature_cols)
+                    chunk_len = len(df_chunk)
+                    mmap_arr[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
+                    current_row += chunk_len
+                
+                mmap_arr.flush()
+                del mmap_arr
+                gc.collect()
+                lock_path.unlink()
+            except FileExistsError:
+                print("  - Waiting for other process to finish building mmap cache...")
+                import time
+                while lock_path.exists():
+                    time.sleep(2)
+
+        print("  - Attaching to shared memory map...")
+        features_array = np.memmap(features_mmap_path, dtype='float32', mode='r', shape=(len(meta_df), len(feature_cols)))
+            
+        # train.py内での後続処理の互換性のため、列のインデックスマッピングを更新
+        # 読み込んだ時点で配列の列は `feature_cols` と同一になるため
         col_indices = list(range(len(feature_cols)))
         
         # --- プリプロセッサの初期化と事前学習 (Fold間で共通) ---
@@ -452,24 +483,24 @@ def train(cfg: DictConfig) -> float:
         )
         
         # --- Pooled OOF Metric の算出 ---
-        # oof_df = full_res_df[full_res_df['phase'] == 'valid']
-        # ndcg_k = cfg.get("ndcg_k", 10)
-        # if not oof_df.empty:
-        #     print(f"  🔹 Calculating Pooled OOF Metrics...")
-        #     y_ret_pooled = oof_df['Future_Close'].values - 1.0 if 'Future_Close' in oof_df.columns else None
-        #     pooled_metrics = evaluate_metrics(
-        #         y_true=oof_df['target'].values,
-        #         y_pred=oof_df['score'].values,
-        #         y_ret=y_ret_pooled,
-        #         task_type=cfg.target.task_type,
-        #         target_col=cfg.target.column,
-        #         dates=oof_df['date'].values,
-        #         ndcg_k=ndcg_k
-        #     )
-        #     # MLflowにロギング
-        #     mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
-        # else:
-        #     pooled_metrics = {}
+        oof_df = full_res_df[full_res_df['phase'] == 'valid']
+        ndcg_k = cfg.get("ndcg_k", 10)
+        if not oof_df.empty:
+            print(f"  🔹 Calculating Pooled OOF Metrics...")
+            y_ret_pooled = oof_df['Future_Close'].values - 1.0 if 'Future_Close' in oof_df.columns else None
+            pooled_metrics = evaluate_metrics(
+                y_true=oof_df['target'].values,
+                y_pred=oof_df['score'].values,
+                y_ret=y_ret_pooled,
+                task_type=cfg.target.task_type,
+                target_col=cfg.target.column,
+                dates=oof_df['date'].values,
+                ndcg_k=ndcg_k
+            )
+            # MLflowにロギング
+            mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
+        else:
+            pooled_metrics = {}
             
         # --- 最終的な最適化スコア（Optunaの戻り値）の決定 ---
         opt_metric = cfg.get("optimization_metric", "ic")
@@ -544,6 +575,12 @@ def train(cfg: DictConfig) -> float:
         if 'features_array' in locals():
             del features_array
             gc.collect()
+        if features_mmap_path.exists():
+            try:
+                features_mmap_path.unlink()
+                print(f"✅ Cleaned up mmap cache: {features_mmap_path.name}")
+            except OSError as e:
+                print(f"⚠️ Failed to remove mmap cache: {e}")
         
         print("\n" + "="*60)
         print(f"🎯 Trial finished. Score: {final_opt_score:.6f}")

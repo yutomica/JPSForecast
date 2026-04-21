@@ -1,0 +1,11 @@
+--- train.py
++++ train.py
+@@ -121,7 +121,9 @@
+         # --- データロード＆前処理（RAM一括ロード最適化版） ---
+-        features_dir = master_dir / "features"
++        # プロクオンツ注：ローカルSSD(NVMe)キャッシュがあれば優先使用し、I/O待ちを解消する
++        LOCAL_FEATURES = Path("/root/features_cache")
++        features_dir = LOCAL_FEATURES if LOCAL_FEATURES.exists() else (master_dir / "features")
++        
+         if not features_dir.exists():
+             raise FileNotFoundError(f"Features directory not found: {features_dir}")

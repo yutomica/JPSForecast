@@ -1,4 +1,4 @@
 # config/data/master.yaml
 type: "master"
-path: "/Users/yuu/Projects/JPSForecast/data/master"
+path: "/root/master_select"
 format: "pkl"

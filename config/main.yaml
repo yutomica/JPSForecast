@@ -2,7 +2,7 @@
 defaults:
   - domain: tac
   - target: tac_vol_scaled_asym_return
-  - data: sample
+  - data: master
   - features: all
   - model: lgbm
   - hparams: lgbm_default
@@ -14,7 +14,7 @@ defaults:
 
 
 hparams:
-  num_workers: 0
+  num_workers: 2
 
 
 # mode (str): 動作モード。
@@ -32,5 +32,5 @@ preprocess:
 
 # MLflow設定（全実験共通）
 mlflow:
-  tracking_uri: "sqlite:////Users/yuu/Projects/JPSForecast/mlflow.db"
+  tracking_uri: "sqlite:////workspace/JPSForecast/mlflow.db"
   experiment_name: "test"

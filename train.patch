@@ -1,0 +1,70 @@
+--- train.py
++++ train.py
+@@ -124,40 +124,20 @@
+         if not features_dir.exists():
+             raise FileNotFoundError(f"Features directory not found: {features_dir}")
+             
+-        print("  - Preparing shared memory map for raw features...")
+-        cols_hash = hashlib.md5(",".join(feature_cols).encode()).hexdigest()[:8]
+-        features_mmap_path = master_dir / f"features_array_{cols_hash}.npy"
+-        lock_path = master_dir / f"features_array_{cols_hash}.lock"
+-
+-        # 最初のプロセスのみが mmap キャッシュを作成し、他プロセスはそれを待機してアタッチする
+-        if not features_mmap_path.exists() or lock_path.exists():
+-            try:
+-                lock_path.touch(exist_ok=False)
+-                print(f"  - Building mmap cache: {features_mmap_path.name}")
+-                chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+-                
+-                shape = (len(meta_df), len(feature_cols))
+-                mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
+-                
+-                current_row = 0
+-                for cf in chunk_files:
+-                    df_chunk = pd.read_parquet(cf, columns=feature_cols)
+-                    chunk_len = len(df_chunk)
+-                    mmap_arr[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
+-                    current_row += chunk_len
+-                
+-                mmap_arr.flush()
+-                del mmap_arr
+-                gc.collect()
+-                lock_path.unlink()
+-            except FileExistsError:
+-                print("  - Waiting for other process to finish building mmap cache...")
+-                import time
+-                while lock_path.exists():
+-                    time.sleep(2)
+-
+-        print("  - Attaching to shared memory map...")
+-        features_array = np.memmap(features_mmap_path, dtype='float32', mode='r', shape=(len(meta_df), len(feature_cols)))
++        # プロクオンツ注：Network Volumeへのmmap書き込みを廃止し、RAM上へ直接ロード
++        print(f"  - Loading all {len(feature_cols)} features into RAM (Approx. {len(meta_df)*len(feature_cols)*4 / (1024**3):.2f} GB)...")
++        
++        chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
++        # プレースホルダ配列を先に確保（メモリ断片化を防止）
++        features_array = np.empty((len(meta_df), len(feature_cols)), dtype='float32')
++        
++        current_row = 0
++        for cf in chunk_files:
++            df_chunk = pd.read_parquet(cf, columns=feature_cols)
++            chunk_len = len(df_chunk)
++            features_array[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
++            current_row += chunk_len
++        print(f"  - RAM load complete: {current_row:,} rows.")
+             
+         # train.py内での後続処理の互換性のため、列のインデックスマッピングを更新
+         # 読み込んだ時点で配列の列は `feature_cols` と同一になるため
+@@ -355,12 +335,6 @@
+         if 'features_array' in locals():
+             del features_array
+             gc.collect()
+-        if features_mmap_path.exists():
+-            try:
+-                features_mmap_path.unlink()
+-                print(f"✅ Cleaned up mmap cache: {features_mmap_path.name}")
+-            except OSError as e:
+-                print(f"⚠️ Failed to remove mmap cache: {e}")
+         
+         print("\n" + "="*60)
+         print(f"🎯 Trial finished. Score: {final_opt_score:.6f}")
