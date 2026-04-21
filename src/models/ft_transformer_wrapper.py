@@ -7,6 +7,9 @@ from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+import zarr
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -16,6 +19,61 @@ from .base import BaseModelWrapper
 from .networks.ft_transformer import FTTransformer
 from .pruning import execute_epoch_pruning, log_epoch_metrics
 
+class ZarrTabularDataset(torch.utils.data.Dataset):
+    def __init__(self, zarr_path, y, w, valid_indices, batch_size, num_idx, cat_idx, shuffle=True):
+        self.zarr_path = zarr_path
+        self.y = y
+        self.w = w
+        self.valid_indices = valid_indices
+        self.batch_size = batch_size
+        self.num_idx = num_idx
+        self.cat_idx = cat_idx
+        self.shuffle = shuffle
+        self.n_samples = len(valid_indices)
+        self.n_batches = (self.n_samples + self.batch_size - 1) // self.batch_size
+        self.batch_indices = np.arange(self.n_batches)
+        if self.shuffle:
+            np.random.shuffle(self.batch_indices)
+        self._z = None
+
+    def _get_zarr(self):
+        if self._z is None:
+            try:
+                import numcodecs
+                numcodecs.blosc.set_nthreads(1)
+                numcodecs.blosc.use_threads = False
+            except ImportError:
+                pass
+            self._z = zarr.open(self.zarr_path, mode='r')
+        return self._z
+
+    def __len__(self):
+        return self.n_batches
+
+    def __getitem__(self, idx):
+        z = self._get_zarr()
+        batch_idx = self.batch_indices[idx]
+        start_logical = batch_idx * self.batch_size
+        end_logical = min(start_logical + self.batch_size, self.n_samples)
+        logical_batch = np.arange(start_logical, end_logical)
+        physical_batch = self.valid_indices[logical_batch]
+
+        start_idx = int(physical_batch[0])
+        end_idx = int(physical_batch[-1]) + 1
+        
+        chunk = z[start_idx:end_idx, :]
+        local_indices = physical_batch - start_idx
+        X_batch = chunk[local_indices]
+
+        x_num = X_batch[:, self.num_idx] if len(self.num_idx) > 0 else np.zeros((len(X_batch), 0), dtype=np.float32)
+        x_cat = X_batch[:, self.cat_idx].astype(np.int64) if len(self.cat_idx) > 0 else np.zeros((len(X_batch), 0), dtype=np.int64)
+        y_batch = self.y[logical_batch]
+        w_batch = self.w[logical_batch] if self.w is not None else np.ones(len(y_batch), dtype=np.float32)
+        return torch.from_numpy(x_num), torch.from_numpy(x_cat), torch.from_numpy(y_batch), torch.from_numpy(w_batch)
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.batch_indices)
 
 class FTTransformerWrapper(BaseModelWrapper):
     """
@@ -100,6 +158,15 @@ class FTTransformerWrapper(BaseModelWrapper):
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
+    def _ensure_array(self, X):
+        if isinstance(X, pa.Buffer):
+            with ipc.open_stream(X) as reader:
+                table = reader.read_all()
+            return table.to_pandas().values.astype(np.float32)
+        if isinstance(X, pd.DataFrame):
+            return X.values.astype(np.float32)
+        return np.asarray(X, dtype=np.float32)
+
     def _split_feature_indices(self, n_features: int) -> Tuple[np.ndarray, np.ndarray]:
         cat_idx = np.array(self.cat_idx, dtype=np.int64)
         if len(cat_idx) == 0:
@@ -114,11 +181,11 @@ class FTTransformerWrapper(BaseModelWrapper):
         num_idx = np.arange(n_features, dtype=np.int64)[mask]
         return num_idx, cat_idx
 
-    def _build_model(self, X: np.ndarray) -> None:
-        if X.ndim != 2:
-            raise ValueError(f"FTTransformerWrapper expects 2D array [N, F], got {X.shape}")
+    def _build_model_from_shape(self, shape) -> None:
+        if len(shape) != 2:
+            raise ValueError(f"FTTransformerWrapper expects 2D shape [N, F], got {shape}")
 
-        self.n_features_ = int(X.shape[1])
+        self.n_features_ = int(shape[1])
         self.num_idx_, cat_idx = self._split_feature_indices(self.n_features_)
         self.n_num_features_ = int(len(self.num_idx_))
 
@@ -198,14 +265,37 @@ class FTTransformerWrapper(BaseModelWrapper):
             return (loss_each * sw).mean()
         return loss_each.mean()
 
+    def _build_dataloader(self, X, y_np, w_np, mask, batch_size, shuffle):
+        is_zarr = isinstance(X, str) and X.endswith('.zarr')
+        if is_zarr:
+            valid_indices = np.where(mask)[0] if mask is not None else np.arange(len(y_np))
+            y_filt = y_np[mask] if mask is not None else y_np
+            w_filt = w_np[mask] if mask is not None and w_np is not None else w_np
+            ds = ZarrTabularDataset(X, y_filt, w_filt, valid_indices, batch_size, self.num_idx_, self.cat_idx, shuffle=shuffle)
+            return DataLoader(ds, batch_size=None, num_workers=self.num_workers, pin_memory=(self.device.type=="cuda"))
+        else:
+            if mask is not None:
+                X_filt = X[mask]
+                y_filt = y_np[mask]
+                w_filt = w_np[mask] if w_np is not None else None
+            else:
+                X_filt, y_filt, w_filt = X, y_np, w_np
+            x_num_np, x_cat_np = self._split_arrays(X_filt)
+            x_num_t = torch.from_numpy(np.ascontiguousarray(x_num_np)) if x_num_np is not None else torch.zeros((len(X_filt), 0), dtype=torch.float32)
+            x_cat_t = torch.from_numpy(np.ascontiguousarray(x_cat_np)) if x_cat_np is not None else torch.zeros((len(X_filt), 0), dtype=torch.int64)
+            w_t = torch.from_numpy(w_filt).float() if w_filt is not None else torch.ones(len(y_filt), dtype=torch.float32)
+            ds = TensorDataset(x_num_t, x_cat_t, torch.from_numpy(y_filt.astype(np.float32)), w_t)
+            return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=(self.device.type=="cuda"))
+
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
-        X_train = np.asarray(X_train, dtype=np.float32)
         y_train_np = np.asarray(y_train)
+        is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
 
-        if X_train.ndim != 2:
-            raise ValueError(f"X_train must be 2D [N, F], got {X_train.shape}")
-
-        self._build_model(X_train)
+        if is_zarr_train:
+            self._build_model_from_shape(zarr.open(X_train, mode='r').shape)
+        else:
+            X_train = self._ensure_array(X_train)
+            self._build_model_from_shape(X_train.shape)
 
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -222,37 +312,23 @@ class FTTransformerWrapper(BaseModelWrapper):
         # --- Validation Loader の準備とメモリ解放 ---
         valid_loader = None
         if X_valid is not None and y_valid is not None:
-            X_valid = np.asarray(X_valid, dtype=np.float32)
             y_valid_np = np.asarray(y_valid)
+            is_zarr_valid = isinstance(X_valid, str) and X_valid.endswith('.zarr')
             valid_mask = ~np.isnan(y_valid_np) & ~np.isinf(y_valid_np)
-            valid_mask &= np.isfinite(X_valid).all(axis=1)
+            if not is_zarr_valid:
+                valid_mask &= np.isfinite(X_valid).all(axis=1)
 
             dropped_valid = len(y_valid_np) - int(np.sum(valid_mask))
             if dropped_valid > 0:
                 print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf.")
 
-            X_valid_filtered = X_valid[valid_mask]
-            y_valid_filtered = y_valid_np[valid_mask]
-
-            x_num_np, x_cat_np = self._split_arrays(X_valid_filtered)
-            x_num_t = torch.from_numpy(np.ascontiguousarray(x_num_np)) if x_num_np is not None else torch.zeros((len(X_valid_filtered), 0), dtype=torch.float32)
-            x_cat_t = torch.from_numpy(np.ascontiguousarray(x_cat_np)) if x_cat_np is not None else torch.zeros((len(X_valid_filtered), 0), dtype=torch.int64)
-
-            ds = TensorDataset(
-                x_num_t, x_cat_t,
-                torch.from_numpy(y_valid_filtered.astype(np.float32)),
-                torch.ones(len(X_valid_filtered), dtype=torch.float32)
-            )
-            valid_loader = DataLoader(
-                ds, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers,
-                pin_memory=(self.device.type == "cuda"), drop_last=False,
-            )
-            del X_valid, y_valid, y_valid_np, valid_mask, X_valid_filtered, y_valid_filtered, x_num_np, x_cat_np, ds
+            valid_loader = self._build_dataloader(X_valid, y_valid_np, None, valid_mask, self.batch_size, shuffle=False)
             gc.collect()
             
         # --- Training Loader の準備とメモリ解放 ---
         train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
-        train_mask &= np.isfinite(X_train).all(axis=1)
+        if not is_zarr_train:
+            train_mask &= np.isfinite(X_train).all(axis=1)
 
         if sample_weight is not None:
             sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
@@ -263,31 +339,18 @@ class FTTransformerWrapper(BaseModelWrapper):
         if dropped_train > 0:
             print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
 
-        X_train_filtered = X_train[train_mask]
-        y_train_filtered = y_train_np[train_mask]
-
+        w_np = None
         if sample_weight is not None:
-            sample_weight_filtered = sample_weight[train_mask]
-            if len(sample_weight_filtered) > 0:
-                p99 = np.percentile(sample_weight_filtered, 99)
-                sample_weight_filtered = np.clip(sample_weight_filtered, 0.0, max(p99 * 10.0, 1.0))
-                if sample_weight_filtered.mean() > 0:
-                    sample_weight_filtered = sample_weight_filtered / sample_weight_filtered.mean()
-            w_t = torch.from_numpy(sample_weight_filtered.astype(np.float32))
-        else:
-            w_t = torch.ones(len(X_train_filtered), dtype=torch.float32)
-            
-        x_num_np, x_cat_np = self._split_arrays(X_train_filtered)
-        x_num_t = torch.from_numpy(np.ascontiguousarray(x_num_np)) if x_num_np is not None else torch.zeros((len(X_train_filtered), 0), dtype=torch.float32)
-        x_cat_t = torch.from_numpy(np.ascontiguousarray(x_cat_np)) if x_cat_np is not None else torch.zeros((len(X_train_filtered), 0), dtype=torch.int64)
+            w_np = sample_weight.astype(np.float32)
+            w_np_filt = w_np[train_mask]
+            if len(w_np_filt) > 0:
+                p99 = np.percentile(w_np_filt, 99)
+                w_np_filt = np.clip(w_np_filt, 0.0, max(p99 * 10.0, 1.0))
+                if w_np_filt.mean() > 0:
+                    w_np_filt = w_np_filt / w_np_filt.mean()
+            w_np[train_mask] = w_np_filt
 
-        ds = TensorDataset(x_num_t, x_cat_t, torch.from_numpy(y_train_filtered.astype(np.float32)), w_t)
-        train_loader = DataLoader(
-            ds, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers,
-            pin_memory=(self.device.type == "cuda"), drop_last=False,
-        )
-        del X_train, y_train, y_train_np, train_mask, sample_weight, X_train_filtered, y_train_filtered, x_num_np, x_cat_np, ds, w_t
-        if 'sample_weight_filtered' in locals(): del sample_weight_filtered
+        train_loader = self._build_dataloader(X_train, y_train_np, w_np, train_mask, self.batch_size, shuffle=True)
         gc.collect()
 
         if self.optimizer_name.lower() == "adam":
@@ -308,16 +371,19 @@ class FTTransformerWrapper(BaseModelWrapper):
         loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
 
         for epoch in range(self.max_epochs):
+            if hasattr(train_loader.dataset, "on_epoch_end"):
+                train_loader.dataset.on_epoch_end()
+                
             self.model.train()
-            train_total = 0.0
+            train_total = torch.tensor(0.0, device=self.device)
             train_count = 0
 
             with tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.max_epochs}", leave=False) as pbar:
                 for x_num, x_cat, y, sw in pbar:
-                    x_num = x_num.to(self.device, non_blocking=(self.device.type == "cuda"))
-                    x_cat = x_cat.to(self.device, non_blocking=(self.device.type == "cuda"))
-                    y = y.to(self.device, non_blocking=(self.device.type == "cuda"))
-                    sw = sw.to(self.device, non_blocking=(self.device.type == "cuda"))
+                    x_num = x_num.to(self.device)
+                    x_cat = x_cat.to(self.device)
+                    y = y.to(self.device)
+                    sw = sw.to(self.device)
 
                     optimizer.zero_grad(set_to_none=True)
 
@@ -346,27 +412,27 @@ class FTTransformerWrapper(BaseModelWrapper):
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                         optimizer.step()
 
-                    train_total += loss.item() * y.shape[0]
+                    train_total += loss.detach() * y.shape[0]
                     train_count += y.shape[0]
-                    pbar.set_postfix({f"train_{loss_name}": f"{train_total / max(train_count, 1):.6f}"})
+                    # バッチ毎の .item() 同期（CPU busy-wait）を防ぐため tqdm の更新を省略
 
-            train_loss = train_total / max(train_count, 1)
+            train_loss = float(train_total.item()) / max(train_count, 1)
             self.history["train_loss"].append(train_loss)
 
             if valid_loader is not None:
                 self.model.eval()
-                valid_total = 0.0
+                valid_total = torch.tensor(0.0, device=self.device)
                 valid_count = 0
                 with torch.no_grad():
                     for x_num, x_cat, y, _ in valid_loader:
-                        x_num = x_num.to(self.device, non_blocking=(self.device.type == "cuda"))
-                        x_cat = x_cat.to(self.device, non_blocking=(self.device.type == "cuda"))
-                        y = y.to(self.device, non_blocking=(self.device.type == "cuda"))
+                        x_num = x_num.to(self.device)
+                        x_cat = x_cat.to(self.device)
+                        y = y.to(self.device)
                         logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
                         loss = self._compute_loss(logits, y, sample_weight=None)
-                        valid_total += loss.item() * y.shape[0]
+                        valid_total += loss.detach() * y.shape[0]
                         valid_count += y.shape[0]
-                valid_loss = valid_total / max(valid_count, 1)
+                valid_loss = float(valid_total.item()) / max(valid_count, 1)
             else:
                 valid_loss = train_loss
 
@@ -459,31 +525,19 @@ class FTTransformerWrapper(BaseModelWrapper):
         if self.model is None:
             raise ValueError("Model has not been trained yet.")
 
-        X = np.asarray(X, dtype=np.float32)
-        if X.ndim != 2:
-            raise ValueError(f"X must be 2D [N, F], got {X.shape}")
-
-        x_num_np, x_cat_np = self._split_arrays(X)
-        x_num_t = torch.from_numpy(np.ascontiguousarray(x_num_np)) if x_num_np is not None else torch.zeros((X.shape[0], 0), dtype=torch.float32)
-        x_cat_t = torch.from_numpy(np.ascontiguousarray(x_cat_np)) if x_cat_np is not None else torch.zeros((X.shape[0], 0), dtype=torch.int64)
-        
-        ds = TensorDataset(
-            x_num_t, x_cat_t,
-            torch.zeros(X.shape[0], dtype=torch.float32),
-            torch.ones(X.shape[0], dtype=torch.float32)
-        )
-        loader = DataLoader(
-            ds, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers,
-            pin_memory=(self.device.type == "cuda"), drop_last=False,
-        )
+        is_zarr = isinstance(X, str) and X.endswith('.zarr')
+        if not is_zarr:
+            X = self._ensure_array(X)
+        dummy_y = np.zeros(zarr.open(X, mode='r').shape[0] if is_zarr else X.shape[0], dtype=np.float32)
+        loader = self._build_dataloader(X, dummy_y, None, None, self.batch_size, shuffle=False)
 
         outputs = []
         self.model.eval()
 
         with torch.no_grad():
             for x_num, x_cat, _, _ in tqdm(loader, desc="Predicting", leave=False):
-                x_num = x_num.to(self.device, non_blocking=(self.device.type == "cuda"))
-                x_cat = x_cat.to(self.device, non_blocking=(self.device.type == "cuda"))
+                x_num = x_num.to(self.device)
+                x_cat = x_cat.to(self.device)
                 logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
                 if self.task_type == "classification":
                     preds = torch.sigmoid(logits.view(-1))

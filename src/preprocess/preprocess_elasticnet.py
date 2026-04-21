@@ -2,6 +2,10 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.ipc as ipc
+from pathlib import Path
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
 
@@ -42,10 +46,21 @@ class ElasticNetPreprocessor(BasePreprocessor):
         self.valid_cat_cols_ = []
 
     def _to_dataframe(self, data, row_indices=None, col_indices=None):
+        if isinstance(data, (str, Path)):
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            if row_indices is not None:
+                table = table.take(pa.array(row_indices))
+            return table.to_pandas()
+            
         if isinstance(data, pd.DataFrame):
             if self.feature_cols:
-                return data[self.feature_cols].copy()
-            return data.copy()
+                df = data[self.feature_cols].copy()
+            else:
+                df = data.copy()
+            if row_indices is not None:
+                df = df.iloc[row_indices].reset_index(drop=True)
+            return df
 
         if row_indices is None:
             extracted = data
@@ -134,7 +149,12 @@ class ElasticNetPreprocessor(BasePreprocessor):
             unknown_id = self.unknown_id_map_[col]
             df[col] = ser.map(label_map).fillna(unknown_id).astype(np.int32)
 
-        return df
+        # PyArrow Table化と共有メモリ用IPCバッファ作成
+        table = pa.Table.from_pandas(df)
+        sink = pa.BufferOutputStream()
+        with ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue() # pyarrow.Buffer
 
     def save(self, filename="scaler.joblib"):
         if not self.is_fitted:

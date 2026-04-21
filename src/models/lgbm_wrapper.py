@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import mlflow
 import optuna
+import pyarrow as pa
+import pyarrow.ipc as ipc
 from hydra.utils import get_method
 from .base import BaseModelWrapper
 from .pruning import calculate_spearman_ic, log_epoch_metrics
@@ -42,7 +44,20 @@ class LGBMWrapper(BaseModelWrapper):
         self.model = None
         self.classes_ = None
 
+    def _from_ipc_handle(self, X):
+        """IPCバッファハンドルを受け取ってDataFrameに復元する"""
+        if isinstance(X, pa.Buffer):
+            with ipc.open_stream(X) as reader:
+                table = reader.read_all()
+            return table.to_pandas()
+        return X
+
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+        # IPCハンドルのデコード
+        X_train = self._from_ipc_handle(X_train)
+        if X_valid is not None:
+            X_valid = self._from_ipc_handle(X_valid)
+            
         # 多クラス分類用のラベル変換とクラス数設定
         if self.task_type == "multiclass":
             self.classes_ = np.unique(y_train)
@@ -185,6 +200,8 @@ class LGBMWrapper(BaseModelWrapper):
     def predict(self, X):
         if self.model is None:
             raise ValueError("Model has not been trained yet.")
+            
+        X = self._from_ipc_handle(X)
         preds = self.model.predict(X)
         if self.task_type == "multiclass":
             # Score = P(target=+1) - P(target=-1)

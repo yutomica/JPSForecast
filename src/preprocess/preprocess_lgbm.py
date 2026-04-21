@@ -1,6 +1,10 @@
 import numpy as np
 import pandas as pd
 import os
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.ipc as ipc
+from pathlib import Path
 import joblib
 from .base import BasePreprocessor
 
@@ -32,43 +36,50 @@ class LGBMPreprocessor(BasePreprocessor):
         if not self.is_fitted:
             raise ValueError("Preprocessor must be fitted.")
             
-        if isinstance(data, pd.DataFrame):
-            # 推論時：APIから取得した生のDataFrame
+        if isinstance(data, (str, Path)):
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            if row_indices is not None:
+                table = table.take(pa.array(row_indices))
+            df_processed = table.to_pandas()
+        elif isinstance(data, pd.DataFrame):
             df_processed = data[self.feature_cols].copy()
-            # pandasでの置換は遅いため、数値列に限定して処理
-            num_cols = [c for c in df_processed.columns if c not in self.cat_cols]
-            if num_cols:
-                df_processed[num_cols] = df_processed[num_cols].replace([np.inf, -np.inf], np.nan)
+            if row_indices is not None:
+                df_processed = df_processed.iloc[row_indices].reset_index(drop=True)
         else:
-            # 学習時：memmapからスライシング
-            # row_indices, col_indices を使って必要な次元だけをメモリに乗せる
-            # メモリ使用量のピークを抑えるためチャンクごとに読み込む
-            chunk_size = 50000
             num_cols_to_extract = len(col_indices) if col_indices is not None else data.shape[1]
-            extracted = np.empty((len(row_indices), num_cols_to_extract), dtype=np.float32)
-            for i in range(0, len(row_indices), chunk_size):
-                chunk_rows = row_indices[i:i+chunk_size]
-                if col_indices is not None:
-                    extracted[i:i+chunk_size, :] = data[chunk_rows][:, col_indices]
-                else:
-                    extracted[i:i+chunk_size, :] = data[chunk_rows]
-            # インプレース処理で巨大な中間配列の生成を防ぎ、infをnanに置換する
+            extracted = np.empty((len(row_indices) if row_indices is not None else data.shape[0], num_cols_to_extract), dtype=np.float32)
+            
+            rows = row_indices if row_indices is not None else range(data.shape[0])
+            if col_indices is not None:
+                extracted[:] = data[rows][:, col_indices]
+            else:
+                extracted[:] = data[rows]
+                
             np.nan_to_num(extracted, copy=False, nan=np.nan, posinf=np.nan, neginf=np.nan)
             df_processed = pd.DataFrame(extracted, columns=self.feature_cols)
+            
+        num_cols = [c for c in df_processed.columns if c not in self.cat_cols]
+        if num_cols:
+            df_processed[num_cols] = df_processed[num_cols].replace([np.inf, -np.inf], np.nan)
             
         # カテゴリ変数の型変換
         for col in self.cat_cols:
             if col in df_processed.columns:
                 df_processed[col] = df_processed[col].fillna(-1).astype(int).astype('category')
                 
-        num_cols = list(dict.fromkeys([c for c in df_processed.columns if c not in self.cat_cols]))
         if num_cols:
             # すでにfloat32の場合はastypeをスキップし、無駄なメモリコピーを防ぐ
             cols_to_cast = [c for c in num_cols if df_processed[c].dtype != 'float32']
             if cols_to_cast:
                 df_processed[cols_to_cast] = df_processed[cols_to_cast].astype('float32')
                 
-        return df_processed
+        # PyArrow Table化と共有メモリ用IPCバッファ作成
+        table = pa.Table.from_pandas(df_processed)
+        sink = pa.BufferOutputStream()
+        with ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue() # pyarrow.Buffer
 
     def save(self, filename='scaler.joblib'):
         """

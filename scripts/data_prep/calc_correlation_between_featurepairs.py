@@ -7,17 +7,16 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 MASTER_DIR = PROJECT_DIR / 'data/master'
 
-def find_high_spearman_correlations(file_path, names_path=None, threshold=0.95, output_csv=None, sample_size=100000):
+def find_high_spearman_correlations(features_dir_path, names_path=None, threshold=0.95, output_csv=None, sample_size=100000):
     """
-    features.npyを読み込み、Spearman相関を計算し、
+    Parquetチャンクを読み込み、Spearman相関を計算し、
     指定した閾値以上のペアをリストアップする関数。
     """
     
-    # ファイルの存在確認
-    if not os.path.exists(file_path):
-        print(f"エラー: ファイル '{file_path}' が見つかりません。")
-        # テスト用にダミーデータを作成するか尋ねるなどの処理も可能ですが、
-        # ここでは処理を中断します。
+    features_dir = Path(features_dir_path)
+    # ディレクトリの存在確認
+    if not features_dir.exists() or not features_dir.is_dir():
+        print(f"エラー: ディレクトリ '{features_dir}' が見つかりません。")
         return
 
     try:
@@ -33,42 +32,24 @@ def find_high_spearman_correlations(file_path, names_path=None, threshold=0.95, 
                     feature_names = names_data
 
         # 2. データの読み込み
-        print(f"Loading {file_path}...")
-        # create_master_data.py で生成された features.npy は Raw Binary (memmap) 形式のため、
-        # np.load ではなく np.memmap で読み込む必要があります。
-        if feature_names:
-            n_features = len(feature_names)
-            dtype = 'float32'
-            itemsize = np.dtype(dtype).itemsize
-            file_size = os.path.getsize(file_path)
+        print(f"Loading features from Parquet chunks in {features_dir}...")
+        chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+        df_list = []
+        for cf in chunk_files:
+            df_chunk = pd.read_parquet(cf, columns=feature_names)
+            df_list.append(df_chunk)
             
-            # ファイルサイズからサンプル数を計算
-            if file_size % (n_features * itemsize) == 0:
-                n_samples = file_size // (n_features * itemsize)
-                features = np.memmap(file_path, dtype=dtype, mode='r', shape=(n_samples, n_features))
-            else:
-                # サイズが合わない場合は通常のnpy形式として試行
-                print("Warning: File size implies not a raw binary with known features. Trying np.load...")
-                features = np.load(file_path)
-        else:
-            # 特徴量名ファイルがない場合は通常のnpy形式として試行
-            features = np.load(file_path)
-
-        print(f"Data shape: {features.shape} (Samples: {features.shape[0]}, Features: {features.shape[1]})")
+        df_all = pd.concat(df_list, ignore_index=True)
+        print(f"Data shape: {df_all.shape}")
 
         # 3. Pandas DataFrameへ変換
         # 高速化・省メモリ化のため、データ数が多い場合はサンプリングを行う
-        n_samples_total = features.shape[0]
+        n_samples_total = len(df_all)
         if sample_size and n_samples_total > sample_size:
             print(f"Sampling {sample_size} rows from {n_samples_total} total rows for faster calculation...")
-            # ランダムにインデックスを選択し、ソートしてアクセス効率を良くする
-            indices = np.random.choice(n_samples_total, sample_size, replace=False)
-            indices.sort()
-            # memmapから必要な部分だけをメモリにロード
-            data_subset = features[indices]
-            df = pd.DataFrame(data_subset, columns=feature_names)
+            df = df_all.sample(n=sample_size, random_state=42)
         else:
-            df = pd.DataFrame(features, columns=feature_names)
+            df = df_all
 
         # 4. Spearman順位相関の計算
         print("Calculating Spearman correlation...")
@@ -112,8 +93,8 @@ def find_high_spearman_correlations(file_path, names_path=None, threshold=0.95, 
 
 if __name__ == "__main__":
     # 実行
-    target_file = MASTER_DIR / 'features.npy'
+    target_dir = MASTER_DIR / 'features'
     names_file = MASTER_DIR / 'feature_names.json'
     output_file = MASTER_DIR / 'high_correlation_pairs.csv'
     
-    find_high_spearman_correlations(target_file, names_path=names_file, output_csv=output_file)
+    find_high_spearman_correlations(target_dir, names_path=names_file, output_csv=output_file)

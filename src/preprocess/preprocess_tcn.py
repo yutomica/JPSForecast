@@ -1,7 +1,10 @@
 import os
 import joblib
+import uuid
+import tempfile
 import numpy as np
 import pandas as pd
+import zarr
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from .base import BasePreprocessor
@@ -156,11 +159,20 @@ class TCNPreprocessor(BasePreprocessor):
     def transform(self, data, row_indices=None, col_indices=None):
         if not self.is_fitted:
             raise ValueError("Preprocessor must be fitted before transform().")
+            
+        if isinstance(data, (str, os.PathLike)):
+            import pyarrow.dataset as ds
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            data_arr = table.to_pandas().to_numpy(dtype=np.float32)
+            col_indices = None
+        else:
+            data_arr = data
 
         # --- 推論パス (row_indices is None): 変更なし ---
         # メモリに収まる小さなDataFrameが渡されることを想定
         if row_indices is None:
-            df = self._to_dataframe(data, row_indices=None, col_indices=col_indices)
+            df = self._to_dataframe(data_arr, row_indices=None, col_indices=col_indices)
             arr_2d = self._transform_2d(df)
             n, f = arr_2d.shape
             if n < self.window_size:
@@ -175,9 +187,17 @@ class TCNPreprocessor(BasePreprocessor):
         if row_indices.ndim != 1:
             raise ValueError("row_indices must be 1-dimensional.")
 
-        chunk_size = 10000  # 一度に処理するサンプル数。メモリ使用量に応じて調整。
-        results = []
+        # Zarr を用いたオンディスクキャッシュ (3D化された時系列ウィンドウ)
+        zarr_dir = os.path.join(tempfile.gettempdir(), f"tcn_cache_{uuid.uuid4().hex}.zarr")
+        z = zarr.open(
+            zarr_dir,
+            mode='w',
+            shape=(len(row_indices), self.window_size, len(self.feature_cols)),
+            chunks=(2048, self.window_size, len(self.feature_cols)),
+            dtype='float32'
+        )
 
+        chunk_size = 10000
         for i in range(0, len(row_indices), chunk_size):
             chunk_row_indices = row_indices[i:i + chunk_size]
 
@@ -187,9 +207,9 @@ class TCNPreprocessor(BasePreprocessor):
             clipped_idx_mat = np.clip(idx_mat, 0, None)
 
             if col_indices is None:
-                extracted = data[clipped_idx_mat]
+                extracted = data_arr[clipped_idx_mat]
             else:
-                extracted = data[clipped_idx_mat][:, :, col_indices]
+                extracted = data_arr[clipped_idx_mat][:, :, col_indices]
 
             flat_df = pd.DataFrame(
                 extracted.reshape(-1, extracted.shape[-1]),
@@ -220,9 +240,9 @@ class TCNPreprocessor(BasePreprocessor):
             else:
                 raise ValueError(f"Unknown pad_mode: {self.pad_mode}")
 
-            results.append(seq)
+            z[i:i+chunk_size] = seq
 
-        return np.concatenate(results, axis=0)
+        return zarr_dir
 
     def _build_sequence_from_2d(self, arr_2d: np.ndarray, row_indices: np.ndarray) -> np.ndarray:
         history_offsets = np.arange(self.window_size - 1, -1, -1, dtype=np.int64)

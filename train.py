@@ -1,5 +1,10 @@
-import numpy as np
 import os
+
+# 各種ライブラリを読み込む前に、パフォーマンス安定化のための環境変数・スレッド制限を設定する
+from src.utils.env_setup import setup_environment
+setup_environment()
+
+import numpy as np
 import gc
 import hydra
 import mlflow
@@ -9,6 +14,7 @@ import joblib
 import tempfile
 import copy
 from pathlib import Path
+import hashlib
 from omegaconf import DictConfig, OmegaConf
 import optuna
 from hydra.utils import instantiate, get_class
@@ -152,24 +158,51 @@ def train(cfg: DictConfig) -> float:
         cat_cols = cfg.features.get('cat_cols',[])
         print(f"  - Num of features: {len(feature_cols):,}")
         # print(f"  - Num of cat features: {len(cat_cols):,}")
-        # 使う列の「インデックス番号」を特定 numpyのmemmapは、列番号でスライスするのが最も高速です
-        features_npy_path = master_dir / "features.npy"
-        expected_size = len(meta_df) * len(all_features) * 4
-        actual_size = os.path.getsize(features_npy_path)
-        if actual_size != expected_size:
-            actual_cols = actual_size // (len(meta_df) * 4)
-            raise ValueError(
-                f"Data shape mismatch in {features_npy_path.name}!\n"
-                f" - Expected columns (from feature_names.json): {len(all_features)}\n"
-                f" - Actual columns (from file size): {actual_cols}\n"
-                "※ features.npy と feature_names.json の特徴量数が一致していません。軽量化データを作成した際、names.json の置き換えを忘れていないか確認してください。"
-            )
-        features_mmap = np.memmap(
-            features_npy_path, 
-            dtype='float32', 
-            mode='r', 
-            shape=(len(meta_df), len(all_features))
-        )
+
+        # Parquetチャンクから必要な特徴量のみをメモリにロード
+        # DL向けの並列処理や時系列ウィンドウ化を見据え、scode, date順にソートされたParquetチャンクを利用する
+        features_dir = master_dir / "features"
+        if not features_dir.exists():
+            raise FileNotFoundError(f"Features directory not found: {features_dir}")
+            
+        print("  - Preparing shared memory map for raw features...")
+        cols_hash = hashlib.md5(",".join(feature_cols).encode()).hexdigest()[:8]
+        features_mmap_path = master_dir / f"features_array_{cols_hash}.npy"
+        lock_path = master_dir / f"features_array_{cols_hash}.lock"
+
+        # 最初のプロセスのみが mmap キャッシュを作成し、他プロセスはそれを待機してアタッチする
+        if not features_mmap_path.exists() or lock_path.exists():
+            try:
+                lock_path.touch(exist_ok=False)
+                print(f"  - Building mmap cache: {features_mmap_path.name}")
+                chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+                
+                shape = (len(meta_df), len(feature_cols))
+                mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
+                
+                current_row = 0
+                for cf in chunk_files:
+                    df_chunk = pd.read_parquet(cf, columns=feature_cols)
+                    chunk_len = len(df_chunk)
+                    mmap_arr[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
+                    current_row += chunk_len
+                
+                mmap_arr.flush()
+                del mmap_arr
+                gc.collect()
+                lock_path.unlink()
+            except FileExistsError:
+                print("  - Waiting for other process to finish building mmap cache...")
+                import time
+                while lock_path.exists():
+                    time.sleep(2)
+
+        print("  - Attaching to shared memory map...")
+        features_array = np.memmap(features_mmap_path, dtype='float32', mode='r', shape=(len(meta_df), len(feature_cols)))
+            
+        # train.py内での後続処理の互換性のため、列のインデックスマッピングを更新
+        # 読み込んだ時点で配列の列は `feature_cols` と同一になるため
+        col_indices = list(range(len(feature_cols)))
         
         # --- プリプロセッサの初期化と事前学習 (Fold間で共通) ---
         print(f"🔹 Fitting preprocessor (Sampling 100k)...")
@@ -183,7 +216,7 @@ def train(cfg: DictConfig) -> float:
         preprocessor_class = get_class(cfg.model.preprocessor_target)
         base_preprocessor = preprocessor_class(**prep_params)
         
-        sample_data = features_mmap[:100000, col_indices]
+        sample_data = features_array[:100000, col_indices]
         base_preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
         
         # fitパラメータのアップデート
@@ -264,22 +297,22 @@ def train(cfg: DictConfig) -> float:
             if stratified_sampling_weights is not None:
                 w_train *= stratified_sampling_weights
 
-            # memmap から必要な行のみを読み出し
+            # メモリ上の配列から必要な行のみを読み出し
             print(f"  🔹 Transforming data...")
             # 各Foldごとに独立したインスタンスを使用するためディープコピー
             preprocessor = copy.deepcopy(base_preprocessor)
-            X_train = preprocessor.transform(features_mmap, row_indices=train_idx, col_indices=col_indices)
-            X_valid = preprocessor.transform(features_mmap, row_indices=valid_idx, col_indices=col_indices)
+            X_train = preprocessor.transform(features_array, row_indices=train_idx, col_indices=col_indices)
+            X_valid = preprocessor.transform(features_array, row_indices=valid_idx, col_indices=col_indices)
             y_train = meta_df.loc[train_idx, target_col].values
             y_valid = meta_df.loc[valid_idx, target_col].values
             if test_idx is None or len(test_idx) == 0:
                 X_test = None
                 y_test = None
-                print(f"  🔹 Samples: Train={len(X_train):,}, Valid={len(X_valid):,}")
+                print(f"  🔹 Samples: Train={len(train_idx):,}, Valid={len(valid_idx):,}")
             else:
-                X_test = preprocessor.transform(features_mmap, row_indices=test_idx, col_indices=col_indices)
+                X_test = preprocessor.transform(features_array, row_indices=test_idx, col_indices=col_indices)
                 y_test = meta_df.loc[test_idx, target_col].values
-                print(f"  🔹 Samples: Train={len(X_train):,}, Valid={len(X_valid):,}, Test={len(X_test):,}")
+                print(f"  🔹 Samples: Train={len(train_idx):,}, Valid={len(valid_idx):,}, Test={len(test_idx):,}")
             # モデルのインスタンス化と学習
             model_class = get_class(cfg.model.model_target)
             model = model_class(task_type=cfg.target.task_type, **full_params)
@@ -354,7 +387,7 @@ def train(cfg: DictConfig) -> float:
             
             # 特徴量精査 (MDA) ロジックの追加
             if cfg.get("mode") == "feature_select":
-                print(f"  🔹 [Selection] Calculating MDA for Fold {i}...")
+                print(f"  🔹 [Selection] Calculating MDA using {opt_metric_name} for Fold {i}...")
                 baseline_score = valid_score
                 y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values
                 dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
@@ -362,7 +395,7 @@ def train(cfg: DictConfig) -> float:
                     model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
                     dates_for_shuffle=dates_for_shuffle, feature_cols=feature_cols,
                     baseline_score=baseline_score, task_type=cfg.target.task_type, target_col=target_col,
-                    opt_metric=opt_metric
+                    opt_metric=opt_metric_name
                 )
                 all_fold_mda_values.append(fold_mda)
             
@@ -384,6 +417,13 @@ def train(cfg: DictConfig) -> float:
                     meta_sub = meta_df.loc[idx, meta_cols].reset_index(drop=True)
                     res_df = pd.concat([res_df, meta_sub], axis=1)
                     all_results.append(res_df)
+            
+            # 中間生成されたZarrキャッシュのクリーンアップ
+            import shutil
+            for x_cache in [X_train, X_valid, X_test]:
+                if isinstance(x_cache, str) and x_cache.endswith('.zarr') and os.path.exists(x_cache):
+                    shutil.rmtree(x_cache, ignore_errors=True)
+                    
             del X_train, X_valid, X_test
             gc.collect()
             models.append(copy.deepcopy(model))
@@ -530,6 +570,17 @@ def train(cfg: DictConfig) -> float:
         if cfg.get("output_gdrive", False):
             bundle_and_upload_artifacts(path_to_gdrive, cfg.domain.name)
             print("✅ All artifacts have been bundled into a ZIP file and uploaded to MLflow.")
+            
+        # --- キャッシュファイルのクリーンアップ ---
+        if 'features_array' in locals():
+            del features_array
+            gc.collect()
+        if features_mmap_path.exists():
+            try:
+                features_mmap_path.unlink()
+                print(f"✅ Cleaned up mmap cache: {features_mmap_path.name}")
+            except OSError as e:
+                print(f"⚠️ Failed to remove mmap cache: {e}")
         
         print("\n" + "="*60)
         print(f"🎯 Trial finished. Score: {final_opt_score:.6f}")

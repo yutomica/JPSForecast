@@ -1,6 +1,10 @@
 
 import os
 from typing import Dict, List
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.ipc as ipc
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -64,17 +68,22 @@ class FTTransformerPreprocessor(BasePreprocessor):
         raise ValueError(f"Unknown scaler_type: {self.scaler_type}")
 
     def _to_dataframe(self, data, row_indices=None, col_indices=None):
+        if isinstance(data, (str, Path)):
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            if row_indices is not None:
+                table = table.take(pa.array(row_indices))
+            return table.to_pandas()
+
         if isinstance(data, pd.DataFrame):
             df = data.copy()
             if self.feature_cols:
                 df = df[self.feature_cols]
+            if row_indices is not None:
+                df = df.iloc[row_indices].reset_index(drop=True)
             return df
 
-        if row_indices is None:
-            extracted = data
-        else:
-            extracted = data[row_indices]
-
+        extracted = data[row_indices] if row_indices is not None else data
         if col_indices is not None:
             extracted = extracted[:, col_indices]
 
@@ -144,8 +153,32 @@ class FTTransformerPreprocessor(BasePreprocessor):
     def transform(self, data, row_indices=None, col_indices=None):
         if not self.is_fitted:
             raise ValueError("Preprocessor must be fitted before transform().")
-        df = self._to_dataframe(data, row_indices=row_indices, col_indices=col_indices)
-        return self._transform_2d(df)
+        
+        if row_indices is None:
+            df = self._to_dataframe(data, row_indices=None, col_indices=col_indices)
+            return self._transform_2d(df)
+
+        import tempfile, uuid, zarr
+        row_indices = np.asarray(row_indices, dtype=np.int64)
+        zarr_dir = os.path.join(tempfile.gettempdir(), f"ftt_cache_{uuid.uuid4().hex}.zarr")
+        z = zarr.open(
+            zarr_dir,
+            mode='w',
+            shape=(len(row_indices), len(self.feature_cols)),
+            chunks=(2048, len(self.feature_cols)),
+            dtype='float32'
+        )
+
+        chunk_size = 50000
+        for i in range(0, len(row_indices), chunk_size):
+            chunk_rows = row_indices[i:i + chunk_size]
+            extracted = data[chunk_rows]
+            if col_indices is not None:
+                extracted = extracted[:, col_indices]
+            df_chunk = pd.DataFrame(extracted, columns=self.feature_cols)
+            z[i:i + chunk_size] = self._transform_2d(df_chunk)
+
+        return zarr_dir
 
     def save(self, filename="ft_transformer_preprocessor.joblib"):
         if not self.is_fitted:

@@ -43,7 +43,7 @@ def main():
 
     print("マスターデータとの結合とマーケット特徴量の抽出中...")
     master_meta_path = master_dir / "index_meta.parquet"
-    features_path = master_dir / "features.npy"
+    features_dir = master_dir / "features"
     feature_names_path = master_dir / "feature_names.json"
     try:
         original_meta = pd.read_parquet(master_meta_path)
@@ -60,17 +60,24 @@ def main():
         'BET_MarketVolChange_RAW', 'BET_MarketVolChange_TSR_252D', 
         'BET_SectorReturn_RAW', 'VOL_HistVol20_TSR_252D'
     ]
-    if features_path.exists() and feature_names_path.exists():
+    if features_dir.exists() and feature_names_path.exists():
         all_features = pd.read_json(feature_names_path, typ='series').tolist()
-        features_mmap = np.memmap(features_path, dtype='float32', mode='r', shape=(len(original_meta), len(all_features)))
+        
+        cols_to_load = [f for f in target_features if f in all_features]
+        chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+        loaded_chunks = []
+        for cf in chunk_files:
+            df_chunk = pd.read_parquet(cf, columns=cols_to_load)
+            loaded_chunks.append(df_chunk)
+        features_df = pd.concat(loaded_chunks, ignore_index=True)
+        
         # merged_meta の行に対応するインデックス（元のoriginal_metaにおける行番号）を使って抽出
         original_indices = merged_meta.index.values # merge前のindexは保持されないので下記で対応
         original_meta['original_idx'] = np.arange(len(original_meta))
         merged_meta = pd.merge(merged_meta, original_meta[['date', 'scode', 'original_idx']], on=['date', 'scode'], how='left')
         for feature in target_features:
-            if feature in all_features:
-                f_idx = all_features.index(feature)
-                merged_meta[feature] = features_mmap[merged_meta['original_idx'].values, f_idx]
+            if feature in cols_to_load:
+                merged_meta[feature] = features_df[feature].values[merged_meta['original_idx'].values]
             else:
                 merged_meta[feature] = np.nan
         merged_meta = merged_meta.drop(columns=['original_idx'])
@@ -93,8 +100,14 @@ def main():
     print("スタッキング用データセットの保存中...")
     feature_cols = [c for c in merged_meta.columns if c.startswith('score_') or c in target_features]
     print(f"スタッキング用特徴量 ({len(feature_cols)}件): {feature_cols}")
-    # 特徴量の保存
-    np.save(output_dir / "features.npy", merged_meta[feature_cols].values.astype(np.float32))
+    
+    # 特徴量の保存 (Train.py に合わせて Parquet チャンクとして出力)
+    out_features_dir = output_dir / "features"
+    out_features_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = out_features_dir / "features_chunk_00.parquet"
+    chunk_cols = ['scode', 'date'] + feature_cols
+    merged_meta[chunk_cols].to_parquet(chunk_path, index=False)
+    
     with open(output_dir / "feature_names.json", 'w') as f:
         json.dump(feature_cols, f)
     # メタデータの保存 (特徴量カラムを除外して保存)

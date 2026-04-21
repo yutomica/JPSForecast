@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import json
 import gc
+import glob
 import time
 
 def verify_master_data(master_dir):
@@ -10,12 +11,12 @@ def verify_master_data(master_dir):
     
     # 1. ファイルの存在確認
     meta_path = os.path.join(master_dir, "index_meta.parquet")
-    features_path = os.path.join(master_dir, "features.npy")
+    features_dir = os.path.join(master_dir, "features")
     names_path = os.path.join(master_dir, "feature_names.json")
     
-    for p in [meta_path, features_path, names_path]:
+    for p in [meta_path, features_dir, names_path]:
         if not os.path.exists(p):
-            raise FileNotFoundError(f"Missing file: {p}")
+            raise FileNotFoundError(f"Missing file or directory: {p}")
 
     # 2. 特徴量名のロード
     with open(names_path, 'r') as f:
@@ -31,9 +32,20 @@ def verify_master_data(master_dir):
     total_rows = len(meta_df)
     print(f"✅ Meta data loaded: {total_rows} rows.")
 
-    # 4. memmap のロード
-    features_mmap = np.memmap(features_path, dtype='float32', mode='r', 
-                              shape=(total_rows, num_features))
+    # 4. Parquet チャンクのロード
+    chunk_files = sorted(glob.glob(os.path.join(features_dir, "features_chunk_*.parquet")))
+    if not chunk_files:
+        raise FileNotFoundError(f"No parquet chunks found in {features_dir}")
+        
+    print("Loading features from Parquet chunks into memory...")
+    loaded_chunks = []
+    for cf in chunk_files:
+        df_chunk = pd.read_parquet(cf, columns=feature_names)
+        loaded_chunks.append(df_chunk.values.astype('float32'))
+        
+    features_mmap = np.concatenate(loaded_chunks, axis=0)
+    if features_mmap.shape[0] != total_rows:
+        raise ValueError(f"Row count mismatch: meta={total_rows}, features={features_mmap.shape[0]}")
     
     # sector_return の欠損チェックと出力
     check_col = 'sector_return'

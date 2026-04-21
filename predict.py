@@ -240,6 +240,10 @@ def predict(target_date: str):
                     X_processed = fold_pipe.preprocessor.transform(features_arr, row_indices=batch_idx, col_indices=col_indices)
                     p = fold_pipe.model.predict(X_processed)
                     batch_preds_folds.append(p)
+                    # 中間生成されたZarrキャッシュのクリーンアップ
+                    if isinstance(X_processed, str) and X_processed.endswith('.zarr') and os.path.exists(X_processed):
+                        import shutil
+                        shutil.rmtree(X_processed, ignore_errors=True)
                 all_preds[i : i + batch_size] = np.mean(batch_preds_folds, axis=0)
                 
             latest_scores = pd.DataFrame({

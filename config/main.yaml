@@ -13,6 +13,10 @@ defaults:
   - _self_
 
 
+hparams:
+  num_workers: 0
+
+
 # mode (str): 動作モード。
 #  - 'mode_1': Tailは100%保持、Centerをサンプリング、Otherは100%保持。
 #  - 'mode_2': Tailは100%保持、CenterとOtherをそれぞれ指定したレートでサンプリング。

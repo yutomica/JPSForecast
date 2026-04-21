@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import mlflow
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import zarr
 from .base import BaseModelWrapper
 from .pruning import execute_epoch_pruning, log_epoch_metrics
 import torch
@@ -59,7 +62,25 @@ class TabNetWrapper(BaseModelWrapper):
         self.params = params
         self.model = None
 
+    def _from_ipc_handle(self, X):
+        """IPCバッファハンドルを受け取ってDataFrameに復元する"""
+        if isinstance(X, pa.Buffer):
+            with ipc.open_stream(X) as reader:
+                table = reader.read_all()
+            return table.to_pandas()
+        return X
+
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+        if isinstance(X_train, str) and X_train.endswith('.zarr'):
+            X_train = zarr.open(X_train, mode='r')[:]
+        else:
+            X_train = self._from_ipc_handle(X_train)
+            
+        if isinstance(X_valid, str) and X_valid.endswith('.zarr'):
+            X_valid = zarr.open(X_valid, mode='r')[:]
+        elif X_valid is not None:
+            X_valid = self._from_ipc_handle(X_valid)
+            
         # --- データクレンジング (ターゲットのNaN除去とウェイトの正値化) ---
         train_mask = ~np.isnan(y_train) & ~np.isinf(y_train)
         if sample_weight is not None:
@@ -262,6 +283,11 @@ class TabNetWrapper(BaseModelWrapper):
     def predict(self, X):
         if self.model is None:
             raise ValueError("Model has not been trained yet.")
+            
+        if isinstance(X, str) and X.endswith('.zarr'):
+            X = zarr.open(X, mode='r')[:]
+        else:
+            X = self._from_ipc_handle(X)
         # 入力を NumPy 配列に変換
         X_values = X.values if isinstance(X, pd.DataFrame) else X
         if self.task_type == "regression":

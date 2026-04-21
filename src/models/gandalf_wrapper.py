@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import zarr
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -15,6 +18,58 @@ from .base import BaseModelWrapper
 from .pruning import execute_epoch_pruning, log_epoch_metrics
 from .networks.gandalf import GANDALFNet
 
+
+class ZarrBatchDataset(torch.utils.data.Dataset):
+    def __init__(self, zarr_path, y, w, valid_indices, batch_size, shuffle=True):
+        self.zarr_path = zarr_path
+        self.y = y
+        self.w = w
+        self.valid_indices = valid_indices
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.n_samples = len(valid_indices)
+        self.n_batches = (self.n_samples + self.batch_size - 1) // self.batch_size
+        self.batch_indices = np.arange(self.n_batches)
+        if self.shuffle:
+            np.random.shuffle(self.batch_indices)
+        self._z = None
+
+    def _get_zarr(self):
+        if self._z is None:
+            try:
+                import numcodecs
+                numcodecs.blosc.set_nthreads(1)
+                numcodecs.blosc.use_threads = False
+            except ImportError:
+                pass
+            self._z = zarr.open(self.zarr_path, mode='r')
+        return self._z
+
+    def __len__(self):
+        return self.n_batches
+
+    def __getitem__(self, idx):
+        z = self._get_zarr()
+        batch_idx = self.batch_indices[idx]
+        start_logical = batch_idx * self.batch_size
+        end_logical = min(start_logical + self.batch_size, self.n_samples)
+        logical_batch = np.arange(start_logical, end_logical)
+        physical_batch = self.valid_indices[logical_batch]
+
+        start_idx = int(physical_batch[0])
+        end_idx = int(physical_batch[-1]) + 1
+        
+        chunk = z[start_idx:end_idx, :]
+        local_indices = physical_batch - start_idx
+        X_batch = chunk[local_indices]
+
+        y_batch = self.y[logical_batch]
+        w_batch = self.w[logical_batch] if self.w is not None else np.ones(len(y_batch), dtype=np.float32)
+        return torch.from_numpy(X_batch), torch.from_numpy(y_batch), torch.from_numpy(w_batch)
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.batch_indices)
 
 class GANDALFWrapper(BaseModelWrapper):
     """
@@ -57,18 +112,18 @@ class GANDALFWrapper(BaseModelWrapper):
         self.is_binary_classification = task_type == "classification"
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
-        X_train_np, train_feature_names = self._to_numpy_features(X_train)
-        if X_train_np is None or len(X_train_np) == 0:
-            raise ValueError("X_train is empty.")
-
-        X_valid_np, _ = self._to_numpy_features(X_valid) if X_valid is not None else (None, None)
-        y_train_np = np.asarray(y_train)
-        y_valid_np = np.asarray(y_valid) if y_valid is not None else None
-
-        # --- データクレンジング (NaN / Inf の確実な除去とウェイトの正値化) ---
-        train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
-        train_mask &= ~np.isnan(X_train_np).any(axis=1) & ~np.isinf(X_train_np).any(axis=1)
         
+        y_train_np = np.asarray(y_train)
+        is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
+        
+        train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
+        if not is_zarr_train:
+            X_train_np, train_feature_names = self._to_numpy_features(X_train)
+            train_mask &= ~np.isnan(X_train_np).any(axis=1) & ~np.isinf(X_train_np).any(axis=1)
+        else:
+            input_dim = zarr.open(X_train, mode='r').shape[1]
+            train_feature_names = [f"feature_{i}" for i in range(input_dim)]
+            
         if sample_weight is not None:
             sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
             sample_weight = np.clip(sample_weight, 0.0, None)
@@ -77,24 +132,41 @@ class GANDALFWrapper(BaseModelWrapper):
         if dropped_train > 0:
             print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
             
-        X_train_np = X_train_np[train_mask]
-        y_train_np = y_train_np[train_mask]
-        if sample_weight is not None:
-            sample_weight = sample_weight[train_mask]
-
-        if X_valid_np is not None and y_valid_np is not None:
+        y_valid_np = np.asarray(y_valid) if y_valid is not None else None
+        is_zarr_valid = isinstance(X_valid, str) and X_valid.endswith('.zarr')
+        
+        if X_valid is not None and y_valid_np is not None:
             valid_mask = ~np.isnan(y_valid_np) & ~np.isinf(y_valid_np)
-            valid_mask &= ~np.isnan(X_valid_np).any(axis=1) & ~np.isinf(X_valid_np).any(axis=1)
-            dropped_valid = len(y_valid_np) - np.sum(valid_mask)
+            if not is_zarr_valid:
+                X_valid_np, _ = self._to_numpy_features(X_valid)
+                valid_mask &= ~np.isnan(X_valid_np).any(axis=1) & ~np.isinf(X_valid_np).any(axis=1)
+                
+            dropped_valid = len(y_valid_np) - int(np.sum(valid_mask))
             if dropped_valid > 0:
                 print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf.")
-            X_valid_np = X_valid_np[valid_mask]
-            y_valid_np = y_valid_np[valid_mask]
 
         self.feature_names_ = train_feature_names
         self._set_seed(int(self.params.get("random_state", 42)))
 
         batch_size = int(self.params.get("batch_size", 1024))
+        num_workers = int(self.params.get("num_workers", 0))
+        
+        if is_zarr_train:
+            w_np = np.asarray(sample_weight, dtype=np.float32) if sample_weight is not None else None
+            train_dataset = ZarrBatchDataset(X_train, y_train_np, w_np, np.where(train_mask)[0], batch_size)
+        else:
+            train_dataset = self._make_dataset(X_train_np[train_mask], y_train_np[train_mask], sample_weight[train_mask] if sample_weight is not None else None)
+            
+        train_loader = DataLoader(train_dataset, batch_size=None if is_zarr_train else batch_size, shuffle=True if not is_zarr_train else False, num_workers=num_workers, pin_memory=self.device.type == "cuda")
+        
+        valid_loader = None
+        if X_valid is not None:
+            if is_zarr_valid:
+                valid_dataset = ZarrBatchDataset(X_valid, y_valid_np, None, np.where(valid_mask)[0], batch_size, shuffle=False)
+            else:
+                valid_dataset = self._make_dataset(X_valid_np[valid_mask], y_valid_np[valid_mask], None)
+            valid_loader = DataLoader(valid_dataset, batch_size=None if is_zarr_valid else batch_size, shuffle=False, num_workers=num_workers, pin_memory=self.device.type == "cuda")
+
         max_epochs = int(self.params.get("max_epochs", 100))
         patience = int(self.params.get("patience", 10))
         learning_rate = float(self.params.get("lr", self.params.get("learning_rate", 1e-3)))
@@ -113,7 +185,6 @@ class GANDALFWrapper(BaseModelWrapper):
         )
         head_dropout = float(self.params.get("head_dropout", self.params.get("dropout", 0.1)))
 
-        input_dim = int(X_train_np.shape[1])
         if input_dim <= 0:
             raise ValueError("GANDALF received zero input features after preprocessing.")
 
@@ -130,8 +201,7 @@ class GANDALFWrapper(BaseModelWrapper):
             target_bias = self._initial_binary_bias(y_train_np)
             self.is_binary_classification = True
         else:
-            y_train_np = np.asarray(y_train_np, dtype=np.float32).reshape(-1)
-            y_valid_np = np.asarray(y_valid_np, dtype=np.float32).reshape(-1) if y_valid_np is not None else None
+            # Regression
             output_dim = 1
             target_bias = float(np.nanmean(y_train_np)) if len(y_train_np) else 0.0
             self.is_binary_classification = False
@@ -165,23 +235,16 @@ class GANDALFWrapper(BaseModelWrapper):
             min_lr=float(self.params.get("min_lr", 1e-6)),
         )
 
-        train_dataset = self._make_dataset(X_train_np, y_train_np, sample_weight)
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=self.device.type == "cuda",
-        )
-
         best_metric = float("inf")
         best_state = None
         bad_epochs = 0
         self.history = {"train_loss": [], "valid_loss": []}
 
         for epoch in range(max_epochs):
+            if hasattr(train_loader.dataset, "on_epoch_end"):
+                train_loader.dataset.on_epoch_end()
             train_loss = self._train_one_epoch(train_loader, optimizer, gradient_clip_val, epoch, max_epochs)
-            valid_loss = self._evaluate_loss(X_valid_np, y_valid_np) if X_valid_np is not None else train_loss
+            valid_loss = self._evaluate_loss(valid_loader) if valid_loader is not None else train_loss
             scheduler.step(valid_loss)
 
             self.history["train_loss"].append(train_loss)
@@ -222,18 +285,24 @@ class GANDALFWrapper(BaseModelWrapper):
         if self.model is None:
             raise ValueError("Model has not been trained yet.")
 
-        X_np, _ = self._to_numpy_features(X)
-        if X_np is None or len(X_np) == 0:
-            return np.array([], dtype=np.float32)
-
         self.model.eval()
         self._set_seed(int(self.params.get("random_state", 42)))
         preds = []
         batch_size = int(self.params.get("predict_batch_size", self.params.get("batch_size", 4096)))
+        num_workers = int(self.params.get("num_workers", 0))
+
+        is_zarr = isinstance(X, str) and X.endswith('.zarr')
+        dummy_y = np.zeros(zarr.open(X, mode='r').shape[0] if is_zarr else len(X), dtype=np.float32)
+        if is_zarr:
+            ds = ZarrBatchDataset(X, dummy_y, None, np.arange(len(dummy_y)), batch_size, shuffle=False)
+        else:
+            X_np, _ = self._to_numpy_features(X)
+            ds = self._make_dataset(X_np, dummy_y, None)
+        loader = DataLoader(ds, batch_size=None if is_zarr else batch_size, shuffle=False, num_workers=num_workers, pin_memory=self.device.type == "cuda")
 
         with torch.no_grad():
-            for start in range(0, len(X_np), batch_size):
-                xb = torch.from_numpy(X_np[start : start + batch_size]).to(self.device)
+            for xb, _, _ in loader:
+                xb = xb.to(self.device)
                 out = self.model(xb).squeeze(-1)
                 if self.is_binary_classification:
                     out = torch.sigmoid(out)
@@ -245,14 +314,14 @@ class GANDALFWrapper(BaseModelWrapper):
 
     def _train_one_epoch(self, train_loader, optimizer, gradient_clip_val: float, epoch: int, max_epochs: int) -> float:
         self.model.train()
-        total_loss = 0.0
-        total_weight = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_weight = torch.tensor(0.0, device=self.device)
 
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{max_epochs}", leave=False) as pbar:
             for xb, yb, wb in pbar:
-                xb = xb.to(self.device, non_blocking=True)
-                yb = yb.to(self.device, non_blocking=True)
-                wb = wb.to(self.device, non_blocking=True)
+                xb = xb.to(self.device)
+                yb = yb.to(self.device)
+                wb = wb.to(self.device)
 
                 optimizer.zero_grad(set_to_none=True)
                 out = self.model(xb).squeeze(-1)
@@ -265,33 +334,28 @@ class GANDALFWrapper(BaseModelWrapper):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), gradient_clip_val)
                 optimizer.step()
 
-                batch_weight = float(wb.sum().detach().cpu())
-                total_loss += float(loss.detach().cpu()) * batch_weight
+                batch_weight = wb.sum().detach()
+                total_loss += loss.detach() * batch_weight
                 total_weight += batch_weight
-                
-                pbar.set_postfix({"train_loss": f"{total_loss / max(total_weight, 1e-8):.6f}"})
+                # バッチ毎の .item() 同期（CPU busy-wait）を防ぐため tqdm の更新を省略
 
-        return total_loss / max(total_weight, 1e-8)
+        return float(total_loss.item()) / max(float(total_weight.item()), 1e-8)
 
-    def _evaluate_loss(self, X_np, y_np) -> float:
-        if X_np is None or y_np is None or len(X_np) == 0:
-            return float("nan")
-
+    def _evaluate_loss(self, valid_loader) -> float:
         self.model.eval()
-        batch_size = int(self.params.get("eval_batch_size", self.params.get("batch_size", 4096)))
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
         total_count = 0
 
         with torch.no_grad():
-            for start in range(0, len(X_np), batch_size):
-                xb = torch.from_numpy(X_np[start : start + batch_size]).to(self.device)
-                yb = torch.from_numpy(np.asarray(y_np[start : start + batch_size], dtype=np.float32)).to(self.device)
+            for xb, yb, _ in valid_loader:
+                xb = xb.to(self.device)
+                yb = yb.to(self.device)
                 out = self.model(xb).squeeze(-1)
                 loss_vec = self._loss_vector(out, yb)
-                total_loss += float(loss_vec.sum().detach().cpu())
+                total_loss += loss_vec.sum().detach()
                 total_count += int(loss_vec.numel())
 
-        return total_loss / max(total_count, 1)
+        return float(total_loss.item()) / max(total_count, 1)
 
     def _loss_vector(self, out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if self.is_binary_classification:
@@ -315,6 +379,11 @@ class GANDALFWrapper(BaseModelWrapper):
     def _to_numpy_features(self, X):
         if X is None:
             return None, None
+
+        if isinstance(X, pa.Buffer):
+            with ipc.open_stream(X) as reader:
+                table = reader.read_all()
+            X = table.to_pandas()
 
         if isinstance(X, pd.DataFrame):
             values = X.values.astype(np.float32, copy=False)

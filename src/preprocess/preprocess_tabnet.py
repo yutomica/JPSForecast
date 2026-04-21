@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 import os
 import joblib
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.ipc as ipc
+from pathlib import Path
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder
 from .base import BasePreprocessor
@@ -50,21 +54,8 @@ class TabNetPreprocessor(BasePreprocessor):
         self.is_fitted = True
         print(f"TabNet Preprocessor fitted. Categorical cols: {self.cat_cols}")
 
-    def transform(self, data, row_indices=None, col_indices=None):
-        """
-        不要カラム削除、型変換を行う
-        """
-        if not self.is_fitted:
-            raise ValueError("Preprocessor must be fitted.")
-        if isinstance(data, pd.DataFrame):
-            df_processed = data[self.feature_cols].copy()
-        else:
-            if col_indices is not None:
-                extracted = data[row_indices][:, col_indices]
-            else:
-                extracted = data[row_indices]
-            df_processed = pd.DataFrame(extracted, columns=self.feature_cols)
-        X = df_processed[self.feature_cols]
+    def _transform_2d(self, df: pd.DataFrame) -> np.ndarray:
+        X = df[self.feature_cols].copy()
         for col in self.feature_cols:
             if col not in X.columns:
                 X[col] = np.nan
@@ -72,28 +63,52 @@ class TabNetPreprocessor(BasePreprocessor):
         valid_cat_cols = [c for c in self.cat_cols if c in X.columns]
         num_cols = [c for c in X.columns if c not in valid_cat_cols]
         # コピーを作成
-        X_processed = X.copy()
         if num_cols:
             # InfをNaNに
-            X_processed[num_cols] = X_processed[num_cols].replace([np.inf, -np.inf], np.nan)
+            X[num_cols] = X[num_cols].replace([np.inf, -np.inf], np.nan)
             # Impute
             target_cols = self.imputer.feature_names_in_.tolist()
-            X_processed[target_cols] = self.imputer.transform(X_processed[target_cols])
+            X[target_cols] = self.imputer.transform(X[target_cols])
         # カテゴリ変数のエンコーディング
         for col in valid_cat_cols:
             if col not in self.encoders.keys(): continue
             le = self.encoders[col]
             # 未知のラベル対応: 既知のものに置換、あるいは "MISSING" (Fit時にあれば)
             # ここではFit時と同じ変換を行う
-            ser = X_processed[col].fillna("MISSING").astype(str)
+            ser = X[col].fillna("MISSING").astype(str)
             # 未知ラベルは一旦 "MISSING" にするか、モード値にする等の対策が必要
             # 今回は簡易的に、le.classes_ にないものは 0 番目のクラスに置換する等の処理を入れる
             # (もっと厳密には Unknown 専用クラスを作るべき)
             # マッピング辞書作成
             param_map = {label: i for i, label in enumerate(le.classes_)}
             # mapで変換（見つからないものは0埋めなど）
-            X_processed[col] = ser.map(param_map).fillna(0).astype(int)
-        return X_processed
+            X[col] = ser.map(param_map).fillna(0).astype(int)
+            
+        return X.to_numpy(dtype=np.float32)
+
+    def transform(self, data, row_indices=None, col_indices=None):
+        if not self.is_fitted:
+            raise ValueError("Preprocessor must be fitted.")
+            
+        if row_indices is None:
+            if isinstance(data, pd.DataFrame):
+                df = data.copy()
+            else:
+                df = pd.DataFrame(data[:, col_indices] if col_indices is not None else data, columns=self.feature_cols)
+            return self._transform_2d(df)
+
+        import tempfile, uuid, zarr
+        row_indices = np.asarray(row_indices, dtype=np.int64)
+        zarr_dir = os.path.join(tempfile.gettempdir(), f"tabnet_cache_{uuid.uuid4().hex}.zarr")
+        z = zarr.open(zarr_dir, mode='w', shape=(len(row_indices), len(self.feature_cols)), chunks=(10000, len(self.feature_cols)), dtype='float32')
+        
+        chunk_size = 50000
+        for i in range(0, len(row_indices), chunk_size):
+            extracted = data[row_indices[i:i + chunk_size]]
+            if col_indices is not None: extracted = extracted[:, col_indices]
+            z[i:i + chunk_size] = self._transform_2d(pd.DataFrame(extracted, columns=self.feature_cols))
+            
+        return zarr_dir
 
     def save(self, filename='scaler.joblib'):
         """

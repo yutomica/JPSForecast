@@ -3,6 +3,15 @@
 
 set -e
 
+# 並列処理時のスレッド競合（オーバーサブスクリプション）を防ぐための環境変数設定
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+# Joblib(loky)がワーカー起動時にスレッド数を全コア数に自動設定してしまうのを防ぐ
+export LOKY_MAX_CPU_COUNT=1
+
 # MLflowのバックエンドをtrain.pyと合わせる
 DB_ABS_PATH="$(pwd)/mlflow.db"
 export MLFLOW_TRACKING_URI="sqlite:///${DB_ABS_PATH}"
@@ -59,6 +68,7 @@ print(run.info.run_id)
         MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py -m \
             hydra/launcher=joblib \
             hydra.sweeper.n_jobs=${n_jobs} \
+            hydra.launcher.n_jobs=${n_jobs} \
             ++hparams.num_threads=1 \
             domain=${domain} \
             cv=purged_kfold \
@@ -106,20 +116,20 @@ print(run.info.run_id)
 #     ++hparams.metric="quantile" \
 #     ++hparams.alpha=0.1
 
-run_sweep "tac" "tcn" "tac_vol_scaled_asym_return" "features_tcn_tac_vol_scaled_asym_return_rough" "1" "1" \
+run_sweep "tac" "tcn" "tac_vol_scaled_asym_return" "features_tcn_tac_vol_scaled_asym_return_rough" "8" "1" \
     ++hparams.objective="asymmetric_mse" \
     ++preprocess.target_stratified_sampling.mode=mode_2 \
     ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
     ++preprocess.target_stratified_sampling.other_keep_ratio=0.5 \
     model.window_size.tac="choice(20,90)"
 
-run_sweep "tac" "ft_transfomer" "tac_vol_scaled_asym_return" "features_ft_transfomer_tac_vol_scaled_asym_return_rough" "1" "1" \
+run_sweep "tac" "ft_transformer" "tac_vol_scaled_asym_return" "features_ft_transformer_tac_vol_scaled_asym_return_rough" "4" "1" \
     ++hparams.objective="asymmetric_mse" \
     ++preprocess.target_stratified_sampling.mode=mode_2 \
     ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
     ++preprocess.target_stratified_sampling.other_keep_ratio=0.5
 
-run_sweep "tac" "tcn" "tac_max_neg_path" "features_tcn_tac_max_neg_path_rough" "1" "1" \
+run_sweep "tac" "tcn" "tac_max_neg_path" "features_tcn_tac_max_neg_path_rough" "8" "1" \
     ++hparams.objective="quantile" \
     ++hparams.metric="quantile" \
     ++hparams.alpha=0.1 \
@@ -128,7 +138,7 @@ run_sweep "tac" "tcn" "tac_max_neg_path" "features_tcn_tac_max_neg_path_rough" "
     ++preprocess.target_stratified_sampling.other_keep_ratio=0.5 \
     model.window_size.tac="choice(20,90)"
 
-run_sweep "tac" "ft_transfomer" "tac_max_neg_path" "features_ft_transfomer_tac_max_neg_path_rough" "1" "1" \
+run_sweep "tac" "ft_transformer" "tac_max_neg_path" "features_ft_transformer_tac_max_neg_path_rough" "4" "1" \
     ++hparams.objective="quantile" \
     ++hparams.metric="quantile" \
     ++hparams.alpha=0.1 \
@@ -156,7 +166,7 @@ run_sweep "str" "lgbm" "str_mdd" "features_lgbm_str_mdd_rough" "8" "0" \
     ++hparams.metric="tweedie" \
     ++hparams.tweedie_variance_power=1.2
 
-run_sweep "str" "tcn" "str_sharpe_adj" "features_tcn_str_sharpe_adj_rough" "1" "1" \
+run_sweep "str" "tcn" "str_sharpe_adj" "features_tcn_str_sharpe_adj_rough" "8" "1" \
     ++hparams.objective="fair" \
     ++hparams.metric="fair" \
     ++hparams.fair_c=10.0 \
@@ -165,7 +175,7 @@ run_sweep "str" "tcn" "str_sharpe_adj" "features_tcn_str_sharpe_adj_rough" "1" "
     ++preprocess.sampling.interval=11 \
     model.window_size.str="choice(126,252)"
 
-run_sweep "str" "ft_transfomer" "str_sharpe_adj" "features_ft_transfomer_str_sharpe_adj_rough" "1" "1" \
+run_sweep "str" "ft_transformer" "str_sharpe_adj" "features_ft_transformer_str_sharpe_adj_rough" "4" "1" \
     ++hparams.objective="fair" \
     ++hparams.metric="fair" \
     ++hparams.fair_c=10.0 \
@@ -173,7 +183,7 @@ run_sweep "str" "ft_transfomer" "str_sharpe_adj" "features_ft_transfomer_str_sha
     ++preprocess.sampling.enabled=true \
     ++preprocess.sampling.interval=11
 
-run_sweep "str" "tcn" "str_mdd" "features_tcn_str_mdd_rough" "1" "1" \
+run_sweep "str" "tcn" "str_mdd" "features_tcn_str_mdd_rough" "8" "1" \
     ++hparams.objective="tweedie" \
     ++hparams.metric="tweedie" \
     ++hparams.tweedie_variance_power=1.2 \
@@ -182,7 +192,7 @@ run_sweep "str" "tcn" "str_mdd" "features_tcn_str_mdd_rough" "1" "1" \
     ++preprocess.sampling.interval=11 \
     model.window_size.str="choice(126,252)"
 
-run_sweep "str" "ft_transfomer" "str_mdd" "features_ft_transfomer_str_mdd_rough" "1" "1" \
+run_sweep "str" "ft_transformer" "str_mdd" "features_ft_transformer_str_mdd_rough" "4" "1" \
     ++hparams.objective="tweedie" \
     ++hparams.metric="tweedie" \
     ++hparams.tweedie_variance_power=1.2 \

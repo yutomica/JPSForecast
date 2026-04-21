@@ -3,6 +3,10 @@ from typing import Dict, List
 import joblib
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.ipc as ipc
+from pathlib import Path
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder, RobustScaler, StandardScaler
 from .base import BasePreprocessor
@@ -54,20 +58,26 @@ class GANDALFPreprocessor(BasePreprocessor):
         self.cat_dims = []
 
     def _ensure_dataframe(self, data, row_indices=None, col_indices=None) -> pd.DataFrame:
+        if isinstance(data, (str, Path)):
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            if row_indices is not None:
+                table = table.take(pa.array(row_indices))
+            return table.to_pandas()
+            
         if isinstance(data, pd.DataFrame):
             df = data.copy()
+            if row_indices is not None:
+                df = df.iloc[row_indices].reset_index(drop=True)
             missing = [c for c in self.feature_cols if c not in df.columns]
             for col in missing:
                 df[col] = np.nan
             return df[self.feature_cols].copy()
 
-        if row_indices is None:
-            extracted = data[:, col_indices] if col_indices is not None else data
-        else:
-            if col_indices is not None:
-                extracted = data[row_indices][:, col_indices]
-            else:
-                extracted = data[row_indices]
+        extracted = data[row_indices] if row_indices is not None else data
+        if col_indices is not None:
+            extracted = extracted[:, col_indices]
+            
         return pd.DataFrame(extracted, columns=self.feature_cols)
 
     def fit(self, data):
@@ -103,13 +113,8 @@ class GANDALFPreprocessor(BasePreprocessor):
             f"num_cols={len(self.num_cols)}, cat_cols={len(self.valid_cat_cols)}, output_dim={len(self.output_cols)}"
         )
 
-    def transform(self, data, row_indices=None, col_indices=None):
-        if not self.is_fitted:
-            raise ValueError("Preprocessor must be fitted before transform.")
-
-        df = self._ensure_dataframe(data, row_indices=row_indices, col_indices=col_indices)
+    def _transform_2d(self, df: pd.DataFrame) -> np.ndarray:
         parts = []
-        part_cols = []
 
         # 数値列
         if self.num_cols:
@@ -122,7 +127,6 @@ class GANDALFPreprocessor(BasePreprocessor):
                 num_array = np.clip(num_array, -float(self.clip_value), float(self.clip_value))
             num_array = num_array.astype(np.float32, copy=False)
             parts.append(num_array)
-            part_cols.extend(self.num_cols)
 
         # カテゴリ列 -> One-Hot
         n_rows = len(df)
@@ -135,14 +139,39 @@ class GANDALFPreprocessor(BasePreprocessor):
             oh = np.zeros((n_rows, len(le.classes_)), dtype=np.float32)
             oh[np.arange(n_rows), encoded] = 1.0
             parts.append(oh)
-            part_cols.extend(self.onehot_cols[col])
 
         if parts:
             X = np.concatenate(parts, axis=1)
         else:
             X = np.empty((len(df), 0), dtype=np.float32)
+        return X
 
-        return pd.DataFrame(X, columns=part_cols, index=df.index)
+    def transform(self, data, row_indices=None, col_indices=None):
+        if not self.is_fitted:
+            raise ValueError("Preprocessor must be fitted before transform.")
+
+        if row_indices is None:
+            df = self._ensure_dataframe(data, row_indices=None, col_indices=col_indices)
+            return self._transform_2d(df)
+            
+        import tempfile, uuid, zarr
+        row_indices = np.asarray(row_indices, dtype=np.int64)
+        zarr_dir = os.path.join(tempfile.gettempdir(), f"gandalf_cache_{uuid.uuid4().hex}.zarr")
+        z = zarr.open(
+            zarr_dir, mode='w', shape=(len(row_indices), len(self.output_cols)),
+            chunks=(2048, len(self.output_cols)), dtype='float32'
+        )
+        
+        chunk_size = 50000
+        for i in range(0, len(row_indices), chunk_size):
+            chunk_rows = row_indices[i:i + chunk_size]
+            extracted = data[chunk_rows]
+            if col_indices is not None:
+                extracted = extracted[:, col_indices]
+            df_chunk = pd.DataFrame(extracted, columns=self.feature_cols)
+            z[i:i + chunk_size] = self._transform_2d(df_chunk)
+            
+        return zarr_dir
 
     def save(self, filename="scaler.joblib"):
         if not self.is_fitted:

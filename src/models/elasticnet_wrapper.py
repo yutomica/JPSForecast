@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import mlflow
+import pyarrow as pa
+import pyarrow.ipc as ipc
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import (
     ElasticNet,
@@ -230,6 +232,10 @@ class ElasticNetWrapper(BaseModelWrapper):
         raise ValueError(f"Unsupported task_type: {self.task_type}")
 
     def _ensure_dataframe(self, X):
+        if isinstance(X, pa.Buffer):
+            with ipc.open_stream(X) as reader:
+                table = reader.read_all()
+            return table.to_pandas()
         if isinstance(X, pd.DataFrame):
             return X
         return pd.DataFrame(X)

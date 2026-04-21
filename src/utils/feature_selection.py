@@ -26,19 +26,43 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
     fold_mda = {}
     unique_dates = np.unique(dates_for_shuffle)
     
+    # --- X_validをシャッフル可能な形式 (DataFrame or ndarray) に変換 ---
+    # preprocessorがZarrキャッシュのパス(str)を返す場合も考慮
+    X_shufflable = None
+    is_df = False
+
+    # Zarrパスの場合は読み込んでndarrayにする
+    if isinstance(X_valid, str) and X_valid.endswith('.zarr'):
+        import zarr
+        print("  [MDA] Loading data from Zarr cache for permutation...")
+        X_shufflable = zarr.open(X_valid, mode='r')[:]
+    else:
+        X_shufflable = X_valid
+
+    if isinstance(X_shufflable, pd.DataFrame):
+        X_base = X_shufflable
+        is_df = True
+    elif isinstance(X_shufflable, np.ndarray):
+        X_base = X_shufflable
+    elif hasattr(X_shufflable, "to_pandas"): # PyArrow Tableなど
+        X_base = X_shufflable.to_pandas()
+        is_df = True
+    else:
+        # Bufferなどの複雑な形式の処理は、呼び出し元で対応するか、この関数をさらに拡張する必要がある
+        # 現状の複雑なロジックは可読性と保守性を損なうため、よりシンプルなデータフローを推奨
+        raise TypeError(f"Unsupported data type for X_valid in calculate_mda: {type(X_shufflable)}")
+    
     for col_idx, col_name in enumerate(feature_cols):
         # メモリ節約のため、破壊的な変更を避けコピーを作成
-        X_valid_permuted = X_valid.copy()
+        X_valid_permuted = X_base.copy()
         # --- 日次クロスセクション内でのシャッフル ---
         for d in unique_dates:
             date_mask = (dates_for_shuffle == d)
-            if isinstance(X_valid_permuted, pd.DataFrame):
-                # DataFrameの場合
+            if is_df: # DataFrameの場合
                 date_pos = np.where(date_mask)[0]
                 shuffled_values = np.random.permutation(X_valid_permuted.iloc[date_pos, col_idx].values)
                 X_valid_permuted.iloc[date_pos, col_idx] = shuffled_values
-            else:
-                # ndarrayの場合 (TCNなど)
+            else: # ndarrayの場合 (TCNなど)
                 date_indices = np.where(date_mask)[0]
                 idx_perm = np.random.permutation(date_indices)
                 if X_valid_permuted.ndim == 3:

@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import yaml
+from tqdm import tqdm
 
 
 def main():
@@ -21,10 +23,10 @@ def main():
     data_master_dir = project_root / "data" / "master"
     config_features_dir = project_root / "config" / "features"
 
-    features_npy_path = data_master_dir / "features.npy"
+    features_dir = data_master_dir / "features"
     feature_names_path = data_master_dir / "feature_names.json"
     
-    out_npy_path = data_master_dir / "features_select.npy"
+    out_features_dir = data_master_dir / "features_select"
     out_names_path = data_master_dir / "features_select_names.json"
 
     # 1. 抽出対象のカラム名の取得・重複削除
@@ -61,21 +63,7 @@ def main():
 
     original_count = len(original_feature_names)
 
-    print(f"元データ読み込み: {features_npy_path}")
-    try:
-        # ヘッダー付きの標準 .npy として読み込みを試行
-        original_mmap = np.load(features_npy_path, mmap_mode="r")
-    except ValueError:
-        # ヘッダーなしの生バイナリ（raw memmap）として読み込むフォールバック
-        file_size = os.path.getsize(features_npy_path)
-        bytes_per_row = original_count * 4  # float32 = 4 bytes
-        if file_size % bytes_per_row != 0:
-            raise ValueError(f"ファイルサイズ({file_size})が1行あたりのバイト数({bytes_per_row})の倍数ではありません。")
-        
-        n_samples = file_size // bytes_per_row
-        original_mmap = np.memmap(
-            features_npy_path, dtype='float32', mode='r', shape=(n_samples, original_count)
-        )
+    print(f"元データディレクトリ: {features_dir}")
 
     # 元データの順番を維持しつつ、抽出対象のカラムをリスト化
     final_selected_features = [f for f in original_feature_names if f in selected_features]
@@ -89,25 +77,19 @@ def main():
     if not final_selected_features:
         raise ValueError("有効な抽出対象特徴量が1つもありませんでした。")
 
-    selected_indices = [original_feature_names.index(f) for f in final_selected_features]
-
-    # 3. memmapとして新データを作成
-    n_samples = original_mmap.shape[0]
-    n_features = len(final_selected_features)
-    new_shape = (n_samples, n_features)
-
-    print(f"新しいmemmapを作成中... 形状: {new_shape}")
-    out_mmap = np.memmap(
-        out_npy_path, dtype=original_mmap.dtype, mode="w+", shape=new_shape
-    )
-
-    # メモリを圧迫しないようチャンクごとにコピー (1万行ずつ)
-    chunk_size = 10000
-    for i in range(0, n_samples, chunk_size):
-        end_idx = min(i + chunk_size, n_samples)
-        out_mmap[i:end_idx, :] = original_mmap[i:end_idx, selected_indices]
-    out_mmap.flush()
-    print(f"データ抽出完了: {out_npy_path}")
+    # 3. Parquetチャンクとして新データを作成
+    out_features_dir.mkdir(parents=True, exist_ok=True)
+    chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+    
+    print(f"新しいParquetチャンクを作成中... 抽出特徴量数: {len(final_selected_features)}")
+    for cf in tqdm(chunk_files, desc="Processing chunks"):
+        df = pd.read_parquet(cf)
+        cols_to_save = [c for c in ['scode', 'date'] if c in df.columns] + final_selected_features
+        
+        out_chunk_path = out_features_dir / cf.name
+        df[cols_to_save].to_parquet(out_chunk_path, index=False)
+        
+    print(f"データ抽出完了: {out_features_dir}")
 
     # 4. 抽出後のカラム名を保存
     with open(out_names_path, "w", encoding="utf-8") as f:

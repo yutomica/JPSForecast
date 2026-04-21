@@ -1,6 +1,11 @@
+import shutil
+import pyarrow.dataset as ds
 import os
 import numpy as np
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+pd.set_option('future.no_silent_downcasting', True)
 import glob
 import mlflow
 from mlflow.tracking import MlflowClient
@@ -67,16 +72,20 @@ def main(mode = "full"):
             total_rows += len(tmp_meta)
     print(f"Total rows to process: {total_rows}, Total features: {num_features}")
     
-    # memmap の事前割当 (float32)
+    # 出力先ディレクトリ
     if mode == "sample":
-        features_path = os.path.join(SAMPLE_OUTPUT_DIR, "features.npy")
+        out_features_dir = SAMPLE_OUTPUT_DIR / "features"
     else:
-        features_path = os.path.join(OUTPUT_DIR, "features.npy")
-    mmap_array = np.memmap(features_path, dtype='float32', mode='w+', shape=(total_rows, num_features))
-    
-    # チャンク処理と書き込み
-    current_row = 0
-    meta_list = []
+        out_features_dir = OUTPUT_DIR / "features"
+    out_features_dir.mkdir(parents=True, exist_ok=True)
+
+    # OOM回避のための一時ディレクトリ作成
+    temp_dir = OUTPUT_DIR / "temp_features_buffer"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True)
+
+    meta_dfs = []
     # MLflowの初期設定
     abs_path = os.path.expanduser("~/JPSForecast/mlflow_runs")
     os.makedirs(abs_path, exist_ok=True)
@@ -152,30 +161,92 @@ def main(mode = "full"):
             future_cols = ['Future_High_Tac','Future_Low_Tac','Future_Close_Tac','Future_High_Str','Future_Low_Str','Future_Close_Str']
             for col in future_cols:
                 df[col] = df[col]/df['Entry_Price']
-            data_to_write = df[feature_cols].values.astype('float32')
-            mmap_array[current_row : current_row + len(df)] = data_to_write
+
             meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str', 'log_market_cap'] + future_cols + [c for c in df.columns if c.startswith('target_')]
-            meta_list.append(df[meta_cols])
-            current_row += len(df)
-            mmap_array.flush()
-            del df, data_to_write
+            
+            # メモリ節約のため必要なカラムだけ保持
+            save_cols = list(set(meta_cols + feature_cols))
+            
+            # 特徴量計算等でfloat64になったカラムを再度float32にキャスト
+            f_cols = df[save_cols].select_dtypes(include=['float64']).columns
+            if len(f_cols) > 0:
+                df[f_cols] = df[f_cols].astype('float32')
+            
+            # --- メモリに乗せきれないため一時ファイルとして保存 ---
+            temp_path = temp_dir / f"temp_chunk_{len(meta_dfs)}.parquet"
+            df[save_cols].to_parquet(temp_path, index=False)
+            
+            # メタデータだけは結合用に保持
+            meta_dfs.append(df[meta_cols].copy())
+            
+            del df
             gc.collect()
 
-        # 成果物の保存
-        meta_df = pd.concat(meta_list)
+        # --- 全チャンク処理後、一時ファイルからPyArrowで部分ロードしてチャンク分割 ---
+        print("Concatenating metadata...")
+        meta_df = pd.concat(meta_dfs, ignore_index=True)
+        del meta_dfs
+        gc.collect()
+
+        print("Filtering out stocks that are never candidates...")
+        # scode ごとに期間全体で is_candidate_tac または is_candidate_str が True になった回数をカウント
+        candidate_counts = meta_df.groupby('scode')[['is_candidate_tac', 'is_candidate_str']].sum()
+        valid_scodes = candidate_counts[(candidate_counts['is_candidate_tac'] > 0) | (candidate_counts['is_candidate_str'] > 0)].index
+        
+        initial_scode_count = meta_df['scode'].nunique()
+        initial_row_count = len(meta_df)
+        meta_df = meta_df[meta_df['scode'].isin(valid_scodes)]
+        
+        print(f"  - Filtered out {initial_scode_count - len(valid_scodes)} stocks. Remaining: {len(valid_scodes)} stocks.")
+        print(f"  - Rows reduced from {initial_row_count} to {len(meta_df)}.")
+
+        print("Sorting metadata by scode and date...")
+        meta_df = meta_df.sort_values(['scode', 'date']).reset_index(drop=True)
+
+        # 銘柄ごとにチャンク分割 (例: 20チャンク)
+        n_chunks = 20
+        unique_scodes = meta_df['scode'].unique()
+        scodes_split = np.array_split(unique_scodes, n_chunks)
+
+        print(f"Loading temporary data via PyArrow and saving into {n_chunks} parquet chunks...")
+        total_rows_processed = len(meta_df)
+        dataset = ds.dataset(temp_dir, format="parquet")
+        
+        for i, scode_group in enumerate(tqdm(scodes_split, desc="Writing Parquet Chunks")):
+            scode_list = scode_group.tolist()
+            # 該当銘柄群のみをロード
+            chunk_table = dataset.to_table(filter=ds.field('scode').isin(scode_list))
+            chunk_df = chunk_table.to_pandas()
+            
+            # scode, date順にソート
+            chunk_df = chunk_df.sort_values(['scode', 'date']).reset_index(drop=True)
+            
+            chunk_path = out_features_dir / f"features_chunk_{i:02d}.parquet"
+            # 結合キーを含めて出力
+            chunk_cols = ['scode', 'date'] + feature_cols
+            chunk_df[chunk_cols].to_parquet(chunk_path, index=False)
+            
+            del chunk_table, chunk_df
+            gc.collect()
+        
         if mode == "sample":
             meta_path = os.path.join(SAMPLE_OUTPUT_DIR, "index_meta.parquet")
-            pd.Series(feature_cols).to_json(os.path.join(SAMPLE_OUTPUT_DIR, "feature_names.json"), orient='records')
-            mlflow.log_artifact(os.path.join(SAMPLE_OUTPUT_DIR, "feature_names.json"), "metadata")
+            names_path = os.path.join(SAMPLE_OUTPUT_DIR, "feature_names.json")
         else:
             meta_path = os.path.join(OUTPUT_DIR, "index_meta.parquet")
-            pd.Series(feature_cols).to_json(os.path.join(OUTPUT_DIR, "feature_names.json"), orient='records')
-            mlflow.log_artifact(os.path.join(OUTPUT_DIR, "feature_names.json"), "metadata")
-        meta_df.to_parquet(meta_path)
-        mlflow.log_param("total_rows", total_rows)
+            names_path = os.path.join(OUTPUT_DIR, "feature_names.json")
+            
+        meta_df.to_parquet(meta_path, index=False)
+        pd.Series(feature_cols).to_json(names_path, orient='records')
+        
+        mlflow.log_artifact(names_path, "metadata")
+        mlflow.log_param("total_rows", total_rows_processed)
         mlflow.log_artifact(meta_path, "metadata")
 
-    print(f"✅ Master data creation complete. Total rows: {total_rows}")
+        # 一時ディレクトリの削除
+        shutil.rmtree(temp_dir)
+
+    print(f"✅ Master data creation complete. Total rows: {total_rows_processed}")
 
 if __name__ == "__main__":
     import sys

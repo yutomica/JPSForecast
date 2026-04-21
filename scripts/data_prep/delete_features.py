@@ -37,12 +37,12 @@ def drop_features(target_dir, delete_csv_path=DELETE_LIST_PATH):
 
     # ファイルパス定義
     names_path = target_dir / "feature_names.json"
-    features_path = target_dir / "features.npy"
-    backup_path = target_dir / "features_backup.npy"
+    features_dir = target_dir / "features"
+    backup_dir = target_dir / "features_backup"
 
     # 1. 必須ファイルの存在確認
-    if not names_path.exists() or not features_path.exists():
-        print(f"Error: Required files not found in {target_dir}")
+    if not names_path.exists() or not features_dir.exists():
+        print(f"Error: Required files or directories not found in {target_dir}")
         return
 
     # 2. 特徴量名(JSON)のロード
@@ -81,46 +81,26 @@ def drop_features(target_dir, delete_csv_path=DELETE_LIST_PATH):
     print(f"Features to drop: {dropped_count}")
     print(f"Features to keep: {len(new_feature_names)}")
 
-    # 4. npyファイルの書き換え処理
-    # ファイルサイズから行数を計算 (float32 = 4 bytes)
-    file_size = os.path.getsize(features_path)
-    bytes_per_row = original_count * 4
-    
-    if file_size % bytes_per_row != 0:
-        raise ValueError("File size does not match the expected dimensions (rows * cols * 4).")
-    
-    total_rows = file_size // bytes_per_row
-    print(f"Total rows detected: {total_rows}")
+    chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
+    if not chunk_files:
+        print("No parquet chunks found.")
+        return
 
-    # 安全のため、既存のfeatures.npyをバックアップにリネーム
-    if backup_path.exists():
-        os.remove(backup_path)
-    os.rename(features_path, backup_path)
-    print(f"Backed up original file to: {backup_path}")
+    # 安全のため、既存のfeaturesディレクトリをバックアップ
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    shutil.copytree(features_dir, backup_dir)
+    print(f"Backed up original features to: {backup_dir}")
 
     try:
-        # バックアップファイル（読み込み用）
-        mmap_read = np.memmap(backup_path, dtype='float32', mode='r', shape=(total_rows, original_count))
-        
-        # 新しいファイル（書き込み用）
-        mmap_write = np.memmap(features_path, dtype='float32', mode='w+', shape=(total_rows, len(new_feature_names)))
+        # チャンクごとに不要な列を削除
+        for cf in tqdm(chunk_files, desc="Processing chunks"):
+            df = pd.read_parquet(cf)
+            cols_to_drop = [c for c in features_to_delete if c in df.columns]
+            if cols_to_drop:
+                df = df.drop(columns=cols_to_drop)
+                df.to_parquet(cf, index=False)
 
-        # チャンク処理でメモリ使用量を抑制
-        chunk_size = 100000
-        for i in tqdm(range(0, total_rows, chunk_size), desc="Processing chunks"):
-            # 該当する行範囲を読み込み
-            chunk_data = mmap_read[i : i + chunk_size]
-            
-            # 必要な列だけを抽出 (NumPyのファンシーインデックス)
-            chunk_filtered = chunk_data[:, keep_indices]
-            
-            # 新しいファイルに書き込み
-            mmap_write[i : i + chunk_size] = chunk_filtered
-            
-            # ディスクへフラッシュ
-            mmap_write.flush()
-
-        del mmap_read, mmap_write, chunk_data, chunk_filtered
         gc.collect()
         
         # 5. feature_names.json の更新
@@ -136,10 +116,10 @@ def drop_features(target_dir, delete_csv_path=DELETE_LIST_PATH):
     except Exception as e:
         print(f"❌ An error occurred: {e}")
         print("Restoring backup...")
-        if os.path.exists(features_path):
-            os.remove(features_path)
-        os.rename(backup_path, features_path)
-        print("Restored original file.")
+        if features_dir.exists():
+            shutil.rmtree(features_dir)
+        shutil.copytree(backup_dir, features_dir)
+        print("Restored original features.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Drop specified features from features.npy and feature_names.json")

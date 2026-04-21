@@ -91,9 +91,10 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
         ndcgs = []
         rank_ics_reb = []
         recalls_gate30 = []
+        recalls_gate30_severe = []
         
         unique_dates = np.sort(df_tmp['date'].unique())
-        rebalance_dates = set(unique_dates[::5])
+        rebalance_dates = set(unique_dates[::11])
         
         for d, grp in df_tmp.groupby('date'):
             if y_ret is not None and len(grp) >= 10:
@@ -104,7 +105,8 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             if len(grp) >= ndcg_k:
                 y_true_g = grp['true'].values
                 # ndcg_scoreは関連度が非負である必要があるため最小値を引く
-                rel = y_true_g - np.min(y_true_g)
+                rel = np.clip(y_true_g, -1.5, 4.5) + 1.5
+                # rel = y_true_g - np.min(y_true_g)
                 if np.max(rel) > 0:
                     try:
                         score = ndcg_score([rel], [grp['pred'].values], k=ndcg_k)
@@ -119,11 +121,14 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
                 if not np.isnan(ic):
                     rank_ics_reb.append(ic)
                     
-            # Recall_Gate30pct: 重大イベント（<=-15%）の検出
+            # Recall_Gate30pct & Recall_Gate30pct_severe: 重大イベント（<=-15%, <=-25%）の検出
             target_series = grp['ret'] if y_ret is not None else grp['true']
             mines = (target_series <= -0.15)
+            mines_severe = (target_series <= -0.25)
             num_mines = mines.sum()
-            if num_mines > 0:
+            num_mines_severe = mines_severe.sum()
+            
+            if num_mines > 0 or num_mines_severe > 0:
                 if task_type == 'regression':
                     # 回帰（リターン予測）の場合、予測値が低い（昇順）＝リスクが高い
                     risk_order = grp['pred'].sort_values(ascending=True).index
@@ -133,10 +138,17 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
                 k = int(len(grp) * 0.3)
                 if k > 0:
                     gate_indices = risk_order[:k]
-                    caught_mines = mines.loc[gate_indices].sum()
-                    recalls_gate30.append(float(caught_mines / num_mines))
+                    if num_mines > 0:
+                        caught_mines = mines.loc[gate_indices].sum()
+                        recalls_gate30.append(float(caught_mines / num_mines))
+                    if num_mines_severe > 0:
+                        caught_mines_severe = mines_severe.loc[gate_indices].sum()
+                        recalls_gate30_severe.append(float(caught_mines_severe / num_mines_severe))
                 else:
-                    recalls_gate30.append(0.0)
+                    if num_mines > 0:
+                        recalls_gate30.append(0.0)
+                    if num_mines_severe > 0:
+                        recalls_gate30_severe.append(0.0)
 
         if y_ret is not None:
             if spreads:
@@ -158,6 +170,11 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             metrics['Recall_Gate30pct'] = float(np.mean(recalls_gate30))
         else:
             metrics['Recall_Gate30pct'] = np.nan
+            
+        if recalls_gate30_severe:
+            metrics['Recall_Gate30pct_severe'] = float(np.mean(recalls_gate30_severe))
+        else:
+            metrics['Recall_Gate30pct_severe'] = np.nan
                 
     return metrics
 
