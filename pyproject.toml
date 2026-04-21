@@ -20,7 +20,7 @@ dependencies = [
     "sqlalchemy<2.0",
     "ta-lib>=0.6.8",
     "tensorboard>=2.20.0",
-    "tensorboard-plugin-profile>=2.22.2",
+    "tensorboard-plugin-profile>=2.15.0",
     "torch>=2.11.0",
     "torch-tb-profiler>=0.4.3",
     "zarr>=3.1.6",
@@ -30,6 +30,7 @@ dependencies = [
 override-dependencies = [
     "optuna>=4.0.0"
 ]
-
-# 追加推奨: M5 Pro (arm64) 以外の解決で悩まないように制限
-environments = ["platform_machine == 'arm64' and sys_platform == 'darwin'"]
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
