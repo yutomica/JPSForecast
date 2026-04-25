@@ -11,6 +11,7 @@ import pyarrow.ipc as ipc
 from hydra.utils import get_method
 from .base import BaseModelWrapper
 from .pruning import calculate_spearman_ic, log_epoch_metrics
+import inspect
 
 class LGBMWrapper(BaseModelWrapper):
     def __init__(self, task_type="regression", **params):
@@ -20,6 +21,8 @@ class LGBMWrapper(BaseModelWrapper):
         # カスタム目的関数および評価関数のパスを取得
         self.custom_objective_path = params.pop("custom_objective", None)
         self.custom_metric_path = params.pop("custom_metric", None)
+        self.builtin_metric_name = params.get("metric") # ログ出力用に元のmetricを保持
+        self.early_stopping_metric_path = params.pop("early_stopping_metric", None)
         # デフォルトの目的関数と評価指標を設定
         if self.task_type == "classification":
             params["objective"] = params.get("objective", "binary")
@@ -33,12 +36,17 @@ class LGBMWrapper(BaseModelWrapper):
             
         # カスタム評価関数が指定された場合はLGBM組み込みの評価指標を無効化する
         # （first_metric_only=Trueの監視対象を確実にカスタム関数にするため）
-        if self.custom_metric_path:
+        if self.custom_metric_path or self.early_stopping_metric_path:
             params["metric"] = "None"
             
         # カスタム目的関数のパスが指定されていれば、params['objective'] に直接セットする (LightGBM 4.0.0以降の仕様)
         if self.custom_objective_path:
-            params['objective'] = get_method(self.custom_objective_path)
+            obj_func = get_method(self.custom_objective_path)
+            # 引数に 'preds' を含まない場合はファクトリ関数とみなしてパラメータを渡す
+            if 'preds' not in inspect.signature(obj_func).parameters:
+                params['objective'] = obj_func(**params)
+            else:
+                params['objective'] = obj_func
             
         self.params = params
         self.model = None
@@ -52,7 +60,7 @@ class LGBMWrapper(BaseModelWrapper):
             return table.to_pandas()
         return X
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         # IPCハンドルのデコード
         X_train = self._from_ipc_handle(X_train)
         if X_valid is not None:
@@ -71,6 +79,7 @@ class LGBMWrapper(BaseModelWrapper):
         # paramsからEarly Stoppingとイテレーション数の設定を取り出す（内部コールバックとの競合を防ぐため）
         patience = self.params.pop("early_stopping_rounds", self.params.pop("early_stopping_round", self.params.pop("patience", 50)))
         num_boost_round = self.params.pop("n_estimators", self.params.pop("num_boost_round", 1000))
+        burn_in_rounds = self.params.pop("burn_in_rounds", 100)
         # LGBM専用のDataset構造に変換
         # Early Stoppingの対象を正しく認識させるため、valid_setを先頭に配置する
         train_set = lgb.Dataset(X_train, label=y_train, weight=sample_weight)
@@ -99,31 +108,153 @@ class LGBMWrapper(BaseModelWrapper):
                 return 'ic', calculate_spearman_ic(pred_scores, orig_labels), True
             else:
                 return 'ic', calculate_spearman_ic(preds, labels), True
-        # --- Configで指定されたカスタム関数の動的読み込み ---
-        fevals = []
+
+        # --- Configで指定されたカスタム関数の動的読み込みと順序制御 ---
+        all_eval_funcs = []
+        # 1. custom_metricがあれば追加
         if self.custom_metric_path:
-            fevals.append(get_method(self.custom_metric_path))
-        fevals.append(custom_ic_eval)
+            metric_func = get_method(self.custom_metric_path)
+            if 'preds' not in inspect.signature(metric_func).parameters:
+                all_eval_funcs.append(metric_func(**self.params))
+            else:
+                all_eval_funcs.append(metric_func)
+        # 2. ICは常に追加
+        all_eval_funcs.append(custom_ic_eval)
+
+        # 3. early_stopping_metric が指定されていれば、それをfevalsの先頭に配置
+        fevals = []
+        stopping_func = None
+        if self.early_stopping_metric_path:
+            if self.early_stopping_metric_path.lower() == 'ic':
+                stopping_func = custom_ic_eval
+            else:
+                base_metric_func = get_method(self.early_stopping_metric_path)
+                if "dates" in inspect.signature(base_metric_func).parameters:
+                    metric_name = base_metric_func.__name__.replace('calc_', '')
+                    from src.models.custom_metrics import create_lgbm_evaluator
+                    stopping_func = create_lgbm_evaluator(metric_name, base_metric_func, train_dates, valid_dates)
+                else:
+                    stopping_func = base_metric_func
+        
+        if stopping_func:
+            # 監視メトリクスを先頭に
+            fevals.append(stopping_func)
+            # 残りのメトリクスを追加
+            for func in all_eval_funcs:
+                if func != stopping_func:
+                    fevals.append(func)
+        else:
+            # 従来の挙動を維持 (custom_metricが先頭、なければicが先頭)
+            fevals = all_eval_funcs
+
+        # 重複を削除しつつ順序を保持
+        fevals = list(dict.fromkeys(fevals))
+
+        # --- 目的関数に対応する評価指標をfevalsに手動で追加 ---
+        # early_stopping_metric使用時に params['metric']='None' となるため、
+        # ログに目的関数のロスも表示したい場合は、ここでfevalとして追加する必要がある。
+        
+        # 1. カスタム目的関数の場合、対応する _eval 関数を自動で探して追加
+        if self.custom_objective_path:
+            eval_path = self.custom_objective_path + "_eval"
+            try:
+                eval_func = get_method(eval_path)
+                if 'preds' not in inspect.signature(eval_func).parameters:
+                    eval_func_inst = eval_func(**self.params)
+                else:
+                    eval_func_inst = eval_func
+                if eval_func_inst not in fevals:
+                    fevals.append(eval_func_inst)
+            except Exception:
+                pass
+
+        # 2. 組み込みの目的関数の場合 (objective パラメータに基づいて判断)
+        orig_obj = self.params.get("objective", "regression")
+        # カスタム関数の場合は callable になっているため文字列のみ処理
+        if isinstance(orig_obj, str):
+            feval_names = [f.__name__ for f in fevals]
+            
+            if orig_obj == 'quantile' and 'quantile_eval' not in feval_names:
+                q = self.params.get('alpha', 0.5)
+                def quantile_eval(preds, data):
+                    y = data.get_label()
+                    res = y - preds
+                    loss = np.mean(np.maximum(q * res, (q - 1) * res))
+                    return 'quantile', loss, False
+                fevals.append(quantile_eval)
+            elif orig_obj == 'fair' and 'fair_eval' not in feval_names:
+                c = self.params.get('fair_c', 1.0)
+                def fair_eval(preds, data):
+                    y = data.get_label()
+                    x = np.abs(y - preds)
+                    loss = np.mean(c * c * ((x / c) - np.log1p(x / c)))
+                    return 'fair', loss, False
+                fevals.append(fair_eval)
+            elif orig_obj in ['regression', 'rmse', 'mse'] and 'rmse_eval' not in feval_names:
+                def rmse_eval(preds, data):
+                    y = data.get_label()
+                    loss = np.sqrt(np.mean((y - preds)**2))
+                    return 'rmse', loss, False
+                fevals.append(rmse_eval)
+
         # 学習の実行
         evals_result = {}
         verbose_val = self.params.get("verbose", -1)
         callbacks = [lgb.record_evaluation(evals_result)]
-        callbacks.append(lgb.early_stopping(stopping_rounds=patience, first_metric_only=True))
-        callbacks.append(lgb.log_evaluation(period=10)) # 10イテレーションごとに進捗ログを出力
-        # --- Epoch Callback (Pruning等) と MLflow Logging の実行 ---
-        def lgbm_mlflow_callback(env):
-            metrics = {}
+
+        # --- カスタムEarly Stoppingのステート ---
+        es_state = {
+            "best_score": None,
+            "best_iter": 0,
+            "wait": 0
+        }
+
+        def unified_callback(env):
+            # --- Part 1: MLflow Logging & Pruning ---
+            metrics_to_log = {}
             current_ic = 0.0
             for dataset_name, eval_name, eval_result, _ in env.evaluation_result_list:
+                metrics_to_log[f"{dataset_name}_{eval_name}"] = eval_result
                 if dataset_name == 'valid' and eval_name == 'ic':
                     current_ic = eval_result
-                elif eval_name != 'ic':
-                    metrics[f"{dataset_name}_{eval_name}"] = eval_result
+            if metrics_to_log:
+                log_epoch_metrics(model_idx, env.iteration, metrics_to_log)
+            
             if epoch_callback is not None and X_valid is not None:
                 epoch_callback(epoch=env.iteration, current_score=current_ic)
-            if metrics:
-                log_epoch_metrics(model_idx, env.iteration, metrics)
-        callbacks.append(lgbm_mlflow_callback)
+
+            # --- Part 2: Custom Early Stopping with Burn-in ---
+            # LightGBM旧バージョンの first_metric_only 複数メトリクス時の IndexError バグを回避
+            if env.evaluation_result_list:
+                # valid データセットの最初のメトリクス（監視対象）を探索
+                target_score = None
+                target_higher_better = None
+                for ds_name, ev_name, score, is_higher_better in env.evaluation_result_list:
+                    if ds_name == 'valid':
+                        target_score = score
+                        target_higher_better = is_higher_better
+                        break
+                
+                if target_score is not None:
+                    if es_state["best_score"] is None or env.iteration <= burn_in_rounds:
+                        es_state["best_score"] = target_score
+                        es_state["best_iter"] = env.iteration
+                        es_state["wait"] = 0
+                    else:
+                        improved = (target_score > es_state["best_score"]) if target_higher_better else (target_score < es_state["best_score"])
+                        if improved:
+                            es_state["best_score"] = target_score
+                            es_state["best_iter"] = env.iteration
+                            es_state["wait"] = 0
+                        else:
+                            es_state["wait"] += 1
+                            if es_state["wait"] >= patience:
+                                print(f"Early stopping, best iteration is:\n[{es_state['best_iter'] + 1}]")
+                                import lightgbm.callback as lgb_cb
+                                raise lgb_cb.EarlyStopException(es_state["best_iter"], env.evaluation_result_list)
+
+        callbacks.append(unified_callback)
+        callbacks.append(lgb.log_evaluation(period=10)) # 10イテレーションごとに進捗ログを出力
         self.model = lgb.train(
             params=self.params,
             train_set=train_set,
@@ -133,6 +264,11 @@ class LGBMWrapper(BaseModelWrapper):
             feval=fevals,
             callbacks=callbacks # 履歴を記録
         )
+        
+        # 完走した場合や、例外キャッチが不十分だった場合のフォールバックとしてbest_iterationを確実に設定
+        if getattr(self.model, 'best_iteration', 0) == 0 and es_state["best_iter"] > 0:
+            self.model.best_iteration = es_state["best_iter"] + 1
+            
         print(f"=== Best Iteration: {self.model.best_iteration} ===")
         
         # 重要度の作成と保存
@@ -147,10 +283,17 @@ class LGBMWrapper(BaseModelWrapper):
         if not mlflow.active_run():
             return
 
+        if not evals_result:
+            return
+            
+        # 記録されている最初のデータセットから最初のメトリクス名を取得
+        first_dataset = list(evals_result.keys())[0]
+        first_metric = list(evals_result[first_dataset].keys())[0]
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            # plot_metric を実行
-            lgb.plot_metric(evals_result)
-            plt.title("Learning Curve")
+            # 明示的にメトリクスを指定して警告を回避
+            lgb.plot_metric(evals_result, metric=first_metric)
+            plt.title(f"Learning Curve ({first_metric})")
             plt.tight_layout()
             # 一時ファイルとして保存
             temp_path = os.path.join(tmpdir, f"learning_curve_m{model_idx}.png")

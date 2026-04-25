@@ -1,0 +1,41 @@
+# Step 3 Feature Selection Result
+# Model: LightGBM (STR)
+# Target: str_mdd
+# Metric: AP_severe_STR
+# Filter: Feature Sharpe > 0.2
+# Total Selected Features: 32
+feature_cols:
+  - BET_Beta60_RAW
+  - BET_MarketReturn_RAW
+  - BET_SectorRelStrength60_CSR
+  - BET_SectorRelStrength60_RAW
+  - BET_SectorRelStrength60_TSR_252D
+  - CON_ProgressRate_RAW
+  - CON_ProgressRate_TSR_252D
+  - CON_RevisionRate_CSR
+  - CON_RevisionRate_CSZ
+  - EVT_EPSActual_CSR
+  - EVT_IsMissingEPS_RAW
+  - GOV_MarketSegment_RAW
+  - LIQ_AmihudIlliq_CSZ
+  - MOM_LogReturn_RAW
+  - QLT_EquityRatio_RAW
+  - QLT_ROA_CSR
+  - QLT_ROE_RAW
+  - QLT_SalesGrowthYOY_RAW
+  - SIZ_LogMarketCap_RAW
+  - SPD_MarginBuyImpact_RAW
+  - SPD_MarginRatio_CSZ
+  - SPD_OverseaFlowTrend_TSR_252D
+  - SPD_VWAPDev_CSR
+  - SPD_VWAPDev_CSZ
+  - VAL_EarningsYield_CSZ
+  - VAL_LogPBR_SNZ
+  - VOL_ATRRatio_CSR
+  - VOL_ATRRatio_SNZ
+  - VOL_Volatility60_RAW
+  - VOL_Volatility60_SNZ
+  - VOL_VolumeMA25_CSZ
+  - VOL_VolumeMA25_SNZ
+cat_cols:
+  - GOV_MarketSegment_RAW

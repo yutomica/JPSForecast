@@ -122,6 +122,9 @@ class FTTransformerWrapper(BaseModelWrapper):
         self.use_compile = bool(params.pop("use_compile", False))
         self.compile_mode = params.pop("compile_mode", "reduce-overhead")
         self.use_tf32 = bool(params.pop("use_tf32", True))
+        self.early_stopping_metric = params.pop("early_stopping_metric", "loss")
+        self.metric_direction = params.pop("metric_direction", "minimize")
+        self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
 
         if self.device_name == "auto":
             if torch.cuda.is_available():
@@ -287,7 +290,7 @@ class FTTransformerWrapper(BaseModelWrapper):
             ds = TensorDataset(x_num_t, x_cat_t, torch.from_numpy(y_filt.astype(np.float32)), w_t)
             return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=(self.device.type=="cuda"))
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         y_train_np = np.asarray(y_train)
         is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
 
@@ -359,8 +362,9 @@ class FTTransformerWrapper(BaseModelWrapper):
             optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
         best_state = copy.deepcopy(self.model.state_dict())
-        best_val_loss = float("inf")
+        best_metric_val = float("-inf") if self.metric_direction == "maximize" else float("inf")
         wait = 0
+        ema_val_metric = None
 
         amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
         amp_enabled = (self.device.type in ["cuda", "mps"])
@@ -423,6 +427,8 @@ class FTTransformerWrapper(BaseModelWrapper):
                 self.model.eval()
                 valid_total = torch.tensor(0.0, device=self.device)
                 valid_count = 0
+                all_preds = []
+                all_targets = []
                 with torch.no_grad():
                     for x_num, x_cat, y, _ in valid_loader:
                         x_num = x_num.to(self.device)
@@ -432,27 +438,83 @@ class FTTransformerWrapper(BaseModelWrapper):
                         loss = self._compute_loss(logits, y, sample_weight=None)
                         valid_total += loss.detach() * y.shape[0]
                         valid_count += y.shape[0]
+                        
+                        if self.early_stopping_metric != "loss":
+                            if self.task_type == "classification":
+                                preds = torch.sigmoid(logits.view(-1))
+                            else:
+                                preds = logits.view(-1)
+                            all_preds.append(preds.cpu().numpy())
+                            all_targets.append(y.cpu().numpy())
+                            
                 valid_loss = float(valid_total.item()) / max(valid_count, 1)
+                
+                if self.early_stopping_metric == "ic":
+                    from scipy.stats import spearmanr
+                    preds_np = np.concatenate(all_preds)
+                    targets_np = np.concatenate(all_targets)
+                    if len(preds_np) < 2 or np.max(preds_np) == np.min(preds_np) or np.max(targets_np) == np.min(targets_np):
+                        val_metric = 0.0
+                    else:
+                        val_metric, _ = spearmanr(targets_np, preds_np)
+                        if np.isnan(val_metric):
+                            val_metric = 0.0
+                elif self.early_stopping_metric != "loss":
+                    preds_np = np.concatenate(all_preds)
+                    targets_np = np.concatenate(all_targets)
+                    try:
+                        from hydra.utils import get_method
+                        metric_func = get_method(self.early_stopping_metric)
+                        import inspect
+                        if "dates" in inspect.signature(metric_func).parameters:
+                            val_metric = metric_func(targets_np, preds_np, dates=valid_dates)
+                        else:
+                            val_metric = metric_func(targets_np, preds_np)
+                    except Exception as e:
+                        print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
+                        val_metric = valid_loss
+                else:
+                    val_metric = valid_loss
             else:
                 valid_loss = train_loss
+                val_metric = train_loss
 
             self.history["valid_loss"].append(valid_loss)
 
+            metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else ""
             tqdm.write(
-                f"Epoch {epoch+1}/{self.max_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}"
+                f"Epoch {epoch+1}/{self.max_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}" +
+                (f" | Valid {metric_name_log}: {val_metric:.6f}" if self.early_stopping_metric != "loss" else "")
             )
 
-            metrics_to_log = {"train_loss": train_loss}
+            # MLflow記録用のキーに具体的なコスト関数名（objective）を適用
+            metrics_to_log = {f"train_{loss_name}": train_loss}
             if valid_loader is not None:
-                metrics_to_log["valid_loss"] = valid_loss
+                metrics_to_log[f"valid_{loss_name}"] = valid_loss
+                if self.early_stopping_metric != "loss":
+                    metrics_to_log[f"valid_{metric_name_log}"] = val_metric
             log_epoch_metrics(model_idx, epoch, metrics_to_log)
 
             if epoch_callback is not None and X_valid is not None:
                 valid_preds = self.predict(X_valid)
                 execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
 
-            if valid_loss < best_val_loss:
-                best_val_loss = valid_loss
+            # Calculate EMA of validation metric to prevent stopping on noisy spikes
+            if ema_val_metric is None:
+                ema_val_metric = val_metric
+            else:
+                ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
+
+            is_best = False
+            if self.metric_direction == "maximize":
+                if ema_val_metric > best_metric_val:
+                    is_best = True
+            else:
+                if ema_val_metric < best_metric_val:
+                    is_best = True
+                    
+            if is_best:
+                best_metric_val = ema_val_metric
                 best_state = copy.deepcopy(self.model.state_dict())
                 self.best_epoch_ = epoch
                 wait = 0
@@ -487,7 +549,8 @@ class FTTransformerWrapper(BaseModelWrapper):
             plt.plot(self.history["valid_loss"], label="valid_loss")
         plt.title(f"FT-Transformer Learning Curve (Model {model_idx})")
         plt.xlabel("Epochs")
-        plt.ylabel("Loss")
+        loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
+        plt.ylabel(f"Loss ({loss_name})")
         plt.legend()
         plt.grid(True)
 

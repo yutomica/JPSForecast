@@ -3,6 +3,11 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error, ndcg_score, average_precision_score
 from scipy.stats import spearmanr
 
+def _safe_spearmanr(a, b):
+    if len(a) < 2 or np.max(a) == np.min(a) or np.max(b) == np.min(b):
+        return np.nan, np.nan
+    return spearmanr(a, b)
+
 def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_col=None, dates=None, ndcg_k=10):
     """基本メトリクスの算出"""
     # --- 入力からNaNデータを除外 ---
@@ -28,12 +33,12 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
     # 金融MLで重要なIC(ランク相関)をタスクに関わらず追加
     # y_ret が指定されている場合は予測スコアと生リターン(y_ret)の相関を計算する
     if target_col == 'target_tac_vol_scaled_residual' and y_ret is not None:
-        target_ic, _ = spearmanr(y_true, y_pred)
-        raw_return_ic, _ = spearmanr(y_ret, y_pred)
+        target_ic, _ = _safe_spearmanr(y_true, y_pred)
+        raw_return_ic, _ = _safe_spearmanr(y_ret, y_pred)
         metrics['ic'] = 0.3 * target_ic + 0.7 * raw_return_ic
     else:
         target_for_ic = y_ret if y_ret is not None else y_true
-        metrics['ic'], _ = spearmanr(target_for_ic, y_pred)
+        metrics['ic'], _ = _safe_spearmanr(target_for_ic, y_pred)
     
     if task_type == 'classification':
         metrics['auc'] = roc_auc_score(y_true, y_pred)
@@ -77,7 +82,21 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
     else:
         metrics['AP_severe'] = np.nan
             
-    # 日付ごとの指標 (Top10-spread, NDCG@K, RankIC_reb, Recall@Gate30%)
+    # AP_severe_STR の計算 (15pt, 20pt, 30pt)
+    ap_scores_str = []
+    for pt in [0.15, 0.2, 0.3]:
+        binary_true = (target_for_ap <= -pt).astype(int)
+        if np.sum(binary_true) > 0:
+            # リターン予測の場合、予測値が低いほど下落になりやすいので符号を反転させる
+            score_for_ap = -y_pred if task_type == 'regression' else y_pred
+            ap = average_precision_score(binary_true, score_for_ap)
+            ap_scores_str.append(ap)
+    if ap_scores_str:
+        metrics['AP_severe_STR'] = float(np.mean(ap_scores_str))
+    else:
+        metrics['AP_severe_STR'] = np.nan
+            
+    # 日付ごとの指標 (Top10-spread, NDCG@K, RankIC, RankIC_reb, Recall@Gate30%)
     if dates is not None:
         df_cols = {'date': dates, 'pred': y_pred, 'true': y_true}
         if y_ret is not None:
@@ -89,6 +108,7 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
         
         spreads = []
         ndcgs = []
+        rank_ics = []
         rank_ics_reb = []
         recalls_gate30 = []
         recalls_gate30_severe = []
@@ -103,24 +123,27 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
                 spreads.append(top10_ret - univ_ret)
                 
             if len(grp) >= ndcg_k:
-                y_true_g = grp['true'].values
-                # ndcg_scoreは関連度が非負である必要があるため最小値を引く
-                rel = np.clip(y_true_g, -1.5, 4.5) + 1.5
-                # rel = y_true_g - np.min(y_true_g)
-                if np.max(rel) > 0:
-                    try:
+                # NDCGの関連度(Relevance)として、生リターン(y_ret)があればそれを優先的に使用
+                target_g = grp['ret'].values if y_ret is not None else grp['true'].values
+                try:
+                    # 連続値を維持しつつ、定数加算による希釈化を防ぐアプローチ (ReLU変換)
+                    # マイナスのリターン(外れ)は0とし、プラスの連続値をそのままゲイン(報酬)とする
+                    rel = np.maximum(0, target_g)
+                    if np.max(rel) > 0:
                         score = ndcg_score([rel], [grp['pred'].values], k=ndcg_k)
                         ndcgs.append(score)
-                    except ValueError:
-                        pass
+                except ValueError:
+                    pass
                         
-            # RankIC_reb: リバランス日のみ
+            # RankIC, RankIC_reb の計算
             target_g = grp['ret'].values if y_ret is not None else grp['true'].values
-            if d in rebalance_dates and len(grp) > 1:
-                ic, _ = spearmanr(target_g, grp['pred'].values)
+            if len(grp) > 1:
+                ic, _ = _safe_spearmanr(target_g, grp['pred'].values)
                 if not np.isnan(ic):
-                    rank_ics_reb.append(ic)
-                    
+                    rank_ics.append(ic)
+                    if d in rebalance_dates:
+                        rank_ics_reb.append(ic)
+
             # Recall_Gate30pct & Recall_Gate30pct_severe: 重大イベント（<=-15%, <=-25%）の検出
             target_series = grp['ret'] if y_ret is not None else grp['true']
             mines = (target_series <= -0.15)
@@ -160,6 +183,11 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             metrics[f'ndcg_{ndcg_k}'] = float(np.mean(ndcgs))
         else:
             metrics[f'ndcg_{ndcg_k}'] = np.nan
+            
+        if rank_ics:
+            metrics['RankIC'] = float(np.mean(rank_ics))
+        else:
+            metrics['RankIC'] = np.nan
             
         if rank_ics_reb:
             metrics['RankIC_reb'] = float(np.mean(rank_ics_reb))

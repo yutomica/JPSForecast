@@ -110,8 +110,11 @@ class GANDALFWrapper(BaseModelWrapper):
         self.feature_importances_ = None
         self.feature_names_ = None
         self.is_binary_classification = task_type == "classification"
+        self.early_stopping_metric = params.pop("early_stopping_metric", "loss")
+        self.metric_direction = params.pop("metric_direction", "minimize")
+        self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         
         y_train_np = np.asarray(y_train)
         is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
@@ -227,35 +230,47 @@ class GANDALFWrapper(BaseModelWrapper):
         print("-" * 40)
 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        scheduler_mode = "max" if self.metric_direction == "maximize" else "min"
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            mode="min",
+            mode=scheduler_mode,
             factor=float(self.params.get("lr_decay_factor", 0.5)),
             patience=max(1, int(self.params.get("lr_patience", 3))),
             min_lr=float(self.params.get("min_lr", 1e-6)),
         )
 
-        best_metric = float("inf")
+        best_metric_val = float("-inf") if self.metric_direction == "maximize" else float("inf")
         best_state = None
         bad_epochs = 0
         self.history = {"train_loss": [], "valid_loss": []}
+        ema_val_metric = None
 
         for epoch in range(max_epochs):
             if hasattr(train_loader.dataset, "on_epoch_end"):
                 train_loader.dataset.on_epoch_end()
             train_loss = self._train_one_epoch(train_loader, optimizer, gradient_clip_val, epoch, max_epochs)
-            valid_loss = self._evaluate_loss(valid_loader) if valid_loader is not None else train_loss
-            scheduler.step(valid_loss)
+            if valid_loader is not None:
+                valid_loss, val_metric = self._evaluate(valid_loader)
+            else:
+                valid_loss = train_loss
+                val_metric = train_loss
+                
+            scheduler.step(val_metric)
 
             self.history["train_loss"].append(train_loss)
             self.history["valid_loss"].append(valid_loss)
 
-            tqdm.write(f"Epoch {epoch+1}/{max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}")
+            tqdm.write(
+                f"Epoch {epoch+1}/{max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}" +
+                (f" | Valid {self.early_stopping_metric}: {val_metric:.6f}" if self.early_stopping_metric != "loss" else "")
+            )
             
             # --- MLflow Logging ---
             metrics_to_log = {"train_loss": train_loss}
             if X_valid_np is not None:
                 metrics_to_log["valid_loss"] = valid_loss
+                if self.early_stopping_metric != "loss":
+                    metrics_to_log[f"valid_{self.early_stopping_metric}"] = val_metric
             log_epoch_metrics(model_idx, epoch, metrics_to_log)
             
             # --- Epoch Callback (Pruning等) の実行 ---
@@ -263,8 +278,22 @@ class GANDALFWrapper(BaseModelWrapper):
                 valid_preds = self.predict(X_valid)
                 execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid_np)
 
-            if valid_loss < best_metric - 1e-8:
-                best_metric = valid_loss
+            # Calculate EMA of validation metric to prevent stopping on noisy spikes
+            if ema_val_metric is None:
+                ema_val_metric = val_metric
+            else:
+                ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
+
+            is_best = False
+            if self.metric_direction == "maximize":
+                if ema_val_metric > best_metric_val - 1e-8:
+                    is_best = True
+            else:
+                if ema_val_metric < best_metric_val + 1e-8:
+                    is_best = True
+
+            if is_best:
+                best_metric_val = ema_val_metric
                 best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                 bad_epochs = 0
             else:

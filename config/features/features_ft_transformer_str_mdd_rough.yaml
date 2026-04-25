@@ -8,78 +8,46 @@ model: ft_transformer
 target: target_str_sharpe_adj
 total_features: 73
 feature_cols:
-  - BET_Beta60_CSR
-  - BET_Beta60_CSZ
-  - BET_Beta60_SNZ
-  - BET_Beta60_TSR_252D
-  - BET_MarketHV20_TSR_252D
-  - BET_MarketReturn_TSR_252D
-  - BET_MarketTrendIdx_TSR_252D
-  - BET_SectorMomentum5d_TSR_252D
-  - BET_SectorRelStrength60_CSR
-  - BET_SectorRelStrength60_CSZ
-  - BET_SectorRelStrength60_TSR_252D
-  - BET_SectorReturn_TSR_252D
-  - CON_ProgressRate_SNZ
-  - CON_ProgressRate_TSR_252D
-  - CON_RevisionRate_CSR
-  - CON_RevisionRate_CSZ
-  - EVT_EPSActual_CSR
-  - EVT_EPSActual_CSZ
-  - EVT_IsMissingEPS_RAW
-  - GOV_MarketSegment_RAW
-  - GOV_Sector33Code_RAW
-  - LIQ_AmihudIlliq_CSZ
-  - LIQ_VolumeLog_CSR
-  - LIQ_VolumeLog_CSZ
-  - MOM_DistSMA25-75_TSZ_20D
-  - MOM_LinRegSlope10_CSR
-  - MOM_LinRegSlope10_SNZ
-  - MOM_LogReturn_CSR
-  - MOM_LogReturn_SNZ
-  - MOM_Return12m_CSZ
-  - MOM_Return5d_CSR
-  - MOM_Return5d_SNZ
-  - QLT_EquityRatio_CSR
-  - QLT_EquityRatio_CSZ
-  - QLT_OPMargin_CSR
-  - QLT_OPMargin_CSZ
-  - QLT_OperatingProfitGrowthYOY_SNZ
-  - QLT_ROA_CSR
-  - QLT_ROA_CSZ
-  - QLT_ROA_TSR_252D
-  - QLT_ROE_SNZ
-  - QLT_SalesGrowthYOY_CSZ
-  - QLT_SalesGrowthYOY_SNZ
-  - SEA_Quarter_RAW
-  - SIZ_LogMarketCap_CSZ
-  - SPD_FlowAccel_CSR
-  - SPD_MarginBuyImpact_CSZ
-  - SPD_MarginRatio_CSR
-  - SPD_MarginRatio_CSZ
-  - SPD_MarketForeignBuy_CSR
-  - SPD_MarketIndividualBuy_TSR_252D
-  - SPD_OverseaFlowTrend_TSR_252D
-  - SPD_VWAPDev_CSR
-  - SPD_VWAPDev_CSZ
-  - VAL_EarningsYield_CSR
-  - VAL_EarningsYield_CSZ
-  - VAL_EarningsYield_SNZ
-  - VAL_LogPBR_CSR
-  - VAL_LogPBR_CSZ
-  - VAL_LogPBR_SNZ
-  - VOL_ATRRatio_CSR
-  - VOL_ATRRatio_CSZ
-  - VOL_ATRRatio_SNZ
-  - VOL_ATRRatio_TSR_252D
-  - VOL_DownsideDev60_CSR
-  - VOL_DownsideDev60_SNZ
-  - VOL_HV30_CSR
-  - VOL_HV30_SNZ
-  - VOL_Volatility60_SNZ
-  - VOL_Volatility60_TSR_252D
-  - VOL_VolumeMA25_CSZ
-  - VOL_VolumeMA25_SNZ
+- BET_Beta60_TSR_252D
+- BET_MarketHV20_CSZ
+- BET_MarketTrendIdx_CSZ
+- BET_SectorMomentum5d_TSR_252D
+- BET_SectorRelStrength60_CSR
+- BET_SectorReturn_TSR_252D
+- CON_ProgressRate_SNZ
+- CON_RevisionRate_CSR
+- CON_RevisionRate_CSZ
+- EVT_EPSActual_CSR
+- EVT_IsMissingEPS_RAW
+- GOV_MarketSegment_RAW
+- LIQ_AmihudIlliq_CSZ
+- MOM_DistSMA25-75_TSZ_20D
+- MOM_LinRegSlope10_CSZ
+- MOM_LogReturn_CSZ
+- MOM_Return12m_CSZ
+- MOM_Return5d_CSZ
+- QLT_EquityRatio_CSZ
+- QLT_OPMargin_CSR
+- QLT_OperatingProfitGrowthYOY_CSZ
+- QLT_ROA_TSR_252D
+- QLT_ROE_SNZ
+- QLT_SalesGrowthYOY_SNZ
+- SEA_Quarter_RAW
+- SIZ_LogMarketCap_CSZ
+- SPD_FlowAccel_CSR
+- SPD_MarginBuyImpact_CSZ
+- SPD_MarginRatio_CSZ
+- SPD_MarketIndividualBuy_TSR_252D
+- SPD_OverseaFlowTrend_TSR_252D
+- SPD_VWAPDev_CSR
+- SPD_VWAPDev_CSZ
+- VAL_EarningsYield_SNZ
+- VAL_LogPBR_SNZ
+- VOL_ATRRatio_CSR
+- VOL_ATRRatio_SNZ
+- VOL_ATRRatio_TSR_252D
+- VOL_Volatility60_TSR_252D
+- VOL_VolumeMA25_CSZ
 cat_cols:
   - EVT_IsMissingEPS_RAW
   - GOV_MarketSegment_RAW

@@ -7,15 +7,14 @@ hydra:
     sampler:
       _target_: src.utils.samplers.HydraBruteForceSampler
     storage: "sqlite:///optuna.db"
-    n_trials: 48
+    n_trials: 64
     params:
       # ======================================================
       # 【探索対象】 木構造の骨格（アンカーパラメータ）
       # ======================================================
-      hparams.max_depth: choice(3,5,7)
-      hparams.num_leaves: choice(7,15,31,63)
-      hparams.min_child_samples: choice(200,500,1000,2000)
-
+      hparams.max_depth: choice(2,3,4,5)
+      hparams.num_leaves: choice(3,7,15,31)
+      # hparams.min_child_samples: choice(1000,2000,4000,8000)
       # ======================================================
       # 【固定対象】 Step 2では探索せず固定するパラメータ
       # ======================================================

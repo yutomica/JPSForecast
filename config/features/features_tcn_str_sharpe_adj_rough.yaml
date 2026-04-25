@@ -7,77 +7,48 @@ model: tcn
 target: target_str_mdd
 total_features: 71
 feature_cols:
-  - BET_Beta60_CSZ
-  - BET_MarketHV20_CSR
-  - BET_MarketHV20_CSZ
-  - BET_MarketHV20_TSR_252D
-  - BET_MarketHV20_TSZ_20D
-  - BET_MarketTrendIdx_TSR_252D
-  - BET_MarketVolChange_CSZ
-  - BET_MarketVolChange_TSZ_20D
-  - BET_SectorMomentum5d_TSR_252D
-  - BET_SectorRel_CSR
-  - BET_SectorRel_SNZ
-  - CON_RevisionRate_CSR
-  - CON_RevisionRate_CSZ
-  - EVT_IsMissingEPS_RAW
-  - GOV_MarketSegment_RAW
-  - LIQ_AmihudIlliq_CSZ
-  - LIQ_TurnoverRatio_CSZ
-  - LIQ_VolumeLog_CSR
-  - MOM_DistSMA75_CSR
-  - MOM_LinRegSlope10_CSR
-  - MOM_LogReturn_TSR_252D
-  - MOM_LogReturn_TSZ_20D
-  - MOM_MADev200_CSR
-  - MOM_MADev200_SNZ
-  - MOM_MADev75_CSR
-  - MOM_Momentum12-1_CSR
-  - MOM_Return12m_CSR
-  - MOM_Return12m_CSZ
-  - MOM_Return12m_SNZ
-  - MOM_Return5d_TSR_252D
-  - MOM_Return5d_TSZ_20D
-  - MOM_Return6m_CSR
-  - MOM_Return6m_SNZ
-  - QLT_ROA_TSR_252D
-  - SEA_Quarter_RAW
-  - SPD_FlowAccel_CSR
-  - SPD_FlowAccel_CSZ
-  - SPD_MarginBuyImpact_CSZ
-  - SPD_MarginRatio_CSR
-  - SPD_MarginRatio_CSZ
-  - SPD_MarketForeignBuy_CSZ
-  - SPD_MarketForeignBuy_TSZ_20D
-  - SPD_MarketIndividualBuy_CSR
-  - SPD_MarketIndividualBuy_TSR_252D
-  - SPD_MarketIndividualBuy_TSZ_20D
-  - SPD_OverseaFlowTrend_TSR_252D
-  - SPD_OverseaFlowTrend_TSZ_20D
-  - SPD_VWAPDev_CSZ
-  - VAL_EarningsYield_CSR
-  - VAL_EarningsYield_CSZ
-  - VAL_LogPBR_CSR
-  - VAL_LogPBR_CSZ
-  - VAL_LogPBR_SNZ
-  - VOL_ATRRatio_CSR
-  - VOL_ATRRatio_CSZ
-  - VOL_ATRRatio_SNZ
-  - VOL_ATRRatio_TSR_252D
-  - VOL_DownsideDev60_CSR
-  - VOL_DownsideDev60_CSZ
-  - VOL_HV30_CSR
-  - VOL_HV30_CSZ
-  - VOL_HistVol20_CSR
-  - VOL_LargeMoveCount_CSR
-  - VOL_LargeMoveCount_CSZ
-  - VOL_LargeMoveCount_TSR_252D
-  - VOL_Volatility60_CSR
-  - VOL_Volatility60_CSZ
-  - VOL_VolatilityParkinson_CSR
-  - VOL_VolatilityParkinson_CSZ
-  - VOL_VolumeMA25_CSR
-  - VOL_VolumeMA25_CSZ
+- BET_Beta60_CSZ
+- BET_MarketHV20_CSR
+- BET_MarketHV20_CSZ
+- BET_MarketHV20_TSR_252D
+- BET_MarketHV20_TSZ_20D
+- BET_MarketTrendIdx_TSR_252D
+- BET_MarketVolChange_CSZ
+- BET_MarketVolChange_TSZ_20D
+- BET_SectorMomentum5d_TSR_252D
+- BET_SectorRel_CSR
+- BET_SectorRel_SNZ
+- CON_RevisionRate_CSR
+- CON_RevisionRate_CSZ
+- EVT_IsMissingEPS_RAW
+- GOV_MarketSegment_RAW
+- LIQ_AmihudIlliq_CSZ
+- LIQ_TurnoverRatio_CSZ
+- LIQ_VolumeLog_CSR
+- MOM_DistSMA75_TSR_252D
+- MOM_LinRegSlope10_CSR
+- MOM_LogReturn_TSR_252D
+- MOM_Return12m_SNZ
+- MOM_Return5d_TSR_252D
+- MOM_Return6m_TSR_252D
+- QLT_ROA_TSR_252D
+- SEA_Quarter_RAW
+- SPD_FlowAccel_CSR
+- SPD_MarginBuyImpact_CSZ
+- SPD_MarginRatio_TSR_252D
+- SPD_MarketForeignBuy_CSZ
+- SPD_MarketForeignBuy_TSZ_20D
+- SPD_MarketIndividualBuy_CSR
+- SPD_MarketIndividualBuy_TSR_252D
+- SPD_MarketIndividualBuy_TSZ_20D
+- SPD_OverseaFlowTrend_TSR_252D
+- SPD_VWAPDev_CSZ
+- VAL_EarningsYield_CSZ
+- VAL_LogPBR_CSZ
+- VOL_ATRRatio_SNZ
+- VOL_ATRRatio_TSR_252D
+- VOL_LargeMoveCount_TSR_252D
+- VOL_Volatility60_TSR_252D
 cat_cols:
   - EVT_IsMissingEPS_RAW
   - GOV_MarketSegment_RAW

@@ -30,7 +30,7 @@ class NBeatsWrapper(BaseModelWrapper):
         self.input_shape_ = None
         self.feature_importances_ = None
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         X_train_np = self._to_numpy(X_train).astype(np.float32)
         X_valid_np = self._to_numpy(X_valid).astype(np.float32) if X_valid is not None else None
         y_train_np = np.asarray(y_train, dtype=np.float32).reshape(-1)
@@ -99,6 +99,7 @@ class NBeatsWrapper(BaseModelWrapper):
         best_metric = np.inf
         best_epoch = -1
         epochs_without_improve = 0
+        ema_metric = None
 
         for epoch in range(max_epochs):
             train_loss = self._run_epoch(train_loader, criterion, optimizer, grad_clip_norm)
@@ -112,9 +113,16 @@ class NBeatsWrapper(BaseModelWrapper):
                 metric_to_monitor = train_loss
                 self.history["valid_loss"].append(np.nan)
 
+            # Calculate EMA of metric_to_monitor to prevent stopping on noisy spikes
+            if ema_metric is None:
+                ema_metric = metric_to_monitor
+            else:
+                alpha = float(self.params.get("early_stopping_ema_alpha", 1.0))
+                ema_metric = alpha * metric_to_monitor + (1.0 - alpha) * ema_metric
+
             if scheduler is not None:
                 if scheduler_name == "reduce_on_plateau":
-                    scheduler.step(metric_to_monitor)
+                    scheduler.step(ema_metric)
                 else:
                     scheduler.step()
 
@@ -129,8 +137,8 @@ class NBeatsWrapper(BaseModelWrapper):
                 valid_preds = self.predict(X_valid)
                 execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid_np)
 
-            if metric_to_monitor < best_metric:
-                best_metric = metric_to_monitor
+            if ema_metric < best_metric:
+                best_metric = ema_metric
                 best_epoch = epoch
                 epochs_without_improve = 0
                 self.best_state_dict = copy.deepcopy(self.model.state_dict())

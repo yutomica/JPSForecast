@@ -48,14 +48,52 @@ run_feature_select() {
 }
 
 # run_feature_select "tac" "lgbm" "tac_vol_scaled_asym_return" "features_lgbm_tac_vol_scaled_asym_return_rough" "lgbm_tac_vol_scaled_asym_return_anc" \
+#     ++hparams.early_stopping_metric="src.models.custom_metrics.calc_ndcg_10" \
+#     ++hparams.metric_direction="maximize" \
 #     ++hparams.num_boost_round=1000 \
 #     ++hparams.custom_objective="src.models.custom_objectives.custom_asymmetric_mse" \
 #     ++hparams.custom_metric="src.models.custom_objectives.custom_asymmetric_mse_eval" \
 #     ++optimization_metric="ndcg_10"
 
 run_feature_select "tac" "lgbm" "tac_max_neg_path" "features_lgbm_tac_max_neg_path_rough" "lgbm_tac_max_neg_path_anc" \
+    ++hparams.early_stopping_metric="src.models.custom_metrics.calc_ap_severe" \
+    ++hparams.metric_direction="maximize" \
     ++hparams.num_boost_round=1000 \
     ++hparams.objective="quantile" \
     ++hparams.metric="quantile" \
     ++hparams.alpha=0.1 \
-    ++optimization_metric="Recall_Gate30pct"
+    ++optimization_metric="AP_severe"
+
+run_feature_select "str" "lgbm" "str_sharpe_adj" "features_lgbm_str_sharpe_adj_rough" "lgbm_str_sharpe_adj_anc" \
+    ++hparams.early_stopping_metric="src.models.custom_metrics.calc_rank_ic_reb" \
+    ++hparams.metric_direction="maximize" \
+    ++preprocess.target_stratified_sampling.mode=mode_3 \
+    '++preprocess.target_stratified_sampling.weight_dict={tail:1.5,center:0.5,other:1.0}' \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    ++hparams.num_boost_round=1000 \
+    ++hparams.objective="fair" \
+    ++hparams.metric="fair" \
+    ++hparams.fair_c=10.0 \
+    ++optimization_metric="RankIC"
+
+run_feature_select "str" "lgbm" "str_mdd" "features_lgbm_str_mdd_rough" "lgbm_str_mdd_anc" \
+    ++hparams.early_stopping_metric="src.models.custom_metrics.calc_pr_auc_30pt" \
+    ++hparams.metric_direction="maximize" \
+    ++preprocess.target_stratified_sampling.mode=mode_3 \
+    '++preprocess.target_stratified_sampling.weight_dict={tail:3.0,center:0.5,other:1.0}' \
+    ++preprocess.sampling.enabled=true \
+    ++preprocess.sampling.interval=11 \
+    ++hparams.num_boost_round=1000 \
+    ++hparams.objective="tweedie" \
+    ++hparams.metric="tweedie" \
+    ++hparams.tweedie_variance_power=1.2 \
+    ++optimization_metric="AP_severe_STR"
+
+
+# run_feature_select "tac" "tcn" "tac_vol_scaled_asym_return" "features_tcn_tac_vol_scaled_asym_return_rough" "tcn_tac_vol_scaled_asym_return_anc" \
+#     ++hparams.objective="asymmetric_mse" \
+#     ++preprocess.target_stratified_sampling.mode=mode_2 \
+#     ++preprocess.target_stratified_sampling.center_keep_ratio=0.2 \
+#     ++preprocess.target_stratified_sampling.other_keep_ratio=0.5 \
+#     ++optimization_metric="ndcg_10"

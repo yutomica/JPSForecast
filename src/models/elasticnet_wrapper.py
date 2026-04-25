@@ -276,7 +276,7 @@ class ElasticNetWrapper(BaseModelWrapper):
         # LabelEncoder 済み int 列 + float 列の混在でも、常に明示的に数値配列へ変換する
         return X_df.to_numpy(dtype=np.float32, copy=False), X_df
 
-    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None):
+    def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
 
         train_mask = np.isfinite(y_train)
         if sample_weight is not None:

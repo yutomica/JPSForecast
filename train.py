@@ -11,6 +11,7 @@ import mlflow
 import json
 import pandas as pd
 import joblib
+import yaml
 import tempfile
 import copy
 from pathlib import Path
@@ -25,7 +26,7 @@ from src.preprocess.weights import calculate_time_decay_weights, calculate_sampl
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
 from src.utils.evaluation import evaluate_metrics, calculate_bin_stats
-from src.utils.feature_selection import calculate_shap, calculate_mda
+from src.utils.feature_selection import calculate_shap, calculate_mda, calculate_cfi
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
 from src.utils.sampling import apply_sampling, apply_target_stratified_sampling
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
@@ -173,24 +174,32 @@ def train(cfg: DictConfig) -> float:
         # 最初のプロセスのみが mmap キャッシュを作成し、他プロセスはそれを待機してアタッチする
         if not features_mmap_path.exists() or lock_path.exists():
             try:
+                # ロックファイルが古すぎる場合（例：10分以上前）は、前回の残骸とみなして削除する
+                import time
+                if lock_path.exists() and (time.time() - lock_path.stat().st_mtime > 600):
+                    print("  - Found stale lock file. Removing it...")
+                    lock_path.unlink(missing_ok=True)
+
                 lock_path.touch(exist_ok=False)
                 print(f"  - Building mmap cache: {features_mmap_path.name}")
                 chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
                 
-                shape = (len(meta_df), len(feature_cols))
-                mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
-                
-                current_row = 0
-                for cf in chunk_files:
-                    df_chunk = pd.read_parquet(cf, columns=feature_cols)
-                    chunk_len = len(df_chunk)
-                    mmap_arr[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
-                    current_row += chunk_len
-                
-                mmap_arr.flush()
-                del mmap_arr
-                gc.collect()
-                lock_path.unlink()
+                try:
+                    shape = (len(meta_df), len(feature_cols))
+                    mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
+                    
+                    current_row = 0
+                    for cf in chunk_files:
+                        df_chunk = pd.read_parquet(cf, columns=feature_cols)
+                        chunk_len = len(df_chunk)
+                        mmap_arr[current_row : current_row+chunk_len] = df_chunk.values.astype('float32')
+                        current_row += chunk_len
+                    
+                    mmap_arr.flush()
+                    del mmap_arr
+                    gc.collect()
+                finally:
+                    lock_path.unlink(missing_ok=True)
             except FileExistsError:
                 print("  - Waiting for other process to finish building mmap cache...")
                 import time
@@ -211,8 +220,7 @@ def train(cfg: DictConfig) -> float:
             "feature_cols": feature_cols,
             "cat_cols": cat_cols
         }
-        if cfg.model.data_category == 'timeseries':
-            prep_params['window_size'] = cfg.model.window_size.tac if cfg.domain.name == 'TAC' else cfg.model.window_size.str
+        if cfg.model.data_category == 'timeseries': prep_params['window_size'] = cfg.hparams.get("window_size", 20)
         preprocessor_class = get_class(cfg.model.preprocessor_target)
         base_preprocessor = preprocessor_class(**prep_params)
         
@@ -235,6 +243,7 @@ def train(cfg: DictConfig) -> float:
         valid_metrics = []
         # スクリーニング結果格納用
         all_fold_mda_values = []
+        all_fold_cfi_values = []
         all_fold_shap_values = []
         fold_pipelines = []
         for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
@@ -305,6 +314,11 @@ def train(cfg: DictConfig) -> float:
             X_valid = preprocessor.transform(features_array, row_indices=valid_idx, col_indices=col_indices)
             y_train = meta_df.loc[train_idx, target_col].values
             y_valid = meta_df.loc[valid_idx, target_col].values
+            
+            # 日付情報の取得 (カスタム評価指標でのEra別計算用)
+            train_dates = meta_df.loc[train_idx, 'date'].values
+            valid_dates = meta_df.loc[valid_idx, 'date'].values
+
             if test_idx is None or len(test_idx) == 0:
                 X_test = None
                 y_test = None
@@ -339,12 +353,27 @@ def train(cfg: DictConfig) -> float:
             print(f"  🔹 Training model...")
             try:
                 # model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i, **fit_kwargs)
-                model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i)
+                model.fit(
+                    X_train, y_train, 
+                    X_valid, y_valid, 
+                    sample_weight=w_train, 
+                    model_idx=i,
+                    train_dates=train_dates,
+                    valid_dates=valid_dates
+                )
             except optuna.exceptions.TrialPruned:
                 print(f"  ✂️  Trial pruned at Fold {i}. Stopping trial and returning {fallback_score}.")
                 mlflow.log_metric("avg_valid_metrics", fallback_score)
                 return fallback_score
                 
+            # 学習終了時の Best Iteration (Epoch) の記録
+            best_iter = getattr(model, 'best_epoch_', None)
+            if best_iter is None and hasattr(model, 'model') and hasattr(model.model, 'best_iteration'):
+                best_iter = model.model.best_iteration
+                
+            if best_iter is not None:
+                mlflow.log_metric(f"fold{i}_best_iteration", float(best_iter))
+
             # 予測の実行
             preds = {
                 'train': model.predict(X_train),
@@ -359,11 +388,16 @@ def train(cfg: DictConfig) -> float:
                 all_fold_shap_values.append(abs_shap)
 
             # 最適化に使用するメトリクスをconfigから取得（デフォルトは 'ic'）
-            # カスタムブレンド等の場合は、ベースとして取り出す指標名（例: ndcg_10）を指定する
             opt_metric_name = cfg.get("optimization_metric", "ic")
             if opt_metric_name == "custom_ndcg_blend":
-                base_metric_for_blend = f"ndcg_{cfg.get('ndcg_k', 10)}"
-                extract_metric = base_metric_for_blend
+                extract_metric = f"ndcg_{cfg.get('ndcg_k', 10)}"
+            elif opt_metric_name.startswith("worst_fold_"):
+                extract_metric = opt_metric_name.replace("worst_fold_", "")
+            elif opt_metric_name in ["daily_icir", "daily_icir_reb"]:
+                # Foldレベルのログ用には関連するICを抽出
+                extract_metric = "rank_ic_reb" if "reb" in opt_metric_name else "ic"
+            elif opt_metric_name.startswith("pooled_"):
+                extract_metric = opt_metric_name.replace("pooled_", "")
             else:
                 extract_metric = opt_metric_name
                 
@@ -389,7 +423,7 @@ def train(cfg: DictConfig) -> float:
             if cfg.get("mode") == "feature_select":
                 print(f"  🔹 [Selection] Calculating MDA using {opt_metric_name} for Fold {i}...")
                 baseline_score = valid_score
-                y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values
+                y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values - 1.0
                 dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
                 fold_mda = calculate_mda(
                     model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
@@ -398,6 +432,22 @@ def train(cfg: DictConfig) -> float:
                     opt_metric=opt_metric_name
                 )
                 all_fold_mda_values.append(fold_mda)
+                
+                # # CFI (Clustered Feature Importance) の計算
+                # feature_groups_path = cfg.get("feature_groups_path", "clustered_features.yaml")
+                # if os.path.exists(feature_groups_path):
+                #     print(f"  🔹 [Selection] Calculating CFI using {opt_metric_name} for Fold {i}...")
+                #     with open(feature_groups_path, 'r') as f:
+                #         yaml_data = yaml.safe_load(f)
+                #         feature_groups = yaml_data.get("feature_groups", {})
+                #     if feature_groups:
+                #         fold_cfi = calculate_cfi(
+                #             model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
+                #             dates_for_shuffle=dates_for_shuffle, feature_groups=feature_groups,
+                #             feature_cols=feature_cols, baseline_score=baseline_score,
+                #             task_type=cfg.target.task_type, target_col=target_col, opt_metric=opt_metric_name
+                #         )
+                #         all_fold_cfi_values.append(fold_cfi)
             
             # ビン分析用データの蓄積 
             # メタデータ(Future_High/Low/Close)を含めてDataFrame化
@@ -448,22 +498,31 @@ def train(cfg: DictConfig) -> float:
             mda_df.to_csv(output_filename)
             mlflow.log_artifact(output_filename)
             print(f"✅ Feature Sharpe results saved to {output_filename} (Group Threshold check needed).")
+            
+        # # CFI の集計と保存 ---
+        # if cfg.get("mode") == "feature_select" and all_fold_cfi_values:
+        #     cfi_df = pd.DataFrame(all_fold_cfi_values)
+        #     output_filename_cfi = f"cfi_results_{cfg.model.name}_{cfg.domain.name}_{cfg.target.name}.csv"
+        #     cfi_df.to_csv(output_filename_cfi)
+        #     mlflow.log_artifact(output_filename_cfi)
+        #     print(f"✅ CFI results saved to {output_filename_cfi}.")
         
         # 最適化スコアの算出
         if valid_metrics:
-            # nan を無視して平均と標準偏差を計算する
             mean_score = np.nanmean(valid_metrics)
             std_score = np.nanstd(valid_metrics)
             min_score = np.nanmin(valid_metrics)
-            # カスタムブレンド指標の計算: Mean + 0.5 * Min - 0.2 * Std
-            if cfg.get("optimization_metric") == "custom_ndcg_blend":
+            
+            if opt_metric_name.startswith("worst_fold_"):
+                avg_valid_metrics = min_score
+            elif opt_metric_name == "custom_ndcg_blend":
                 avg_valid_metrics = mean_score + 0.5 * min_score - 0.2 * std_score
             else:
                 if direction == "minimize":
                     avg_valid_metrics = mean_score + std_score
                 else:
                     avg_valid_metrics = mean_score - std_score
-            # すべてが nan だった場合（定数予測など）のフォールバック
+            
             if np.isnan(avg_valid_metrics):
                 avg_valid_metrics = fallback_metric
         else:
@@ -497,18 +556,54 @@ def train(cfg: DictConfig) -> float:
                 dates=oof_df['date'].values,
                 ndcg_k=ndcg_k
             )
+
+            # --- 日次RankICベースのICIRを直接計算 ---
+            if opt_metric_name in ["daily_icir", "daily_icir_reb"]:
+                from scipy.stats import spearmanr
+                daily_ics = []
+                
+                df_tmp = oof_df.copy()
+                df_tmp['date'] = pd.to_datetime(df_tmp['date']).dt.date
+                unique_dates = np.sort(df_tmp['date'].unique())
+                
+                if opt_metric_name == "daily_icir_reb":
+                    target_dates = set(unique_dates[::11])
+                else:
+                    target_dates = set(unique_dates)
+                    
+                for d, group in df_tmp.groupby('date'):
+                    if d not in target_dates:
+                        continue
+                    g_y_true = group['target'].values
+                    g_y_pred = group['score'].values
+                    if len(g_y_true) < 2 or np.max(g_y_pred) == np.min(g_y_pred) or np.max(g_y_true) == np.min(g_y_true): 
+                        continue
+                    ic, _ = spearmanr(g_y_true, g_y_pred)
+                    if not np.isnan(ic):
+                        daily_ics.append(ic)
+                        
+                if daily_ics:
+                    ic_mean = np.mean(daily_ics)
+                    ic_std = np.std(daily_ics)
+                    pooled_metrics[opt_metric_name] = ic_mean / (ic_std + 1e-8)
+                else:
+                    pooled_metrics[opt_metric_name] = fallback_metric
+
             # MLflowにロギング
             mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
         else:
             pooled_metrics = {}
             
         # --- 最終的な最適化スコア（Optunaの戻り値）の決定 ---
-        opt_metric = cfg.get("optimization_metric", "ic")
-        if opt_metric.startswith("pooled_"):
-            target_metric = opt_metric.replace("pooled_", "")
-            if target_metric == "ndcg": # "pooled_ndcg" のようにKが指定されていない場合は設定値を使用
+        if opt_metric_name.startswith("pooled_"):
+            target_metric = opt_metric_name.replace("pooled_", "")
+            if target_metric == "ndcg":
                 target_metric = f"ndcg_{ndcg_k}"
             final_opt_score = pooled_metrics.get(target_metric, fallback_metric)
+            if np.isnan(final_opt_score):
+                final_opt_score = fallback_metric
+        elif opt_metric_name in ["daily_icir", "daily_icir_reb"]:
+            final_opt_score = pooled_metrics.get(opt_metric_name, fallback_metric)
             if np.isnan(final_opt_score):
                 final_opt_score = fallback_metric
         else:
@@ -553,18 +648,27 @@ def train(cfg: DictConfig) -> float:
             mlflow.log_artifact(f.name, artifact_path="config")
         os.remove(f.name)
         
-        # --- final_sweep モード時の最高値更新・Staging昇格・OOF保存 ---
-        if cfg.get("mode") == "final_sweep" and final_opt_score != fallback_metric:
-            current_run_id = mlflow.active_run().info.run_id
-            check_and_promote_model(
-                client=client, 
-                experiment_id=experiment_id, 
-                parent_run_id=parent_run_id, 
-                current_run_id=current_run_id, 
-                optimization_score=final_opt_score, 
-                full_res_df=full_res_df, 
-                cfg=cfg
-            )
+        # --- fixモード：Staging昇格・OOF保存 ---
+        if cfg.get("mode") == "fix":
+            print(f"\n🌟 Mode 'fix' detected. Promoting model to Staging and saving OOF data.")
+            # OOFデータの保存 (Stacking用)
+            oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
+            oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"
+            oof_df.to_csv(oof_filename, index=False)
+            mlflow.log_artifact(oof_filename, artifact_path="oof_data")
+            if os.path.exists(oof_filename):
+                os.remove(oof_filename)
+            # モデルレジストリへの登録とStagingへの昇格
+            registered_model_name = f"{cfg.model.name}_{cfg.target.column}"
+            model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
+            try:
+                mv = mlflow.register_model(model_uri, registered_model_name)
+                client.transition_model_version_stage(
+                    name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=True
+                )
+                print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) and transitioned to Staging.")
+            except Exception as e:
+                print(f"⚠️ Failed to register model to registry: {e}")
 
         # --- MLflow成果物の一括ZIP化とGoogle Driveへの移動 ---
         if cfg.get("output_gdrive", False):
@@ -582,10 +686,11 @@ def train(cfg: DictConfig) -> float:
             except OSError as e:
                 print(f"⚠️ Failed to remove mmap cache: {e}")
         
+        scaled_score = final_opt_score * 100.0
         print("\n" + "="*60)
-        print(f"🎯 Trial finished. Score: {final_opt_score:.6f}")
+        print(f"🎯 Trial finished. Raw Score: {final_opt_score:.6f} (Scaled for Optuna: {scaled_score:.6f})")
         print("="*60 + "\n")
-        return float(final_opt_score)
+        return float(scaled_score)
 
 @hydra.main(version_base=None, config_path="config", config_name="main")
 def main(cfg: DictConfig):

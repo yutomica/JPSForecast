@@ -1,16 +1,16 @@
-# config/hparams/lgbm_tac_vol_scaled_asym_return_anc.yaml
-# anchor parameters
+
+
 n_jobs: -1
 random_state: 42
 learning_rate: 0.005
 num_leaves: 7
 max_depth: 5
 min_child_samples: 50
-bagging_fraction: 0.8
-feature_fraction: 0.1
-lambda_l1: 1.0
-lambda_l2: 1.0
-asym_alpha: 3.0
+bagging_fraction: 0.843
+feature_fraction: 0.330
+lambda_l1: 4.32
+lambda_l2: 0.531
+asym_alpha: 3.55
 asym_beta: 1.0
 is_unbalance: true
 use_time_decay: false

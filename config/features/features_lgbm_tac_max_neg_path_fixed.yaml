@@ -1,0 +1,45 @@
+# Step 3 Feature Selection Result
+# Model: LightGBM (TAC)
+# Target: tac_max_neg_path
+# Metric: AP_severe
+# Filter: Feature Sharpe > 0.5
+# Total Selected Features: 35
+feature_cols:
+  - BET_Beta60_RAW
+  - BET_MarketHV20_TSR_252D
+  - BET_MarketHV20_TSZ_20D
+  - BET_MarketTrendIdx_CSZ
+  - BET_MarketTrendIdx_TSR_252D
+  - BET_RS25_CSZ
+  - BET_SectorMomentum5d_RAW
+  - BET_SectorRelStrength60_RAW
+  - CON_RevisionRate_CSR
+  - EVT_IsMissingEPS_CSR
+  - EVT_LogDaysSincePub_CSZ
+  - EVT_LogDaysSincePub_RAW
+  - GOV_Sector33Code_RAW
+  - LIQ_AmihudIlliq_CSZ
+  - LIQ_VolumeLog_RAW
+  - MOM_ADX14_RAW
+  - MOM_DistHigh250_RAW
+  - MOM_DistSMA25-75_CSR
+  - MOM_DistSMA25_RAW
+  - MOM_NewHighFlag3_CSR
+  - MOM_RCI26_CSZ
+  - MOM_Return10d_RAW
+  - QLT_OPMargin_CSZ
+  - QLT_OperatingProfitGrowthYOY_TSZ_20D
+  - QLT_SalesGrowthYOY_TSR_252D
+  - QLT_SalesGrowthYOY_TSZ_20D
+  - SEA_DayOfMonth_RAW
+  - SEA_SinDayOfWeek_RAW
+  - SIZ_LogMarketCap_RAW
+  - SPD_FlowAccel_TSR_252D
+  - SPD_MarketForeignBuy_TSZ_20D
+  - SPD_MarketIndividualBuy_RAW
+  - SPD_MarketIndividualBuy_TSZ_20D
+  - SPD_OverseaFlowTrend_TSR_252D
+  - VOL_UlcerIndex14_TSR_252D
+cat_cols:
+  - GOV_Sector33Code_RAW
+  - SEA_DayOfMonth_RAW
