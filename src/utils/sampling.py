@@ -47,18 +47,41 @@ def apply_target_stratified_sampling(
             - 'mode_1': Tailは100%保持、Centerをサンプリング、Otherは100%保持。
             - 'mode_2': Tailは100%保持、CenterとOtherをそれぞれ指定したレートでサンプリング。
             - 'mode_3': サンプリングせず、'sample_weight'列を付与する。
+            - 'mode_ap_severe': AP_severeの閾値に基づき詳細な重み付けを行う。
         center_keep_ratio (float): Center部分の保持率 (mode_1, mode_2)。
         other_keep_ratio (float): Other部分の保持率 (mode_2)。
         weight_dict (dict): 各層に割り当てる重みの辞書 (mode_3)。例: {'tail': 2.0, 'center': 0.5, 'other': 1.0}
         random_state (int): 乱数シード。
     Returns:
-        pd.DataFrame: 処理後のデータフレーム。mode_3の場合は 'sample_weight' 列が追加される。
+        pd.DataFrame: 処理後のデータフレーム。mode_3, mode_ap_severe の場合は 'sample_weight' 列が追加される。
     """
     if target_col not in df.columns:
         print(f"  [Target-Stratified Sampling] Warning: target column '{target_col}' not found. Skipping.")
-        if mode == 'mode_3':
+        if mode in ['mode_3', 'mode_ap_severe']:
             if 'sample_weight' not in df.columns:
                 df['sample_weight'] = 1.0
+        return df
+
+    if mode == 'mode_ap_severe':
+        # --- Mode: ap_severe_aligned ---
+        # 定義に基づき、詳細な重み付けを行う。
+        conditions = [
+            (df[target_col] >= -0.02) & (df[target_col] <= 0.0), # center
+            (df[target_col] > -0.05) & (df[target_col] < -0.02), # others
+            (df[target_col] > -0.07) & (df[target_col] <= -0.05), # severe_5pct
+            (df[target_col] > -0.10) & (df[target_col] <= -0.07), # severe_7pct
+            (df[target_col] <= -0.10) # severe_10pct
+        ]
+        weights = [0.10, 1.00, 3.00, 4.00, 5.00]
+        sw = np.select(conditions, weights, default=1.0)
+
+        # 平均で正規化 (normalize_sample_weight_by_train_mean: true)
+        if len(sw) > 0 and sw.mean() > 0:
+            sw = sw / sw.mean()
+
+        df['sample_weight'] = sw
+        print(f"  [Target-Stratified Sampling] Mode: {mode}, Target: {target_col}")
+        print(f"    - Applied normalized AP_severe-aligned weights.")
         return df
 
     if weight_dict is None:

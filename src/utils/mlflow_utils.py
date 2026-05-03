@@ -11,6 +11,47 @@ from pathlib import Path
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
+def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name: str = None) -> str:
+    """親ランのIDを取得または作成する。study_nameが指定された場合はタグ検索による再開を試みる。"""
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient()
+    
+    exp = client.get_experiment_by_name(experiment_name)
+    if exp and exp.lifecycle_stage == 'deleted':
+        client.restore_experiment(exp.experiment_id)
+    
+    mlflow.set_experiment(experiment_name)
+    exp = client.get_experiment_by_name(experiment_name)
+    
+    if study_name:
+        runs = client.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string=f"tags.optuna_study_name = '{study_name}'",
+            max_results=1
+        )
+        if runs:
+            return str(runs[0].info.run_id)
+            
+    # 新規作成
+    run_name = f"Sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run = client.create_run(experiment_id=exp.experiment_id, run_name=run_name)
+    if study_name:
+        client.set_tag(run.info.run_id, "optuna_study_name", study_name)
+    
+    return str(run.info.run_id)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--action", choices=["resolve_parent"], required=True)
+    parser.add_argument("--tracking-uri", required=True)
+    parser.add_argument("--experiment-name", required=True)
+    parser.add_argument("--study-name", default=None)
+    args = parser.parse_args()
+    
+    if args.action == "resolve_parent":
+        print(get_or_create_parent_run(args.tracking_uri, args.experiment_name, args.study_name))
+
 def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, contextlib.ExitStack]:
     """MLflowの初期設定、実験の復元、Runコンテキスト（親・子）の開始を行う"""
     # --- tracking_uri の設定 ---
@@ -63,7 +104,9 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
     base_run_name = f"{model_name}_{target_col}_{mode}_{timestamp}"
 
     if HydraConfig.initialized() and "job" in HydraConfig.get():
-        trial_num = HydraConfig.get().job.get("num", "0")
+        raw_num = int(HydraConfig.get().job.get("num", "0"))
+        offset = int(os.environ.get("TRIAL_OFFSET", "0"))
+        trial_num = raw_num + offset
     else:
         trial_num = "0"
     trial_run_name = f"Trial_{trial_num}_{model_name}"
@@ -122,10 +165,18 @@ def check_and_promote_model(client: MlflowClient, experiment_id: str, parent_run
         model_uri = f"runs:/{current_run_id}/model"
         try:
             mv = mlflow.register_model(model_uri, registered_model_name)
+            # Variant管理のため archive_existing_versions=False に変更
             client.transition_model_version_stage(
-                name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=True
+                name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=False
             )
-            print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) and transitioned to Staging.")
+            
+            # タグの付与
+            variant = cfg.get("variant", "default")
+            client.set_model_version_tag(registered_model_name, mv.version, "variant", variant)
+            feature_choice = HydraConfig.get().runtime.choices.get("features", "unknown")
+            client.set_model_version_tag(registered_model_name, mv.version, "feature_config", feature_choice)
+            
+            print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) with variant '{variant}' and transitioned to Staging.")
         except Exception as e:
             print(f"⚠️ Failed to register model to registry (Ensure model is logged as PyFunc if required): {e}")
 

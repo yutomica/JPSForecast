@@ -1,0 +1,11 @@
+# [理論レイヤー] STR Risk (TCN): 60日ドローダウン
+defaults:
+  - base
+
+tweedie_variance_power: 1.5
+
+# 究極の低S/N環境。普遍的リスクのみを抽出
+dropout: 0.35
+patience: 30
+batch_size: 256
+grad_accum_steps: 2

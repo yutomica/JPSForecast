@@ -1,0 +1,102 @@
+variant_global: "v1_stable"
+
+promotions:
+  # --- LightGBM ---
+  - model: lgbm
+    domain: tac
+    role: alpha
+    study: "Final_Sweep_lgbm_tac_vol_scaled_asym_return_20260424_233543"
+    enabled: false
+
+  - model: lgbm
+    domain: tac
+    role: risk
+    study: "Final_Sweep_lgbm_tac_max_neg_path_20260426_231149"
+    enabled: false
+
+  - model: lgbm
+    domain: str
+    role: alpha
+    study: "Final_Sweep_lgbm_str_sharpe_adj_20260426_200138"
+    enabled: false
+
+  - model: lgbm
+    domain: str
+    role: risk
+    study: "Final_Sweep_lgbm_str_mdd_20260427_031300"
+    enabled: false
+
+  # --- TCN ---
+  - model: tcn
+    domain: tac
+    role: alpha
+    study: "final_sweep_tcn_tac_alpha_20260502_184549"
+    enabled: false
+
+  - model: tcn
+    domain: tac
+    role: risk
+    study: ""
+    enabled: false
+
+  - model: tcn
+    domain: str
+    role: alpha
+    study: ""
+    enabled: false
+
+  - model: tcn
+    domain: str
+    role: risk
+    study: ""
+    enabled: false
+
+  # --- FT-Transformer ---
+  - model: ft_transformer
+    domain: tac
+    role: alpha
+    study: ""
+    enabled: false
+
+  - model: ft_transformer
+    domain: tac
+    role: risk
+    study: ""
+    enabled: false
+
+  - model: ft_transformer
+    domain: str
+    role: alpha
+    study: ""
+    enabled: false
+
+  - model: ft_transformer
+    domain: str
+    role: risk
+    study: ""
+    enabled: false
+
+  # --- ElasticNet ---
+  - model: elasticnet
+    domain: tac
+    role: alpha
+    study: "final_sweep_elasticnet_tac_alpha_20260503_111351"
+    enabled: true
+
+  - model: elasticnet
+    domain: tac
+    role: risk
+    study: ""
+    enabled: false
+
+  - model: elasticnet
+    domain: str
+    role: alpha
+    study: "final_sweep_elasticnet_str_alpha_20260503_134622"
+    enabled: false
+
+  - model: elasticnet
+    domain: str
+    role: risk
+    study: ""
+    enabled: false

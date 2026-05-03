@@ -1,0 +1,31 @@
+# [不変レイヤー] 全ターゲット共通の基盤設定
+d_token: 32
+n_blocks: 3
+attention_n_heads: 2
+attention_dropout: 0.2
+ffn_d_hidden: 256
+ffn_dropout: 0.2
+ffn_multiplier: 2
+residual_dropout: 0.1
+activation: gelu
+head_hidden_dim: 128
+head_dropout: 0.1
+
+max_epochs: 150
+patience: 25
+early_stopping_ema_alpha: 0.33
+early_stopping_patience: 25
+metric_direction: "maximize"
+batch_size: 512
+num_workers: 0
+random_state: 42
+device_name: "mps"
+optimizer: adamw
+
+lr: 0.0001
+weight_decay: 0.0001
+grad_clip_norm: 1.0
+
+use_time_decay: false
+time_decay_rate: 0.9999
+use_compile: false

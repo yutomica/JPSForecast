@@ -1,0 +1,13 @@
+# [理論レイヤー] TAC Alpha: 短期急騰（右テール）の捕捉
+defaults:
+  - base
+
+asym_alpha: 3.25  # Step4で最適化
+asym_beta: 1.0
+
+# ターゲット特性に合わせた正則化
+attention_dropout: 0.2
+ffn_dropout: 0.2
+residual_dropout: 0.2
+head_dropout: 0.2
+

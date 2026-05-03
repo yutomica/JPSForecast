@@ -1,0 +1,5 @@
+# [理論レイヤー] STR Risk (LGBM): 長期ドローダウン
+defaults:
+  - base
+
+tweedie_variance_power: 1.2

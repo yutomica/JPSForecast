@@ -25,7 +25,7 @@ from src.cv.cv_viz import log_split_info
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
-from src.utils.evaluation import evaluate_metrics, calculate_bin_stats
+from src.evaluation.metrics import evaluate_metrics, calculate_bin_stats
 from src.utils.feature_selection import calculate_shap, calculate_mda, calculate_cfi
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
 from src.utils.sampling import apply_sampling, apply_target_stratified_sampling
@@ -234,6 +234,33 @@ def train(cfg: DictConfig) -> float:
         if hasattr(base_preprocessor, 'cat_dims'): # TabNet
             model_meta_params['cat_dims'] = base_preprocessor.cat_dims
         full_params = OmegaConf.to_container(cfg.hparams, resolve=True)
+        # ターゲット共通の目的関数設定をマージ (hparams側に設定がない場合のみターゲットから取得)
+        if "objective" in cfg.target:
+            if "objective" not in full_params and "loss" not in full_params:
+                full_params["objective"] = cfg.target.objective
+        # 目的関数に関連するパラメータをターゲットから取得
+        # hparams側が優先されるようにして、個別のチューニングを許容する
+        target_keys = ["fair_c", "tweedie_variance_power", "asym_alpha", "asym_beta", "quantile", "custom_objective", "custom_metric"]
+        for key in target_keys:
+            if key in cfg.target and key not in full_params:
+                full_params[key] = cfg.target[key]
+        # モデルごとのパラメータ名マッピング
+        obj = cfg.target.objective
+        if obj == "asymmetric_mse":
+            # TCN/FT-Transformer は alpha/beta という名前を期待する場合がある (Wrapper実装に合わせる)
+            if cfg.model.name.lower() in ["tcn", "ft_transformer"]:
+                if "asym_alpha" in full_params and "alpha" not in full_params:
+                    full_params["alpha"] = full_params["asym_alpha"]
+                if "asym_beta" in full_params and "beta" not in full_params:
+                    full_params["beta"] = full_params["asym_beta"]
+        elif obj == "quantile":
+            # quantile パラメータを各モデルが期待する alpha 等に変換
+            if cfg.model.name.lower() in ["tcn", "ft_transformer", "lgbm"]:
+                if "quantile" in full_params and "alpha" not in full_params:
+                    full_params["alpha"] = full_params["quantile"]
+        # early stopping
+        full_params["early_stopping_metric"] = cfg.target.get("early_stopping_metric", "ic")
+        full_params["metric_direction"] = cfg.target.get("metric_direction", "maximize")
         full_params.update(model_meta_params)
 
         # --- モデルの学習 ---
@@ -287,7 +314,7 @@ def train(cfg: DictConfig) -> float:
                     # サンプリングモードの場合はインデックスを更新
                     train_idx = train_meta_processed.index
                     print(f"    - Samples reduced: {count_before_stratified:,} -> {len(train_idx):,}")
-                elif mode == 'mode_3':
+                elif mode in ['mode_3', 'mode_ap_severe']:
                     # 重み付けモードの場合は、重みを後で適用するために取得
                     # train_idx は変更されない
                     stratified_sampling_weights = train_meta_processed.loc[train_idx, 'sample_weight'].values
@@ -388,18 +415,8 @@ def train(cfg: DictConfig) -> float:
                 all_fold_shap_values.append(abs_shap)
 
             # 最適化に使用するメトリクスをconfigから取得（デフォルトは 'ic'）
-            opt_metric_name = cfg.get("optimization_metric", "ic")
-            if opt_metric_name == "custom_ndcg_blend":
-                extract_metric = f"ndcg_{cfg.get('ndcg_k', 10)}"
-            elif opt_metric_name.startswith("worst_fold_"):
-                extract_metric = opt_metric_name.replace("worst_fold_", "")
-            elif opt_metric_name in ["daily_icir", "daily_icir_reb"]:
-                # Foldレベルのログ用には関連するICを抽出
-                extract_metric = "rank_ic_reb" if "reb" in opt_metric_name else "ic"
-            elif opt_metric_name.startswith("pooled_"):
-                extract_metric = opt_metric_name.replace("pooled_", "")
-            else:
-                extract_metric = opt_metric_name
+            opt_metric_name = cfg.target.get("optimization_metric", cfg.get("optimization_metric", 'ic'))
+            eval_metric = cfg.target.get("eval_metric", 'ic')
                 
             # メトリクス算出 (Train / Valid / Test)
             valid_score = None
@@ -415,13 +432,17 @@ def train(cfg: DictConfig) -> float:
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
                     # Validの指定メトリクスを収集
                     if phase == 'valid':
-                        score = m.get(extract_metric, np.nan)
+                        score = m.get(eval_metric)
+                        if score is None:
+                            # 大文字小文字を区別せずに再試行
+                            m_lower = {k.lower(): v for k, v in m.items()}
+                            score = m_lower.get(eval_metric.lower(), np.nan)
                         valid_metrics.append(score)
                         valid_score = score
             
             # 特徴量精査 (MDA) ロジックの追加
             if cfg.get("mode") == "feature_select":
-                print(f"  🔹 [Selection] Calculating MDA using {opt_metric_name} for Fold {i}...")
+                print(f"  🔹 [Selection] Calculating MDA using {eval_metric} for Fold {i}...")
                 baseline_score = valid_score
                 y_ret_valid = meta_df.loc[valid_idx, 'Future_Close'].values - 1.0
                 dates_for_shuffle = meta_df.loc[valid_idx, 'date'].values
@@ -429,7 +450,7 @@ def train(cfg: DictConfig) -> float:
                     model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
                     dates_for_shuffle=dates_for_shuffle, feature_cols=feature_cols,
                     baseline_score=baseline_score, task_type=cfg.target.task_type, target_col=target_col,
-                    opt_metric=opt_metric_name
+                    opt_metric=eval_metric
                 )
                 all_fold_mda_values.append(fold_mda)
                 
@@ -507,28 +528,6 @@ def train(cfg: DictConfig) -> float:
         #     mlflow.log_artifact(output_filename_cfi)
         #     print(f"✅ CFI results saved to {output_filename_cfi}.")
         
-        # 最適化スコアの算出
-        if valid_metrics:
-            mean_score = np.nanmean(valid_metrics)
-            std_score = np.nanstd(valid_metrics)
-            min_score = np.nanmin(valid_metrics)
-            
-            if opt_metric_name.startswith("worst_fold_"):
-                avg_valid_metrics = min_score
-            elif opt_metric_name == "custom_ndcg_blend":
-                avg_valid_metrics = mean_score + 0.5 * min_score - 0.2 * std_score
-            else:
-                if direction == "minimize":
-                    avg_valid_metrics = mean_score + std_score
-                else:
-                    avg_valid_metrics = mean_score - std_score
-            
-            if np.isnan(avg_valid_metrics):
-                avg_valid_metrics = fallback_metric
-        else:
-            print("⚠️ WARNING: No valid metrics found in validation results.")
-            avg_valid_metrics = fallback_metric
-        mlflow.log_metric("avg_valid_metrics", avg_valid_metrics)
 
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
@@ -556,21 +555,17 @@ def train(cfg: DictConfig) -> float:
                 dates=oof_df['date'].values,
                 ndcg_k=ndcg_k
             )
-
             # --- 日次RankICベースのICIRを直接計算 ---
             if opt_metric_name in ["daily_icir", "daily_icir_reb"]:
                 from scipy.stats import spearmanr
                 daily_ics = []
-                
                 df_tmp = oof_df.copy()
                 df_tmp['date'] = pd.to_datetime(df_tmp['date']).dt.date
                 unique_dates = np.sort(df_tmp['date'].unique())
-                
                 if opt_metric_name == "daily_icir_reb":
                     target_dates = set(unique_dates[::11])
                 else:
                     target_dates = set(unique_dates)
-                    
                 for d, group in df_tmp.groupby('date'):
                     if d not in target_dates:
                         continue
@@ -581,34 +576,34 @@ def train(cfg: DictConfig) -> float:
                     ic, _ = spearmanr(g_y_true, g_y_pred)
                     if not np.isnan(ic):
                         daily_ics.append(ic)
-                        
                 if daily_ics:
                     ic_mean = np.mean(daily_ics)
                     ic_std = np.std(daily_ics)
                     pooled_metrics[opt_metric_name] = ic_mean / (ic_std + 1e-8)
                 else:
                     pooled_metrics[opt_metric_name] = fallback_metric
-
             # MLflowにロギング
             mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
         else:
             pooled_metrics = {}
             
         # --- 最終的な最適化スコア（Optunaの戻り値）の決定 ---
-        if opt_metric_name.startswith("pooled_"):
-            target_metric = opt_metric_name.replace("pooled_", "")
-            if target_metric == "ndcg":
-                target_metric = f"ndcg_{ndcg_k}"
-            final_opt_score = pooled_metrics.get(target_metric, fallback_metric)
-            if np.isnan(final_opt_score):
-                final_opt_score = fallback_metric
-        elif opt_metric_name in ["daily_icir", "daily_icir_reb"]:
-            final_opt_score = pooled_metrics.get(opt_metric_name, fallback_metric)
-            if np.isnan(final_opt_score):
-                final_opt_score = fallback_metric
+        if not valid_metrics:
+            final_opt_score = fallback_metric
+            print("⚠️ WARNING: No valid metrics found in validation results.")
         else:
-            final_opt_score = avg_valid_metrics
-            
+            mean_score = np.nanmean(valid_metrics)
+            std_score = np.nanstd(valid_metrics)
+            min_score = np.nanmin(valid_metrics)
+            if opt_metric_name.startswith("worst_fold_"):
+                final_opt_score = min_score
+            elif opt_metric_name == "daily_icir_reb":
+                final_opt_score = pooled_metrics['daily_icir_reb']
+            else:
+                if direction == "minimize":
+                    final_opt_score = mean_score + std_score
+                else:
+                    final_opt_score = mean_score - std_score
         mlflow.log_metric("optimization_score", final_opt_score)
 
         # --- 成果物（Artifacts）の保存 ---
@@ -663,10 +658,19 @@ def train(cfg: DictConfig) -> float:
             model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
             try:
                 mv = mlflow.register_model(model_uri, registered_model_name)
+                # Variant管理のため archive_existing_versions=False に変更
                 client.transition_model_version_stage(
-                    name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=True
+                    name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=False
                 )
-                print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) and transitioned to Staging.")
+                
+                # タグの付与
+                variant = cfg.get("variant", "default")
+                client.set_model_version_tag(registered_model_name, mv.version, "variant", variant)
+                # 特徴量構成やターゲット情報も付与しておくと後で便利
+                feature_choice = HydraConfig.get().runtime.choices.get("features", "unknown")
+                client.set_model_version_tag(registered_model_name, mv.version, "feature_config", feature_choice)
+                
+                print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) with variant '{variant}' and transitioned to Staging.")
             except Exception as e:
                 print(f"⚠️ Failed to register model to registry: {e}")
 

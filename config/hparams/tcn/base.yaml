@@ -1,0 +1,26 @@
+# [不変レイヤー] TCN共通の基盤設定
+causal: true
+use_residual: true
+dilation_base: 2
+activation: gelu
+normalization: group_norm
+norm_groups: 1
+readout: last
+use_weight_norm: false
+channel_mode: constant
+
+# 学習基盤
+optimizer: adamw
+learning_rate: 0.0001
+weight_decay: 0.0001
+gradient_clip_norm: 1.0
+batch_size: 512
+max_epochs: 150
+patience: 20
+early_stopping_ema_alpha: 0.33
+num_workers: 0
+device_name: "mps"
+random_state: 42
+
+use_time_decay: false
+time_decay_rate: 0.9999

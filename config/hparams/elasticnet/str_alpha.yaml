@@ -1,0 +1,9 @@
+# [理論レイヤー] STR Alpha (ElasticNet): 中長期トレンド
+defaults:
+  - base
+
+loss: "fair"
+fair_c: 12.0
+
+l1_ratio: 0.8
+alpha: 0.01

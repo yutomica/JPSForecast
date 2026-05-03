@@ -1,0 +1,5 @@
+# [理論レイヤー] TAC Risk (LGBM): 短期暴落の防衛
+defaults:
+  - base
+
+alpha: 0.10

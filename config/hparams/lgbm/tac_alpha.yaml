@@ -1,0 +1,6 @@
+# [理論レイヤー] TAC Alpha (LGBM): 短期急騰の捕捉
+defaults:
+  - base
+
+asym_alpha: 3.25
+asym_beta: 1.0

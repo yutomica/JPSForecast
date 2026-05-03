@@ -1,0 +1,18 @@
+
+name: "tac_max_neg_path"
+column: "target_tac_max_neg_path"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+prediction_horizon: 5       # 何日先を予測するか（5日後など）
+
+# コスト関数
+objective: "quantile"
+
+# 監視指標
+early_stopping_metric: src.models.custom_metrics.calc_ap_severe
+metric_direction: maximize
+
+# 評価関数
+eval_metric: "AP_severe"
+
+# 最適化指標
+optimization_metric: "worst_fold_AP_severe"

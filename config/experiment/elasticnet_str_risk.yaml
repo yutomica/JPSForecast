@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /hparams/elasticnet/str_risk@hparams
+  - /hparams/anchor@hparams: elasticnet_str_risk
+
+preprocess:
+  target_stratified_sampling:
+    enabled: true
+    mode: mode_3
+    weight_dict: {tail: 2.0, center: 0.4, other: 1.0}
+  sampling:
+    enabled: true
+    interval: 11

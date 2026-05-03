@@ -1,0 +1,11 @@
+# [理論レイヤー] TAC Alpha (ElasticNet): 短期急騰
+defaults:
+  - base
+
+objective: "asymmetric_mse"
+asym_alpha: 3.25
+asym_beta: 1.0
+
+# Alpha系: スパース性（L1）を重視する初期設定
+l1_ratio: 0.9
+alpha: 0.001

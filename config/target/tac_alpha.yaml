@@ -1,0 +1,20 @@
+
+name: "tac_vol_scaled_asym_return"
+column: "target_tac_vol_scaled_asym_return_clipped"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+prediction_horizon: 5       # 何日先を予測するか（5日後など）
+
+# コスト関数
+objective: "asymmetric_mse"
+custom_objective: "src.models.custom_objectives.custom_asymmetric_mse"
+custom_metric: "src.models.custom_objectives.custom_asymmetric_mse_eval"
+
+# 監視指標
+early_stopping_metric: src.models.custom_metrics.calc_ndcg_10
+metric_direction: maximize
+
+# 評価関数
+eval_metric: "ndcg_10"
+
+# 最適化指標
+optimization_metric: "worst_fold_ndcg_10"

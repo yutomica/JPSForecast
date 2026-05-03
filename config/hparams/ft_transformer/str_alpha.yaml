@@ -1,0 +1,12 @@
+# [理論レイヤー] STR Alpha: 中長期クオリティトレンドの抽出
+defaults:
+  - base
+
+fair_c: 12.0  # ノイズ耐性を高めたL2学習
+
+# 低S/N環境に対応する保守的正則化
+attention_dropout: 0.4
+ffn_dropout: 0.3
+residual_dropout: 0.3
+head_dropout: 0.3
+

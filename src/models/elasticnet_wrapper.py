@@ -138,10 +138,15 @@ class ElasticNetWrapper(BaseModelWrapper):
         self.params = params
         self.model = None
         self.feature_importances_ = None
+        self.early_stopping_metric = self.params.get("early_stopping_metric", "loss")
+        self.metric_direction = self.params.get("metric_direction", "maximize" if self.params.get("early_stopping_metric", "loss") != "loss" else "minimize")
+
+    def _get_loss_type(self):
+        return self.params.get("loss", self.params.get("objective", "squared_error"))
 
     def _build_model(self):
         if self.task_type == "regression":
-            loss = self.params.get("loss", "squared_error")
+            loss = self._get_loss_type()
 
             if loss == "quantile":
                 return QuantileRegressor(
@@ -168,7 +173,7 @@ class ElasticNetWrapper(BaseModelWrapper):
                     warm_start=self.params.get("warm_start", False),
                 )
             
-            if loss in ["huber", "smooth_l1"]:
+            if loss in ["huber", "smooth_l1", "fair"]:
                 return SGDRegressor(
                     loss="huber",
                     penalty="elasticnet",
@@ -178,7 +183,7 @@ class ElasticNetWrapper(BaseModelWrapper):
                     max_iter=self.params.get("max_iter", 1000),
                     tol=self.params.get("tol", 1e-3),
                     random_state=self.params.get("random_state", 42),
-                    epsilon=self.params.get("huber_beta", 1.0),
+                    epsilon=self.params.get("fair_c", self.params.get("huber_beta", 1.35)),
                     early_stopping=self.params.get("early_stopping", False),
                     validation_fraction=self.params.get("validation_fraction", 0.1),
                     n_iter_no_change=self.params.get("n_iter_no_change", 5),
@@ -244,7 +249,7 @@ class ElasticNetWrapper(BaseModelWrapper):
         if self.task_type == "classification":
             return log_loss(y, preds, sample_weight=sample_weight)
         
-        loss_type = self.params.get("loss", "squared_error")
+        loss_type = self._get_loss_type()
         if loss_type == "quantile":
             quantile = self.params.get("quantile", 0.5)
             diff = y - preds
@@ -255,8 +260,8 @@ class ElasticNetWrapper(BaseModelWrapper):
             diff = y - preds
             mask = (diff > 0).astype(float)
             loss_each = (mask * alpha + (1.0 - mask) * beta) * (diff ** 2)
-        elif loss_type in ["huber", "smooth_l1"]:
-            beta = self.params.get("huber_beta", 1.0)
+        elif loss_type in ["huber", "smooth_l1", "fair"]:
+            beta = self.params.get("fair_c", self.params.get("huber_beta", 1.35 if loss_type == "fair" else 1.0))
             diff = np.abs(y - preds)
             loss_each = np.where(diff < beta, 0.5 * (diff ** 2), beta * (diff - 0.5 * beta))
         elif loss_type == "tweedie":
@@ -325,10 +330,20 @@ class ElasticNetWrapper(BaseModelWrapper):
         loss_name = self.params.get("loss", "squared_error") if self.task_type == "regression" else "log_loss"
 
         if use_manual_loop:
-            best_valid_loss = float("inf")
+            best_valid_metric = float("inf") if self.metric_direction == "minimize" else -float("inf")
             best_model_state = None
             wait = 0
             
+            metric_func = None
+            if self.early_stopping_metric != "loss":
+                try:
+                    from hydra.utils import get_method
+                    metric_func = get_method(self.early_stopping_metric)
+                except Exception as e:
+                    print(f"  ⚠️ Warning: Failed to load early_stopping_metric '{self.early_stopping_metric}'. Falling back to loss. Error: {e}")
+                    self.early_stopping_metric = "loss"
+                    self.metric_direction = "minimize"
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=ConvergenceWarning)
                 warnings.filterwarnings("ignore", message=".*objective has been evaluated.*")
@@ -340,33 +355,55 @@ class ElasticNetWrapper(BaseModelWrapper):
                     train_loss = self._compute_loss(train_preds, y_train, sample_weight=sample_weight)
                         
                     valid_loss = None
+                    val_metric = None
                     if X_valid is not None and y_valid is not None:
                         valid_preds = self.predict(X_valid)
                         valid_loss = self._compute_loss(valid_preds, y_valid)
+                        
+                        if metric_func is not None:
+                            try:
+                                # try passing dates if available
+                                if valid_dates is not None:
+                                    val_metric = metric_func(y_valid, valid_preds, dates=valid_dates)
+                                else:
+                                    val_metric = metric_func(y_valid, valid_preds)
+                            except Exception as e:
+                                print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
+                                val_metric = valid_loss
+                                self.early_stopping_metric = "loss"
+                                self.metric_direction = "minimize"
+                                metric_func = None
+                        else:
+                            val_metric = valid_loss
                             
+                    metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else loss_name
                     if verbose > 0 and (epoch % 10 == 0 or epoch == 1 or epoch == total_epochs):
-                        if valid_loss is not None:
-                            print(f"Iteration {epoch:4d}/{total_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}")
+                        if val_metric is not None:
+                            print(f"Iteration {epoch:4d}/{total_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {metric_name_log}: {val_metric:.6f}")
                         else:
                             print(f"Iteration {epoch:4d}/{total_epochs} | Train {loss_name}: {train_loss:.6f}")
                             
                     metrics_to_log = {"train_loss": train_loss}
                     if valid_loss is not None:
                         metrics_to_log["valid_loss"] = valid_loss
+                    if val_metric is not None and self.early_stopping_metric != "loss":
+                        metrics_to_log[f"valid_{metric_name_log}"] = val_metric
+                        
                     log_epoch_metrics(model_idx, epoch, metrics_to_log)
                     
                     if epoch_callback is not None and X_valid is not None:
                         execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
                         
-                    if valid_loss is not None:
-                        if valid_loss < best_valid_loss:
-                            best_valid_loss = valid_loss
+                    if val_metric is not None:
+                        is_better = (val_metric < best_valid_metric) if self.metric_direction == "minimize" else (val_metric > best_valid_metric)
+                        if is_better:
+                            best_valid_metric = val_metric
                             best_model_state = copy.deepcopy(self.model)
                             wait = 0
                         else:
                             wait += 1
                             if early_stopping_rounds > 0 and wait >= early_stopping_rounds:
-                                print(f"Early stopping triggered at iteration {epoch}. Best Valid Loss: {best_valid_loss:.6f}")
+                                print(f"Early stopping triggered at iteration {epoch}. Best Valid {metric_name_log}: {best_valid_metric:.6f}")
                                 break
                                 
             if best_model_state is not None:

@@ -136,10 +136,13 @@ class ElasticNetPreprocessor(BasePreprocessor):
         if self.fitted_num_cols_:
             num_df = df[self.fitted_num_cols_].apply(pd.to_numeric, errors="coerce")
             num_df = num_df.replace([np.inf, -np.inf], np.nan)
-            df[self.fitted_num_cols_] = self.imputer.transform(num_df).astype(np.float32)
+            
+            # SimpleImputer(median) で補完し、それでも残る欠損（全欠損列など）を 0 で埋める
+            imputed = self.imputer.transform(num_df)
+            imputed = np.nan_to_num(imputed, nan=0.0, posinf=0.0, neginf=0.0)
+            df[self.fitted_num_cols_] = imputed.astype(np.float32)
 
         # カテゴリ列: LabelEncoder 学習済みクラスを使って整数化
-        # 未知カテゴリは列ごとの専用 ID にマップする
         for col in self.valid_cat_cols_:
             if col not in self.label_maps_:
                 continue
@@ -148,6 +151,11 @@ class ElasticNetPreprocessor(BasePreprocessor):
             label_map = self.label_maps_[col]
             unknown_id = self.unknown_id_map_[col]
             df[col] = ser.map(label_map).fillna(unknown_id).astype(np.int32)
+
+        # 最終チェック: 予期せぬ NaN が残っていないか
+        if df.isna().any().any():
+            print(f"  ⚠️ Warning: NaNs detected after imputation. Force filling with 0.")
+            df = df.fillna(0.0)
 
         # PyArrow Table化と共有メモリ用IPCバッファ作成
         table = pa.Table.from_pandas(df)

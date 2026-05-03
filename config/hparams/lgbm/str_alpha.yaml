@@ -1,0 +1,5 @@
+# [理論レイヤー] STR Alpha (LGBM)
+defaults:
+  - base
+
+fair_c: 10.0

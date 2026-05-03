@@ -2,5 +2,3 @@
 _target_: src.cv.rrv_cv.RRVPurgedCV
 purge_days: ${period.purge_days}
 embargo_days: ${period.embargo_days}
-train_start_date: ${period.train_start_date}
-test_start_date: ${period.test_start_date}

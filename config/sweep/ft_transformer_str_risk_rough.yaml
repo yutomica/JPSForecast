@@ -1,0 +1,20 @@
+# @package _global_
+# Step 2: STR Risk (FT-Transformer) ラフチューニング
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 18
+    params:
+      ++hparams.d_token: choice(4, 8, 16)
+      ++hparams.n_blocks: choice(1)
+      ++hparams.ffn_multiplier: choice(1, 2)
+      ++hparams.attention_dropout: choice(0.4, 0.5, 0.6)
+      
+      ++hparams.lr: 0.0001
+      ++hparams.attention_n_heads: 2

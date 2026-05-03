@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /hparams/tcn/str_alpha@hparams
+  - /hparams/anchor@hparams: tcn_str_alpha
+
+preprocess:
+  target_stratified_sampling:
+    enabled: false
+  sampling:
+    enabled: true
+    interval: 11

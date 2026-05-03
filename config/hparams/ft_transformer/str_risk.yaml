@@ -1,0 +1,12 @@
+# [理論レイヤー] STR Risk: 長期ジリ貧・構造崩壊の検知
+defaults:
+  - base
+
+tweedie_variance_power: 1.5
+
+# 極限の情報圧縮と正則化
+attention_dropout: 0.5
+ffn_dropout: 0.4
+residual_dropout: 0.4
+head_dropout: 0.4
+

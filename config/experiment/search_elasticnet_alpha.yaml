@@ -3,38 +3,31 @@ defaults:
   - override /hydra/sweeper: optuna
   - override /hydra/sweeper/sampler: tpe
 
-# モード設定（今回は特徴量抽出ではなく、ハイパーパラメータ探索モード）
-mode: feature_screening
+# モード設定
 optimization_direction: maximize
-optimization_metric: ic  # ドメインに合わせて変更（ic, ndcg_10 等）
+optimization_metric: ic
 
-# 軽量化の要：時間軸サンプリングによるデータ削減
 preprocess:
   sampling:
     enabled: false
   target_stratified_sampling:
-    enabled: true              # 適用する場合は true
+    enabled: true
     mode: mode_3
     weight_dict: {'tail': 3.0, 'center': 0.1, 'other': 1.0}
 
 model:
   name: ElasticNet
-  # train.py の model.fit(..., X_valid, y_valid) に対応させるための自作ラッパーを指定
-  model_target: src.models.linear.ElasticNetWrapper 
+  model_target: src.models.elasticnet_wrapper.ElasticNetWrapper 
   data_category: tabular
 
-# 固定するパラメータ（l1_ratioは0.5でL1/L2バランスを固定）
 hparams:
-  l1_ratio: 0.5
   max_iter: 1000
   random_state: 42
-  use_time_decay: false # 線形モデルの純粋な係数を見たい場合はFalse推奨
-
-# Hydra Sweeper (Optuna) の設定：alphaのみを探索
-hydra:
-  sweeper:
-    direction: maximize
-    n_trials: 20  # 軽量CVなので20回程度で十分な傾向が掴めます
-    n_jobs: 1
-    params:
-      hparams.alpha: tag(log, interval(0.0001, 10.0))
+  use_time_decay: false
+  # 探索対象となる可能性のあるパラメータのプレースホルダ
+  # これらを定義しておくことで、Optuna Sweeper による Override が可能になります
+  asym_alpha: 3.0
+  asym_beta: 1.0
+  fair_c: 10.0
+  quantile: 0.5
+  tweedie_variance_power: 1.5

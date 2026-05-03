@@ -1,0 +1,9 @@
+# [理論レイヤー] TAC Risk (ElasticNet): 短期暴落
+defaults:
+  - base
+
+loss: "squared_error"
+
+# Risk系: 冗長性（L2/Ridge寄り）を重視し多重防衛を図る初期設定
+l1_ratio: 0.1
+alpha: 0.1

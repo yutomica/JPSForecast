@@ -1,0 +1,17 @@
+name: "str_sharpe_adj"
+column: "target_str_sharpe_adj"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+prediction_horizon: 60       # 何日先を予測するか（5日後など）
+
+# コスト関数
+objective: "fair"
+
+# 監視指標
+early_stopping_metric: src.models.custom_metrics.calc_rank_ic_reb
+metric_direction: maximize
+
+# 評価関数
+eval_metric: "rank_ic_reb"
+
+# 最適化指標
+optimization_metric: "daily_icir_reb"

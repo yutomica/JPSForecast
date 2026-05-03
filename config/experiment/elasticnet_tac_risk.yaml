@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /hparams/elasticnet/tac_risk@hparams
+  - /hparams/anchor@hparams: elasticnet_tac_risk
+
+preprocess:
+  target_stratified_sampling:
+    enabled: true
+    mode: "mode_ap_severe"
+    weight_dict: {tail: 4.0, center: 0.1, other: 1.0}
+  sampling:
+    enabled: false
+
+hparams:
+  target_transform: "positive_drawdown"  # y = -target 変換の有効化

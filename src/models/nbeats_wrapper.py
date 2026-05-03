@@ -310,12 +310,14 @@ class NBeatsWrapper(BaseModelWrapper):
         plt.ylabel("Loss")
         plt.legend()
         plt.grid(True)
-        temp_path = f"nbeats_learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-        os.remove(temp_path)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"nbeats_learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
 
     def _create_feature_importance_df(self, X_train):
         # N-BEATS は tree model のような素直な feature importance を持たないため、

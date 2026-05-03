@@ -1,4 +1,3 @@
-
 import math
 from typing import List, Optional, Sequence
 
@@ -150,6 +149,7 @@ class TransformerBlock(nn.Module):
         n_heads: int,
         attention_dropout: float = 0.1,
         ffn_d_hidden: Optional[int] = None,
+        ffn_multiplier: float = 4.0,
         ffn_dropout: float = 0.1,
         residual_dropout: float = 0.0,
         activation: str = "gelu",
@@ -157,7 +157,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.d_token = int(d_token)
         self.n_heads = int(n_heads)
-        self.ffn_d_hidden = int(ffn_d_hidden or (4 * d_token))
+        self.ffn_d_hidden = int(ffn_d_hidden or (ffn_multiplier * d_token))
 
         self.norm_attn = nn.LayerNorm(self.d_token)
         self.attn = nn.MultiheadAttention(
@@ -206,6 +206,7 @@ class FTTransformer(nn.Module):
         attention_n_heads: int = 8,
         attention_dropout: float = 0.2,
         ffn_d_hidden: Optional[int] = None,
+        ffn_multiplier: float = 4.0,
         ffn_dropout: float = 0.1,
         residual_dropout: float = 0.0,
         activation: str = "gelu",
@@ -235,6 +236,7 @@ class FTTransformer(nn.Module):
                     n_heads=attention_n_heads,
                     attention_dropout=attention_dropout,
                     ffn_d_hidden=ffn_d_hidden,
+                    ffn_multiplier=ffn_multiplier,
                     ffn_dropout=ffn_dropout,
                     residual_dropout=residual_dropout,
                     activation=activation,

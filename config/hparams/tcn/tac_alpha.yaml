@@ -1,0 +1,9 @@
+# [理論レイヤー] TAC Alpha (TCN): 5日先の急騰予測
+defaults:
+  - base
+
+asym_alpha: 3.25
+asym_beta: 1.0
+
+# 短期的な波を破壊しないマイルドな正則化
+dropout: 0.15

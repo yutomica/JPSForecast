@@ -1,0 +1,4 @@
+# [確定レイヤー] Step 2で見つけた「岩盤」パラメータ
+d_token: 64
+n_blocks: 3
+attention_n_heads: 4

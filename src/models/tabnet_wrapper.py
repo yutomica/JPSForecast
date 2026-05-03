@@ -233,12 +233,14 @@ class TabNetWrapper(BaseModelWrapper):
         plt.ylabel('Loss')
         plt.legend()
         plt.grid(True)
-        temp_path = f"learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-        os.remove(temp_path)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
 
     def _log_feature_importance(self, model_idx, feature_names):
         """特徴量重要度をMLflowに保存する"""
@@ -259,17 +261,18 @@ class TabNetWrapper(BaseModelWrapper):
         plt.title(f'TabNet Feature Importance (Model {model_idx})')
         plt.gca().invert_yaxis()
         plt.tight_layout()
-        temp_path = f"feature_importance_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/importance")
-            # 重要度のCSVも保存しておくとGeminiでの分析に役立ちます
-            csv_path = f"feature_importance_m{model_idx}.csv"
-            importance_df.to_csv(csv_path, index=False)
-            mlflow.log_artifact(csv_path, artifact_path="importance_data")
-            os.remove(csv_path)
-        os.remove(temp_path)       
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"feature_importance_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/importance")
+                # 重要度のCSVも保存しておくとGeminiでの分析に役立ちます
+                csv_path = os.path.join(tmpdir, f"feature_importance_m{model_idx}.csv")
+                importance_df.to_csv(csv_path, index=False)
+                mlflow.log_artifact(csv_path, artifact_path="importance_data")
 
     def _create_feature_importance_df(self, feature_names):
         """重要度をデータフレーム形式で作成して属性に保持する"""

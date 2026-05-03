@@ -1,5 +1,0 @@
-
-name: "str_peer_alpha"
-column: "target_str_peer_alpha"   # データセット内のどの列をターゲットにするか
-task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
-prediction_horizon: 60       # 何日先を予測するか（5日後など）

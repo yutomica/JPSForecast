@@ -1,0 +1,12 @@
+# [理論レイヤー] TAC Risk: 短期暴落（左テール）の防衛
+defaults:
+  - base
+
+alpha: 0.10  # 下位10%にフォーカス
+
+# 偽陽性を防ぐための強い正則化
+attention_dropout: 0.4
+ffn_dropout: 0.3
+residual_dropout: 0.3
+head_dropout: 0.3
+

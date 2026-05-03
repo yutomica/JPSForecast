@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import zarr
+import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import torch
@@ -102,6 +103,7 @@ class FTTransformerWrapper(BaseModelWrapper):
         self.attention_n_heads = int(params.pop("attention_n_heads", 8))
         self.attention_dropout = float(params.pop("attention_dropout", 0.2))
         self.ffn_d_hidden = params.pop("ffn_d_hidden", None)
+        self.ffn_multiplier = float(params.pop("ffn_multiplier", 4.0))
         self.ffn_dropout = float(params.pop("ffn_dropout", 0.1))
         self.residual_dropout = float(params.pop("residual_dropout", 0.0))
         self.activation = params.pop("activation", "gelu")
@@ -205,6 +207,7 @@ class FTTransformerWrapper(BaseModelWrapper):
             attention_n_heads=self.attention_n_heads,
             attention_dropout=self.attention_dropout,
             ffn_d_hidden=self.ffn_d_hidden,
+            ffn_multiplier=self.ffn_multiplier,
             ffn_dropout=self.ffn_dropout,
             residual_dropout=self.residual_dropout,
             activation=self.activation,
@@ -368,9 +371,9 @@ class FTTransformerWrapper(BaseModelWrapper):
 
         amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
         amp_enabled = (self.device.type in ["cuda", "mps"])
-        # GradScalerは主にCUDA専用のため、MPSの場合は無効化して通常のbackwardを使用します
-        use_scaler = (self.device.type == "cuda")
-        scaler = torch.amp.GradScaler("cuda", enabled=True) if use_scaler and hasattr(torch, "amp") else None
+        # MPS で float32 を使う場合は autocast を無効化する（警告回避と効率化のため）
+        if self.device.type == "mps":
+            amp_enabled = False 
 
         loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
 
@@ -392,7 +395,8 @@ class FTTransformerWrapper(BaseModelWrapper):
                     optimizer.zero_grad(set_to_none=True)
 
                     if amp_enabled:
-                        with torch.amp.autocast(device_type=amp_device, enabled=True):
+                        dtype = torch.float32 if amp_device == "mps" else torch.float16
+                        with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
                             logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
                             loss = self._compute_loss(logits, y, sw)
                         
@@ -434,8 +438,15 @@ class FTTransformerWrapper(BaseModelWrapper):
                         x_num = x_num.to(self.device)
                         x_cat = x_cat.to(self.device)
                         y = y.to(self.device)
-                        logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
-                        loss = self._compute_loss(logits, y, sample_weight=None)
+
+                        if amp_enabled:
+                            with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
+                                logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
+                                loss = self._compute_loss(logits, y, sample_weight=None)
+                        else:
+                            logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
+                            loss = self._compute_loss(logits, y, sample_weight=None)
+
                         valid_total += loss.detach() * y.shape[0]
                         valid_count += y.shape[0]
                         
@@ -444,8 +455,8 @@ class FTTransformerWrapper(BaseModelWrapper):
                                 preds = torch.sigmoid(logits.view(-1))
                             else:
                                 preds = logits.view(-1)
-                            all_preds.append(preds.cpu().numpy())
-                            all_targets.append(y.cpu().numpy())
+                            all_preds.append(preds.float().cpu().numpy())
+                            all_targets.append(y.float().cpu().numpy())
                             
                 valid_loss = float(valid_total.item()) / max(valid_count, 1)
                 
@@ -554,14 +565,14 @@ class FTTransformerWrapper(BaseModelWrapper):
         plt.legend()
         plt.grid(True)
 
-        temp_path = f"ft_transformer_learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"ft_transformer_learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
 
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-
-        os.remove(temp_path)
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
 
     def _create_feature_importance_df(self):
         if self.model is None:
@@ -597,16 +608,28 @@ class FTTransformerWrapper(BaseModelWrapper):
         outputs = []
         self.model.eval()
 
+        amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
+        amp_enabled = (self.device.type in ["cuda", "mps"])
+        if self.device.type == "mps":
+            amp_enabled = False
+        dtype = torch.float32 if amp_device == "mps" else torch.float16
+
         with torch.no_grad():
             for x_num, x_cat, _, _ in tqdm(loader, desc="Predicting", leave=False):
                 x_num = x_num.to(self.device)
                 x_cat = x_cat.to(self.device)
-                logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
+
+                if amp_enabled:
+                    with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
+                        logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
+                else:
+                    logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
+
                 if self.task_type == "classification":
                     preds = torch.sigmoid(logits.view(-1))
                 else:
                     preds = logits.view(-1)
-                outputs.append(preds.detach().cpu().numpy())
+                outputs.append(preds.float().detach().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).flatten()
 
@@ -632,6 +655,7 @@ class FTTransformerWrapper(BaseModelWrapper):
                 attention_n_heads=self.attention_n_heads,
                 attention_dropout=self.attention_dropout,
                 ffn_d_hidden=self.ffn_d_hidden,
+                ffn_multiplier=self.ffn_multiplier,
                 ffn_dropout=self.ffn_dropout,
                 residual_dropout=self.residual_dropout,
                 activation=self.activation,

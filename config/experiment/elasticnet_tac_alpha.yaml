@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /hparams/elasticnet/tac_alpha@hparams
+  - /hparams/anchor@hparams: elasticnet_tac_alpha
+
+preprocess:
+  target_stratified_sampling:
+    enabled: true
+    mode: mode_3
+    weight_dict: {tail: 4.0, center: 0.1, other: 1.0}
+  sampling:
+    enabled: false

@@ -1,0 +1,20 @@
+# Generated from Optuna study: Final_Sweep_lgbm_str_sharpe_adj_20260426_200138
+# Best value (Objective): 128.00754623861184
+# Trial number: 41
+learning_rate: 0.005
+feature_fraction: 0.994269621616413
+bagging_fraction: 0.8
+lambda_l1: 16.644947836674262
+lambda_l2: 4.479940230449325
+seed: 42
+num_boost_round: 10000
+is_unbalance: true
+use_time_decay: false
+time_decay_rate: 0.9999
+bagging_freq: 6
+patience: 150
+verbose: -1
+fair_c: 13.198955832636408
+num_leaves: 7
+max_depth: 3
+min_child_samples: 4000

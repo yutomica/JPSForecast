@@ -1,0 +1,25 @@
+# @package _global_
+# Step 4: TAC Alpha 最終HPO (Bayesian Optimization)
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+      multivariate: true
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 50
+    params:
+      # Step 2で見つけた「岩盤」パラメータで上書き
+      /hparams/anchor: ft_transformer_tac_alpha
+      
+      # 探索対象: 連続値および損失関数の形状
+      hparams.lr: tag(log, interval(1e-5, 5e-4))
+      hparams.weight_decay: tag(log, interval(1e-6, 1e-3))
+      hparams.asym_alpha: interval(2.5, 4.0)
+      hparams.attention_dropout: interval(0.1, 0.4)
+      hparams.ffn_dropout: interval(0.1, 0.4)
+      hparams.residual_dropout: interval(0.0, 0.3)

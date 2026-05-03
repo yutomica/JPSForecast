@@ -1,0 +1,16 @@
+name: "str_mdd"
+column: "target_str_mdd"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+
+# コスト関数
+objective: "tweedie"
+
+# 監視指標
+early_stopping_metric: src.models.custom_metrics.calc_pr_auc_30pt
+metric_direction: maximize
+
+# 評価関数
+eval_metric: "AP_severe_STR"
+
+# 最適化指標
+optimization_metric: "worst_fold_AP_severe_STR"

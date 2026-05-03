@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /hparams/tcn/tac_alpha@hparams
+  - /hparams/anchor@hparams: tcn_tac_alpha
+
+preprocess:
+  target_stratified_sampling:
+    enabled: true
+    mode: mode_2
+    center_keep_ratio: 0.2
+    other_keep_ratio: 0.5

@@ -1,0 +1,17 @@
+# @package _global_
+# Step 2: TAC Risk (TCN) ラフチューニング
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 36
+    params:
+      ++hparams.num_channel: choice(4, 8, 16)
+      ++hparams.n_layers: choice(2, 3)
+      ++hparams.kernel_size: choice(3, 5)
+      ++hparams.window_size: choice(10, 20, 40)

@@ -1,0 +1,9 @@
+# [理論レイヤー] STR Risk (ElasticNet): 60日ドローダウン
+defaults:
+  - base
+
+loss: "tweedie"
+tweedie_variance_power: 1.5
+
+l1_ratio: 0.1
+alpha: 1.0

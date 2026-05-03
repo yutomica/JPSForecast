@@ -1,36 +1,44 @@
 # config/main.yaml
 defaults:
   - domain: tac
-  - target: tac_vol_scaled_asym_return
+  - target: tac_alpha
   - data: sample
   - features: all
   - model: lgbm
-  - hparams: lgbm_default
   - period: tac_standard
   - cv: fixed
   - sweep: null
   - mode: null 
   - _self_
 
-
+# [共通基盤] 全モデルが構造として共有するパラメータのプレースホルダ
+# 実行時に各モデルの base.yaml や理論レイヤーによって上書きされる
 hparams:
   num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.0001
+  batch_size: 512
+  max_epochs: 150
+  patience: 30
+  use_time_decay: true
+  time_decay_rate: 0.9999
+  device_name: "mps"
+  random_state: 42
 
-
-# mode (str): 動作モード。
-#  - 'mode_1': Tailは100%保持、Centerをサンプリング、Otherは100%保持。
-#  - 'mode_2': Tailは100%保持、CenterとOtherをそれぞれ指定したレートでサンプリング。
-#  - 'mode_3': サンプリングせず、'sample_weight'列を付与する。
+# ターゲット層化サンプリングのデフォルト設定
 preprocess:
   sampling:
     enabled: false
     interval: 5
   target_stratified_sampling:
-    enabled: true              # 適用する場合は true
+    enabled: true
     mode: mode_1
-    center_keep_ratio: 0.25    # センター部分の保持割合
+    center_keep_ratio: 0.25
 
-# MLflow設定（全実験共通）
+# MLflow設定
 mlflow:
   tracking_uri: "sqlite:////Users/yuu/Projects/JPSForecast/mlflow.db"
   experiment_name: "test"
+
+# 実験バリアント識別子
+variant: "default"

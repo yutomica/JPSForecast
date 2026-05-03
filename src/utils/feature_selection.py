@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import shap
 from tqdm.auto import tqdm
-from src.utils.evaluation import evaluate_metrics
+from src.evaluation.metrics import evaluate_metrics
 
 def calculate_shap(model, X_valid):
     """

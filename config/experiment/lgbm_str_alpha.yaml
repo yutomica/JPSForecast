@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /hparams/lgbm/str_alpha@hparams
+  - /hparams/anchor@hparams: lgbm_str_alpha
+
+
+preprocess:
+  target_stratified_sampling:
+    enabled: true
+    mode: mode_3
+    weight_dict: {tail: 1.5, center: 0.5, other: 1.0}
+  sampling:
+    enabled: true
+    interval: 11

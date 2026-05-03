@@ -370,10 +370,12 @@ class GANDALFWrapper(BaseModelWrapper):
 
         return float(total_loss.item()) / max(float(total_weight.item()), 1e-8)
 
-    def _evaluate_loss(self, valid_loader) -> float:
+    def _evaluate(self, valid_loader):
         self.model.eval()
         total_loss = torch.tensor(0.0, device=self.device)
         total_count = 0
+        all_preds = []
+        all_targets = []
 
         with torch.no_grad():
             for xb, yb, _ in valid_loader:
@@ -383,8 +385,41 @@ class GANDALFWrapper(BaseModelWrapper):
                 loss_vec = self._loss_vector(out, yb)
                 total_loss += loss_vec.sum().detach()
                 total_count += int(loss_vec.numel())
+                
+                if self.early_stopping_metric != "loss":
+                    if self.is_binary_classification:
+                        preds = torch.sigmoid(out)
+                    else:
+                        preds = out
+                    all_preds.append(preds.cpu().numpy())
+                    all_targets.append(yb.cpu().numpy())
 
-        return float(total_loss.item()) / max(total_count, 1)
+        valid_loss = float(total_loss.item()) / max(total_count, 1)
+        
+        if self.early_stopping_metric == "ic":
+            from scipy.stats import spearmanr
+            preds_np = np.concatenate(all_preds)
+            targets_np = np.concatenate(all_targets)
+            if len(preds_np) < 2 or np.max(preds_np) == np.min(preds_np) or np.max(targets_np) == np.min(targets_np):
+                val_metric = 0.0
+            else:
+                val_metric, _ = spearmanr(targets_np, preds_np)
+                if np.isnan(val_metric):
+                    val_metric = 0.0
+        elif self.early_stopping_metric != "loss":
+            preds_np = np.concatenate(all_preds)
+            targets_np = np.concatenate(all_targets)
+            try:
+                from hydra.utils import get_method
+                metric_func = get_method(self.early_stopping_metric)
+                val_metric = metric_func(targets_np, preds_np)
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
+                val_metric = valid_loss
+        else:
+            val_metric = valid_loss
+            
+        return valid_loss, val_metric
 
     def _loss_vector(self, out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if self.is_binary_classification:
@@ -477,14 +512,14 @@ class GANDALFWrapper(BaseModelWrapper):
         plt.legend()
         plt.grid(True)
 
-        temp_path = f"gandalf_learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"gandalf_learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
 
-        if mlflow is not None and mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+            if mlflow is not None and mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
 
     def _log_feature_importance(self, model_idx):
         if self.feature_importances_ is None or self.feature_importances_.empty:
@@ -501,20 +536,17 @@ class GANDALFWrapper(BaseModelWrapper):
         plt.gca().invert_yaxis()
         plt.tight_layout()
 
-        temp_path = f"gandalf_feature_importance_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"gandalf_feature_importance_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
 
-        if mlflow is not None and mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/importance")
-            csv_path = f"gandalf_feature_importance_m{model_idx}.csv"
-            importance_df.to_csv(csv_path, index=False)
-            mlflow.log_artifact(csv_path, artifact_path="importance_data")
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+            if mlflow is not None and mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/importance")
+                csv_path = os.path.join(tmpdir, f"gandalf_feature_importance_m{model_idx}.csv")
+                importance_df.to_csv(csv_path, index=False)
+                mlflow.log_artifact(csv_path, artifact_path="importance_data")
 
     def _set_seed(self, seed: int):
         random.seed(seed)
@@ -526,21 +558,3 @@ class GANDALFWrapper(BaseModelWrapper):
             torch.backends.cudnn.benchmark = False
             import os
             os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
-    # def __getstate__(self):
-    #     state = self.__dict__.copy()
-    #     model = state.get("model")
-    #     if model is not None:
-    #         state["_serialized_model_state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-    #         state["model"] = None
-    #     return state
-
-    # def __setstate__(self, state):
-    #     serialized = state.pop("_serialized_model_state", None)
-    #     self.__dict__.update(state)
-    #     self.device = torch.device("cpu")
-    #     if serialized is not None and self.model_init_kwargs is not None:
-    #         self.model = GANDALFNet(**self.model_init_kwargs)
-    #         self.model.load_state_dict(serialized)
-    #         self.model.to(self.device)
-    #         self.model.eval()

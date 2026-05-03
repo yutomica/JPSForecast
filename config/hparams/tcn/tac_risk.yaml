@@ -1,0 +1,8 @@
+# [理論レイヤー] TAC Risk (TCN): 5日先の暴落防衛
+defaults:
+  - base
+
+alpha: 0.10
+
+# 誤報を防ぐための強めの正則化
+dropout: 0.25

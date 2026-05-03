@@ -1,3 +1,0 @@
-name: "str_mdd"
-column: "target_str_mdd"   # データセット内のどの列をターゲットにするか
-task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か

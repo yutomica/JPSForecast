@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /hparams/ft_transformer/str_alpha@hparams
+  - /hparams/anchor@hparams: ft_transformer_str_alpha
+
+preprocess:
+  target_stratified_sampling:
+    enabled: false
+  sampling:
+    enabled: true
+    interval: 11

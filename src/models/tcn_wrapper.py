@@ -154,7 +154,7 @@ class TCNWrapper(BaseModelWrapper):
         self.feature_importances_ = None
         self.best_epoch_ = None
         self.input_dim_ = None
-        self.seq_len_ = None
+        self.window_size_ = None
 
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
@@ -163,7 +163,7 @@ class TCNWrapper(BaseModelWrapper):
         if len(shape) != 3:
             raise ValueError(f"TCNWrapper expects 3D shape [N, T, F], but got {shape}")
 
-        self.seq_len_ = int(shape[1])
+        self.window_size_ = int(shape[1])
         self.input_dim_ = int(shape[2])
         self.model = TCN(
             input_dim=self.input_dim_,
@@ -264,7 +264,7 @@ class TCNWrapper(BaseModelWrapper):
         print(f"\n--- TCN Model Summary (Fold {model_idx}) ---")
         print(f"Total Parameters:     {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
-        print(f"Input Shape:          [N, {self.seq_len_}, {self.input_dim_}]")
+        print(f"Input Shape:          [N, {self.window_size_}, {self.input_dim_}]")
         print(f"Channels:             {self.num_channels}")
         print("-" * 40)
 
@@ -368,7 +368,10 @@ class TCNWrapper(BaseModelWrapper):
                     optimizer.zero_grad(set_to_none=True)
 
                     if amp_enabled:
-                        with torch.amp.autocast(device_type=amp_device, enabled=True):
+                        # 金融データの広いダイナミックレンジを維持しつつ高速化するため、bfloat16 を明示的に指定
+                        # M5チップの性能を最大限に引き出す
+                        dtype = torch.bfloat16 if amp_device == "mps" else torch.float16
+                        with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
                             logits = self.model(x)
                             loss = self._compute_loss(logits, y, sw)
                         
@@ -413,10 +416,17 @@ class TCNWrapper(BaseModelWrapper):
                 all_targets = []
                 with torch.no_grad():
                     for x, y, sw in valid_loader:
-                        x = x.to(self.device, non_blocking=(self.device.type == "cuda")).float()
+                        x = x.to(self.device, non_blocking=(self.device.type == "cuda"))
                         y = y.to(self.device, non_blocking=(self.device.type == "cuda"))
-                        logits = self.model(x)
-                        loss = self._compute_loss(logits, y, sample_weight=None)
+                        
+                        if amp_enabled:
+                            with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
+                                logits = self.model(x)
+                                loss = self._compute_loss(logits, y, sample_weight=None)
+                        else:
+                            logits = self.model(x.float())
+                            loss = self._compute_loss(logits, y, sample_weight=None)
+                            
                         valid_total += loss.detach() * x.shape[0]
                         valid_count += x.shape[0]
                         
@@ -425,8 +435,8 @@ class TCNWrapper(BaseModelWrapper):
                                 preds = torch.sigmoid(logits.view(-1))
                             else:
                                 preds = logits.view(-1)
-                            all_preds.append(preds.cpu().numpy())
-                            all_targets.append(y.cpu().numpy())
+                            all_preds.append(preds.float().cpu().numpy())
+                            all_targets.append(y.float().cpu().numpy())
                             
                 valid_loss = float(valid_total.item()) / max(valid_count, 1)
                 
@@ -533,14 +543,14 @@ class TCNWrapper(BaseModelWrapper):
         plt.legend()
         plt.grid(True)
 
-        temp_path = f"tcn_learning_curve_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"tcn_learning_curve_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
 
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
-
-        os.remove(temp_path)
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/learning_curves")
 
     def _create_feature_importance_df(self):
         if self.model is None:
@@ -568,15 +578,25 @@ class TCNWrapper(BaseModelWrapper):
         outputs = []
         self.model.eval()
 
+        amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
+        amp_enabled = (self.device.type in ["cuda", "mps"])
+        dtype = torch.bfloat16 if amp_device == "mps" else torch.float16
+
         with torch.no_grad():
             for x, _, _ in tqdm(loader, desc="Predicting", leave=False):
-                x = x.to(self.device, non_blocking=(self.device.type == "cuda")).float()
-                logits = self.model(x)
+                x = x.to(self.device, non_blocking=(self.device.type == "cuda"))
+                
+                if amp_enabled:
+                    with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
+                        logits = self.model(x)
+                else:
+                    logits = self.model(x.float())
+
                 if self.task_type == "classification":
                     preds = torch.sigmoid(logits.view(-1))
                 else:
                     preds = logits.view(-1)
-                outputs.append(preds.detach().cpu().numpy())
+                outputs.append(preds.float().detach().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).flatten()
 
