@@ -13,7 +13,6 @@ from sklearn.linear_model import (
     SGDClassifier,
     QuantileRegressor,
     SGDRegressor,
-    TweedieRegressor,
 )
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import mean_squared_error, log_loss
@@ -140,6 +139,7 @@ class ElasticNetWrapper(BaseModelWrapper):
         self.feature_importances_ = None
         self.early_stopping_metric = self.params.get("early_stopping_metric", "loss")
         self.metric_direction = self.params.get("metric_direction", "maximize" if self.params.get("early_stopping_metric", "loss") != "loss" else "minimize")
+        self.target_transform = self.params.get("target_transform", None)
 
     def _get_loss_type(self):
         return self.params.get("loss", self.params.get("objective", "squared_error"))
@@ -190,18 +190,6 @@ class ElasticNetWrapper(BaseModelWrapper):
                     warm_start=self.params.get("warm_start", False),
                 )
 
-            if loss == "tweedie":
-                return TweedieRegressor(
-                    power=self.params.get("tweedie_variance_power", 1.5),
-                    alpha=self.params.get("alpha", 1.0),
-                    l1_ratio=self.params.get("l1_ratio", 0.5),
-                    fit_intercept=self.params.get("fit_intercept", True),
-                    max_iter=self.params.get("max_iter", 1000),
-                    tol=self.params.get("tol", 1e-4),
-                    link=self.params.get("link", "auto"),
-                    warm_start=self.params.get("warm_start", False),
-                )
-
             if loss in ["squared_error", "mse"]:
                 return ElasticNet(
                     alpha=self.params.get("alpha", 1.0),
@@ -245,6 +233,16 @@ class ElasticNetWrapper(BaseModelWrapper):
             return X
         return pd.DataFrame(X)
 
+    def _transform_target(self, y):
+        if self.target_transform == "log1p" and self.task_type == "regression":
+            return np.log1p(np.maximum(y, 0.0))
+        return y
+
+    def _inverse_transform_target(self, y):
+        if self.target_transform == "log1p" and self.task_type == "regression":
+            return np.expm1(y)
+        return y
+
     def _compute_loss(self, preds, y, sample_weight=None):
         if self.task_type == "classification":
             return log_loss(y, preds, sample_weight=sample_weight)
@@ -264,11 +262,6 @@ class ElasticNetWrapper(BaseModelWrapper):
             beta = self.params.get("fair_c", self.params.get("huber_beta", 1.35 if loss_type == "fair" else 1.0))
             diff = np.abs(y - preds)
             loss_each = np.where(diff < beta, 0.5 * (diff ** 2), beta * (diff - 0.5 * beta))
-        elif loss_type == "tweedie":
-            p = self.params.get("tweedie_variance_power", 1.5)
-            mu = np.maximum(preds, 1e-6)
-            y_safe = np.maximum(y, 0.0)
-            loss_each = (mu ** (2.0 - p)) / (2.0 - p) - y_safe * (mu ** (1.0 - p)) / (1.0 - p)
         else: # squared_error, mse
             loss_each = (y - preds) ** 2
             
@@ -296,7 +289,15 @@ class ElasticNetWrapper(BaseModelWrapper):
         X_train_df = self._ensure_dataframe(X_train)
         X_train_df = X_train_df.loc[train_mask].copy()
         X_train_arr, X_train_df = self._to_model_array(X_train_df)
+        
+        # ターゲットの抽出と変換
         y_train = np.asarray(y_train)[train_mask]
+        y_train = self._transform_target(y_train)
+
+        y_valid_orig = None
+        if y_valid is not None:
+            y_valid_orig = np.asarray(y_valid).copy()
+            y_valid = self._transform_target(y_valid)
 
         if sample_weight is not None:
             sample_weight = sample_weight[train_mask]
@@ -310,6 +311,9 @@ class ElasticNetWrapper(BaseModelWrapper):
         if use_manual_loop:
             self.params["warm_start"] = True
             self.params["max_iter"] = 1
+            X_valid_arr = None
+            if X_valid is not None:
+                X_valid_arr, _ = self._to_model_array(X_valid)
 
         self.model = self._build_model()
 
@@ -327,7 +331,7 @@ class ElasticNetWrapper(BaseModelWrapper):
         if sample_weight is not None:
             fit_kwargs["sample_weight"] = sample_weight
             
-        loss_name = self.params.get("loss", "squared_error") if self.task_type == "regression" else "log_loss"
+        loss_name = self._get_loss_type() if self.task_type == "regression" else "log_loss"
 
         if use_manual_loop:
             best_valid_metric = float("inf") if self.metric_direction == "minimize" else -float("inf")
@@ -351,22 +355,24 @@ class ElasticNetWrapper(BaseModelWrapper):
                 for epoch in range(1, total_epochs + 1):
                     self.model.fit(X_train_arr, y_train, **fit_kwargs)
                     
-                    train_preds = self.predict(X_train_df)
-                    train_loss = self._compute_loss(train_preds, y_train, sample_weight=sample_weight)
+                    # Loss計算は transformed space で行うため self.model.predict を使用
+                    train_preds_raw = self.model.predict(X_train_arr)
+                    train_loss = self._compute_loss(train_preds_raw, y_train, sample_weight=sample_weight)
                         
                     valid_loss = None
                     val_metric = None
                     if X_valid is not None and y_valid is not None:
-                        valid_preds = self.predict(X_valid)
-                        valid_loss = self._compute_loss(valid_preds, y_valid)
+                        valid_preds_raw = self.model.predict(X_valid_arr)
+                        valid_loss = self._compute_loss(valid_preds_raw, y_valid)
                         
                         if metric_func is not None:
                             try:
-                                # try passing dates if available
+                                # Metric計算（PR_AUC等）は original scale で行う
+                                valid_preds_orig = self._inverse_transform_target(valid_preds_raw)
                                 if valid_dates is not None:
-                                    val_metric = metric_func(y_valid, valid_preds, dates=valid_dates)
+                                    val_metric = metric_func(y_valid_orig, valid_preds_orig, dates=valid_dates)
                                 else:
-                                    val_metric = metric_func(y_valid, valid_preds)
+                                    val_metric = metric_func(y_valid_orig, valid_preds_orig)
                             except Exception as e:
                                 print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
                                 val_metric = valid_loss
@@ -392,7 +398,8 @@ class ElasticNetWrapper(BaseModelWrapper):
                     log_epoch_metrics(model_idx, epoch, metrics_to_log)
                     
                     if epoch_callback is not None and X_valid is not None:
-                        execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
+                        # Pruningは transformed space での予測値を使用 (y_valid も transformed)
+                        execute_epoch_pruning(epoch_callback, epoch, valid_preds_raw, y_valid)
                         
                     if val_metric is not None:
                         is_better = (val_metric < best_valid_metric) if self.metric_direction == "minimize" else (val_metric > best_valid_metric)
@@ -516,4 +523,5 @@ class ElasticNetWrapper(BaseModelWrapper):
                 return np.asarray(score).astype(float).ravel()
 
         preds = self.model.predict(Xv)
+        preds = self._inverse_transform_target(preds)
         return np.asarray(preds).astype(float).ravel()

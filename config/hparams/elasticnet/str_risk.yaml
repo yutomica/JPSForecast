@@ -2,8 +2,8 @@
 defaults:
   - base
 
-loss: "tweedie"
-tweedie_variance_power: 1.5
+loss: "mse"
+target_transform: "log1p"
 
 l1_ratio: 0.1
 alpha: 1.0

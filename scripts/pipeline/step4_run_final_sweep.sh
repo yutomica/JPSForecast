@@ -108,13 +108,13 @@ run_final_sweep() {
 # run_final_sweep "str" "lgbm" "risk"  "8" "0"
 # run_final_sweep "tac" "elasticnet" "alpha" "10" "0"
 # run_final_sweep "tac" "elasticnet" "risk" "10" "0"
-run_final_sweep "str" "elasticnet" "alpha" "5" "0"
+# run_final_sweep "str" "elasticnet" "alpha" "10" "0"
 # run_final_sweep "str" "elasticnet" "risk" "10" "0"
 
 
 # run_final_sweep "tac" "tcn" "alpha" "8" "1"
-# run_final_sweep "tac" "tcn" "risk" "8" "1"
+run_final_sweep "tac" "tcn" "risk" "4" "1"
 
-
-
+run_final_sweep "tac" "ft_transformer" "alpha" "2" "1"
+run_final_sweep "tac" "ft_transformer" "risk" "2" "1"
 # run_final_sweep "tac" "ft_transformer" "alpha" "2" "1"

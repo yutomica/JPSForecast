@@ -17,9 +17,9 @@ hydra:
       /hparams/anchor: ft_transformer_tac_alpha
       
       # 探索対象: 連続値および損失関数の形状
-      hparams.lr: tag(log, interval(1e-4, 1e-3))
-      hparams.weight_decay: tag(log, interval(1e-6, 1e-3))
-      hparams.asym_alpha: interval(3.0, 7.0)
+      hparams.lr: tag(log, interval(5e-5, 5e-4))
+      hparams.weight_decay: tag(log, interval(1e-7, 1e-3))
+      hparams.alpha: interval(0.08, 0.16)
       hparams.attention_dropout: interval(0.1, 0.4)
-      hparams.ffn_dropout: interval(0.1, 0.5)
+      hparams.ffn_dropout: interval(0.2, 0.6)
       hparams.residual_dropout: interval(0.0, 0.3)
