@@ -4,16 +4,59 @@ import shap
 from tqdm.auto import tqdm
 from src.evaluation.metrics import evaluate_metrics
 
+def _ensure_float32_ndarray(X):
+    """
+    あらゆる入力形式（Zarrパス, DataFrame, PyArrow Buffer, ndarray等）を
+    float32型のdenseなnumpy配列に変換するヘルパー関数。
+    """
+    X_out = None
+    
+    # 1. Zarrパス (str) の場合
+    if isinstance(X, str) and X.endswith('.zarr'):
+        import zarr
+        X_out = zarr.open(X, mode='r')[:]
+    # 2. DataFrameの場合
+    elif isinstance(X, pd.DataFrame):
+        X_out = X.values
+    # 3. PyArrow Table等 (to_pandasを持つ) の場合
+    elif hasattr(X, "to_pandas"):
+        X_out = X.to_pandas().values
+    # 4. PyArrow Buffer等、特殊なバッファ形式の場合
+    elif type(X).__name__ == "Buffer":
+        import pyarrow as pa
+        import pyarrow.ipc
+        try:
+            with pa.ipc.open_stream(X) as reader:
+                X_out = reader.read_all().to_pandas().values
+        except Exception:
+            try:
+                with pa.ipc.open_file(X) as reader:
+                    X_out = reader.read_all().to_pandas().values
+            except Exception as e:
+                raise TypeError(f"Failed to read pyarrow Buffer: {e}")
+    # 5. すでにndarray等の場合
+    else:
+        X_out = X
+
+    # 最終的に float32 型の連続したメモリ領域を確保する
+    if hasattr(X_out, "astype"):
+        return np.ascontiguousarray(X_out.astype(np.float32))
+    
+    return np.ascontiguousarray(np.array(X_out, dtype=np.float32))
+
 def calculate_shap(model, X_valid):
     """
     Validデータを用いてSHAP値を計算し、特徴量ごとの平均絶対SHAP値を返す
     """
+    # 堅牢な型変換を実行
+    X_input = _ensure_float32_ndarray(X_valid)
+
     if "ElasticNet" in type(model).__name__:
-        explainer = shap.LinearExplainer(model.model, X_valid)
+        explainer = shap.LinearExplainer(model.model, X_input)
     else:
         explainer = shap.TreeExplainer(model.model)
-        
-    shap_values = explainer.shap_values(X_valid)
+
+    shap_values = explainer.shap_values(X_input)
     # 回帰の場合、shap_valuesはndarray。クラス分類の場合はリストの可能性あり
     if isinstance(shap_values, list):
         shap_values = shap_values[1] # バイナリ分類のPositiveクラスなどを想定
@@ -25,6 +68,9 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
     各特徴量を順番にシャッフルして精度低下を測定する(MDA)
     """
     fold_mda = {}
+    
+    # 型変換とデータのコピーを作成
+    X_mat = _ensure_float32_ndarray(X_valid).copy()
     
     # 実行環境（Apple Silicon等）での高速化のため、
     # 日付グループごとのシャッフルインデックスを事前にn_repeats回分計算してキャッシュする
@@ -39,54 +85,6 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
         shuffled_indices = np.empty_like(date_ids)
         shuffled_indices[group_order] = order
         shuffled_indices_list.append(shuffled_indices)
-
-    # --- X_validをシャッフル可能な形式 (DataFrame or ndarray) に変換 ---
-    # preprocessorがZarrキャッシュのパス(str)を返す場合も考慮
-    X_shufflable = None
-    is_df = False
-
-    # Zarrパスの場合は読み込んでndarrayにする
-    if isinstance(X_valid, str) and X_valid.endswith('.zarr'):
-        import zarr
-        print("  [MDA] Loading data from Zarr cache for permutation...")
-        X_shufflable = zarr.open(X_valid, mode='r')[:]
-    else:
-        X_shufflable = X_valid
-
-    if isinstance(X_shufflable, pd.DataFrame):
-        X_base = X_shufflable
-        is_df = True
-    elif isinstance(X_shufflable, np.ndarray):
-        X_base = X_shufflable
-    elif hasattr(X_shufflable, "to_pandas"): # PyArrow Tableなど
-        X_base = X_shufflable.to_pandas()
-        is_df = True
-    elif type(X_shufflable).__name__ == "Buffer":
-        import pyarrow as pa
-        import pyarrow.ipc
-        try:
-            with pa.ipc.open_stream(X_shufflable) as reader:
-                X_base = reader.read_all().to_pandas()
-            is_df = True
-        except Exception as e:
-            try:
-                with pa.ipc.open_file(X_shufflable) as reader:
-                    X_base = reader.read_all().to_pandas()
-                is_df = True
-            except Exception as e2:
-                raise TypeError(f"Failed to read pyarrow Buffer: stream err: {e}, file err: {e2}")
-    else:
-        # Bufferなどの複雑な形式の処理は、呼び出し元で対応するか、この関数をさらに拡張する必要がある
-        # 現状の複雑なロジックは可読性と保守性を損なうため、よりシンプルなデータフローを推奨
-        raise TypeError(f"Unsupported data type for X_valid in calculate_mda: {type(X_shufflable)}")
-    
-    # DataFrameの巨大なコピーを避けるため、Numpy配列化してインプレースで書き換える
-    if is_df:
-        X_mat = X_base.values.copy()
-        df_columns = X_base.columns
-        df_index = X_base.index
-    else:
-        X_mat = X_base.copy()
 
     for col_idx, col_name in enumerate(tqdm(feature_cols, desc="Calculating MDA")):
         # --- 対象列の元の値を退避 ---
@@ -105,22 +103,7 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
                 X_mat[:, col_idx] = orig_col_data[shuffled_indices]
                         
             # シャッフル後のデータで予測
-            if is_df:
-                X_pred_input = pd.DataFrame(X_mat, index=df_index, columns=df_columns)
-                X_pred_input = X_pred_input.astype(X_base.dtypes)
-            else:
-                X_pred_input = X_mat
-
-            if type(X_shufflable).__name__ == "Buffer":
-                import pyarrow as pa
-                import pyarrow.ipc
-                sink = pa.BufferOutputStream()
-                table_permuted = pa.Table.from_pandas(X_pred_input)
-                with pa.ipc.new_stream(sink, table_permuted.schema) as writer:
-                    writer.write_table(table_permuted)
-                X_pred_input = sink.getvalue()
-                
-            p_permuted = model.predict(X_pred_input)
+            p_permuted = model.predict(X_mat)
             m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=task_type, target_col=target_col, dates=dates_for_shuffle)
             permuted_score = m_permuted.get(opt_metric, np.nan)
             scores.append(permuted_score)

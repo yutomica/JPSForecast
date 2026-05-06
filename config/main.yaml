@@ -1,5 +1,6 @@
 # config/main.yaml
 defaults:
+  - _self_
   - domain: tac
   - target: tac_alpha
   - data: sample
@@ -8,8 +9,8 @@ defaults:
   - period: tac_standard
   - cv: fixed
   - sweep: null
-  - mode: null 
-  - _self_
+  - mode: null
+  - experiment: lgbm_tac_alpha
 
 # [共通基盤] 全モデルが構造として共有するパラメータのプレースホルダ
 # 実行時に各モデルの base.yaml や理論レイヤーによって上書きされる
@@ -31,9 +32,12 @@ preprocess:
     enabled: false
     interval: 5
   target_stratified_sampling:
-    enabled: true
+    enabled: false
     mode: mode_1
     center_keep_ratio: 0.25
+  matrix_weight:
+    enabled: false
+    cost_buffer: 0.005
 
 # MLflow設定
 mlflow:

@@ -7,7 +7,7 @@ lambda_l2: 1.0
 seed: 42
 
 # 学習プロトコル
-num_boost_round: 10000
+num_boost_round: 1000
 is_unbalance: true
 use_time_decay: false
 time_decay_rate: 0.9999

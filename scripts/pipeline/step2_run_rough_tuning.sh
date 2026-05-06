@@ -76,7 +76,7 @@ run_sweep() {
         model=${model} \
         period=${domain}_standard \
         features=${features} \
-        +experiment=${model}_${target} \
+        experiment=${model}_${target} \
         sweep=${sweep} \
         cv=cpcv \
         mlflow.experiment_name="${exp_name}" \
@@ -94,13 +94,15 @@ run_sweep() {
 # run_sweep "tac" "lgbm" "risk"  "8" "0"
 # run_sweep "str" "lgbm" "alpha" "8" "0"
 # run_sweep "str" "lgbm" "risk"  "8" "0"
+run_sweep "tac" "lgbm" "alpha_gr" "9" "0" 
+
 
 # run_sweep "tac" "tcn" "alpha" "8" "1"
 # run_sweep "tac" "tcn" "risk" "8" "1"
-run_sweep "str" "tcn" "alpha"  "4" "1"
-run_sweep "str" "tcn" "risk"  "4" "1"
+# run_sweep "str" "tcn" "alpha"  "4" "1"
+# run_sweep "str" "tcn" "risk"  "4" "1"
 
 # run_sweep "tac" "ft_transformer" "alpha" "2" "1"
 # run_sweep "tac" "ft_transformer" "risk" "6" "1"
-run_sweep "str" "ft_transformer" "alpha" "2" "1"
-run_sweep "str" "ft_transformer" "risk" "2" "1"
+# run_sweep "str" "ft_transformer" "alpha" "2" "1"
+# run_sweep "str" "ft_transformer" "risk" "2" "1"

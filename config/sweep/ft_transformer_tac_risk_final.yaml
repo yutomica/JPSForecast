@@ -9,14 +9,11 @@ hydra:
       _target_: optuna.samplers.TPESampler
       seed: 42
       multivariate: true
+      n_startup_trials: 10
     storage: "sqlite:///optuna.db"
     direction: maximize
-    n_trials: 50
+    n_trials: 30
     params:
-      # Step 2で見つけた「岩盤」パラメータで上書き
-      /hparams/anchor: ft_transformer_tac_alpha
-      
-      # 探索対象: 連続値および損失関数の形状
       hparams.lr: tag(log, interval(5e-5, 5e-4))
       hparams.weight_decay: tag(log, interval(1e-7, 1e-3))
       hparams.alpha: interval(0.08, 0.16)

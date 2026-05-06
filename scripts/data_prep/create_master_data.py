@@ -56,6 +56,7 @@ def main(mode = "full"):
         pipe = (
             engineer
             .apply_bulk_cross_sectional()
+            .apply_crosssectional_targets()
         )
         sample_df = pipe.get_df()
         feature_cols = [x for x in sample_df.columns if x.startswith(('MOM_', 'VOL_', 'LIQ_', 'VAL_', 'QLT_', 'SIZ_', 'SPD_', 'BET_', 'SEA_', 'EVT_', 'CON_', 'GOV_'))]
@@ -111,7 +112,7 @@ def main(mode = "full"):
     with mlflow.start_run(run_name="Create_Master_Data"):
         for f in chunk_files:
             print(f"Processing chunk: {os.path.basename(f)}")
-            df = pd.read_parquet(f)
+            df = pd.read_parquet(f).reset_index(drop=True)
             # 銘柄フィルタリング (サンプルモードの場合)
             if mode == "sample":
                 df = df[df['scode'].isin(selected_scodes)].reset_index(drop=True)
@@ -140,6 +141,7 @@ def main(mode = "full"):
             pipe = (
                 engineer
                 .apply_bulk_cross_sectional()
+                .apply_crosssectional_targets()
             )
             df = pipe.get_df()
             del calc_df, engineer

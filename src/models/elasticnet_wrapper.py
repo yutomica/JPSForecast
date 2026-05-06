@@ -236,11 +236,15 @@ class ElasticNetWrapper(BaseModelWrapper):
     def _transform_target(self, y):
         if self.target_transform == "log1p" and self.task_type == "regression":
             return np.log1p(np.maximum(y, 0.0))
+        if self.target_transform == "positive_drawdown" and self.task_type == "regression":
+            return -y
         return y
 
     def _inverse_transform_target(self, y):
         if self.target_transform == "log1p" and self.task_type == "regression":
             return np.expm1(y)
+        if self.target_transform == "positive_drawdown" and self.task_type == "regression":
+            return -y
         return y
 
     def _compute_loss(self, preds, y, sample_weight=None):
@@ -469,21 +473,18 @@ class ElasticNetWrapper(BaseModelWrapper):
         plt.gca().invert_yaxis()
         plt.tight_layout()
 
-        temp_path = f"elasticnet_feature_importance_m{model_idx}.png"
-        plt.savefig(temp_path)
-        plt.close()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = os.path.join(tmpdir, f"elasticnet_feature_importance_m{model_idx}.png")
+            plt.savefig(temp_path)
+            plt.close()
 
-        csv_path = f"elasticnet_feature_importance_m{model_idx}.csv"
-        importance_df.to_csv(csv_path, index=False)
+            csv_path = os.path.join(tmpdir, f"elasticnet_feature_importance_m{model_idx}.csv")
+            importance_df.to_csv(csv_path, index=False)
 
-        if mlflow.active_run():
-            mlflow.log_artifact(temp_path, artifact_path="plots/importance")
-            mlflow.log_artifact(csv_path, artifact_path="importance_data")
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        if os.path.exists(csv_path):
-            os.remove(csv_path)
+            if mlflow.active_run():
+                mlflow.log_artifact(temp_path, artifact_path="plots/importance")
+                mlflow.log_artifact(csv_path, artifact_path="importance_data")
 
     def _create_feature_importance_df(self, feature_names):
         importance = self._coef_importance()

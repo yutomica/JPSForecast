@@ -93,7 +93,7 @@ run_final_sweep() {
         mlflow.experiment_name="${exp_name}" \
         sweep=${sweep} \
         +mode=final_sweep \
-        +experiment=${model}_${target} \
+        experiment=${model}_${target} \
         "${optuna_args[@]}" \
         $gpu_args \
         "${extra_args[@]}" \
@@ -104,6 +104,7 @@ run_final_sweep() {
 }
 
 # --- Execution ---
+run_final_sweep "tac" "lgbm" "alpha_gr" "12" "0"
 # run_final_sweep "tac" "lgbm" "risk"  "8" "0"
 # run_final_sweep "str" "lgbm" "risk"  "8" "0"
 # run_final_sweep "tac" "elasticnet" "alpha" "10" "0"
@@ -113,8 +114,7 @@ run_final_sweep() {
 
 
 # run_final_sweep "tac" "tcn" "alpha" "8" "1"
-run_final_sweep "tac" "tcn" "risk" "4" "1"
 
-run_final_sweep "tac" "ft_transformer" "alpha" "2" "1"
-run_final_sweep "tac" "ft_transformer" "risk" "2" "1"
+# run_final_sweep "tac" "tcn" "risk" "4" "1"
 # run_final_sweep "tac" "ft_transformer" "alpha" "2" "1"
+# run_final_sweep "tac" "ft_transformer" "risk" "2" "1"

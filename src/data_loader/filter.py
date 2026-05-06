@@ -21,7 +21,7 @@ class FinancialUniverseEngine:
         df['filt_Median_ADV_20'] = df.groupby('scode')['volume_p'].transform(lambda x: x.rolling(20).median()).astype('float32')
         # 4. ATR Ratio: 仕様書に基づきボラティリティが一定以上の銘柄を抽出
         high_low_range = (df['high'] - df['low']) / df['close']
-        df['filt_ATR_Ratio'] = high_low_range.rolling(20).mean().astype('float32')
+        df['filt_ATR_Ratio'] = high_low_range.groupby(df['scode']).transform(lambda x: x.rolling(20).mean()).astype('float32')
         # 5. 当日ストップ高安判定 (リターン15%超をプロキシとする)
         df['filt_Is_Stop_Day'] = df['filt_Return'].abs() > 0.15
         return df.drop(['open','high','low'],axis=1)

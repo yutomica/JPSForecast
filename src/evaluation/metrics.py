@@ -8,7 +8,7 @@ def _safe_spearmanr(a, b):
         return np.nan, np.nan
     return spearmanr(a, b)
 
-def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_col=None, dates=None, ndcg_k=10):
+def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_col=None, dates=None, ndcg_k=10, cost_buffer=0.005):
     """基本メトリクスの算出"""
     # --- 入力からNaNデータを除外 ---
     y_true = np.asarray(y_true)
@@ -107,6 +107,12 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
         df_tmp['date'] = pd.to_datetime(df_tmp['date']).dt.date
         
         spreads = []
+        top30_returns = []
+        # 新規追加指標用バッファ
+        top30_active_returns_dict = {}
+        top30_rankics = []
+        quintile_spreads = []
+        
         ndcgs = []
         rank_ics = []
         rank_ics_reb = []
@@ -117,28 +123,50 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
         rebalance_dates = set(unique_dates[::11])
         
         for d, grp in df_tmp.groupby('date'):
-            if y_ret is not None and len(grp) >= 10:
-                top10_ret = grp.nlargest(10, 'pred')['ret'].mean()
-                univ_ret = grp['ret'].mean()
-                spreads.append(top10_ret - univ_ret)
+            if y_ret is not None:
+                if len(grp) >= 10:
+                    top10_ret = grp.nlargest(10, 'pred')['ret'].mean()
+                    univ_ret = grp['ret'].mean()
+                    spreads.append(top10_ret - univ_ret)
+                
+                # Top30_SR 用の日次リターン計算
+                top30_ret = grp.nlargest(30, 'pred')['ret'].mean()
+                top30_returns.append(top30_ret)
+
+                # cost_adjusted_top30_active_utility / top30_rankic_alpha 用
+                if len(grp) >= 30:
+                    top30_grp = grp.nlargest(30, 'pred')
+                    # active return = mean(raw_return_5 - cost_buffer | Top30) - mean(raw_return_5 | universe)
+                    active_ret = (top30_grp['ret'] - cost_buffer).mean() - grp['ret'].mean()
+                    top30_active_returns_dict[d] = active_ret
+                    
+                    ic_30, _ = _safe_spearmanr(top30_grp['pred'], top30_grp['ret'] - cost_buffer)
+                    if not np.isnan(ic_30):
+                        top30_rankics.append(ic_30)
+
+                # top_quintile_spread 用
+                k_q = max(1, int(len(grp) * 0.2))
+                q_top = grp.nlargest(k_q, 'pred')['ret'].mean()
+                q_bot = grp.nsmallest(k_q, 'pred')['ret'].mean()
+                quintile_spreads.append(q_top - q_bot)
                 
             if len(grp) >= ndcg_k:
                 # NDCGの関連度(Relevance)として、生リターン(y_ret)があればそれを優先的に使用
-                target_g = grp['ret'].values if y_ret is not None else grp['true'].values
+                target_g_ndcg = grp['ret'].values if y_ret is not None else grp['true'].values
                 try:
                     # 連続値を維持しつつ、定数加算による希釈化を防ぐアプローチ (ReLU変換)
                     # マイナスのリターン(外れ)は0とし、プラスの連続値をそのままゲイン(報酬)とする
-                    rel = np.maximum(0, target_g)
+                    rel = np.maximum(0, target_g_ndcg)
                     if np.max(rel) > 0:
                         score = ndcg_score([rel], [grp['pred'].values], k=ndcg_k)
                         ndcgs.append(score)
                 except ValueError:
                     pass
                         
-            # RankIC, RankIC_reb の計算
-            target_g = grp['ret'].values if y_ret is not None else grp['true'].values
+            # RankIC, RankIC_reb の計算: 常に y_true 基準
+            target_g_for_rankic = grp['true'].values
             if len(grp) > 1:
-                ic, _ = _safe_spearmanr(target_g, grp['pred'].values)
+                ic, _ = _safe_spearmanr(target_g_for_rankic, grp['pred'].values)
                 if not np.isnan(ic):
                     rank_ics.append(ic)
                     if d in rebalance_dates:
@@ -178,6 +206,56 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
                 metrics['top10_spread'] = float(np.mean(spreads))
             else:
                 metrics['top10_spread'] = np.nan
+
+            # Top30_SR の算出
+            if top30_returns:
+                mu_p = np.mean(top30_returns)
+                sigma_p = np.std(top30_returns, ddof=1)
+                if sigma_p > 1e-8:
+                    metrics['Top30_SR'] = float((mu_p / sigma_p) * np.sqrt(252))
+                else:
+                    metrics['Top30_SR'] = 0.0
+            else:
+                metrics['Top30_SR'] = np.nan
+
+            # 1. cost_adjusted_top30_active_utility
+            if top30_active_returns_dict:
+                date_to_idx = {d: i for i, d in enumerate(unique_dates)}
+                offset_utilities = []
+                for offset in range(5):
+                    vals = [val for d, val in top30_active_returns_dict.items() if date_to_idx[d] % 5 == offset]
+                    if len(vals) > 1:
+                        mu = np.mean(vals)
+                        sigma = np.std(vals, ddof=1)
+                        offset_utilities.append(mu - 1.0 * sigma)
+                    elif len(vals) == 1:
+                        offset_utilities.append(vals[0])
+                
+                if offset_utilities:
+                    utility = np.mean(offset_utilities) + 0.25 * np.min(offset_utilities)
+                    metrics['cost_adjusted_top30_active_utility_raw'] = float(utility)
+                    metrics['cost_adjusted_top30_active_utility_scaled'] = float(0.02 * np.clip(utility / 0.01, -1, 1))
+                    metrics['cost_adjusted_top30_active_utility'] = metrics['cost_adjusted_top30_active_utility_scaled']
+                else:
+                    metrics['cost_adjusted_top30_active_utility'] = np.nan
+
+            # 2. top_quintile_spread
+            if quintile_spreads:
+                mean_spread = np.mean(quintile_spreads)
+                metrics['top_quintile_spread_raw'] = float(mean_spread)
+                metrics['top_quintile_spread_scaled'] = float(0.02 * np.clip(mean_spread / 0.02, -1, 1))
+                metrics['top_quintile_spread'] = metrics['top_quintile_spread_scaled']
+            else:
+                metrics['top_quintile_spread'] = np.nan
+
+            # 3. top30_rankic_alpha
+            if top30_rankics:
+                mean_ic30 = np.mean(top30_rankics)
+                metrics['top30_rankic_alpha_raw'] = float(mean_ic30)
+                metrics['top30_rankic_alpha_scaled'] = float(0.02 * np.clip(mean_ic30 / 0.05, -1, 1))
+                metrics['top30_rankic_alpha'] = metrics['top30_rankic_alpha_scaled']
+            else:
+                metrics['top30_rankic_alpha'] = np.nan
                 
         if ndcgs:
             metrics[f'ndcg_{ndcg_k}'] = float(np.mean(ndcgs))
@@ -186,8 +264,14 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             
         if rank_ics:
             metrics['RankIC'] = float(np.mean(rank_ics))
+            # 4. positive_day_ratio
+            pos_ratio = np.sum(np.array(rank_ics) > 0) / len(rank_ics)
+            metrics['positive_day_ratio_raw'] = float(pos_ratio)
+            metrics['positive_day_ratio_scaled'] = float(0.02 * np.clip((pos_ratio - 0.50) / 0.20, -1, 1))
+            metrics['positive_day_ratio'] = metrics['positive_day_ratio_scaled']
         else:
             metrics['RankIC'] = np.nan
+            metrics['positive_day_ratio'] = np.nan
             
         if rank_ics_reb:
             metrics['RankIC_reb'] = float(np.mean(rank_ics_reb))
@@ -205,6 +289,7 @@ def evaluate_metrics(y_true, y_pred, y_ret=None, task_type='regression', target_
             metrics['Recall_Gate30pct_severe'] = np.nan
                 
     return metrics
+
 
 def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression',metadata_cols=None, n_bins=10):
     df_eval = df_eval.copy()

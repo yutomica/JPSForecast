@@ -1,7 +1,7 @@
 # Generated from Optuna study: Final_Sweep_lgbm_str_mdd_20260427_031300
 # Best value (Objective): 3.3980585341635194
 # Trial number: 53
-learning_rate: 0.005
+learning_rate: 0.001
 feature_fraction: 0.29241139443146064
 bagging_fraction: 0.8
 lambda_l1: 7.177400535558816

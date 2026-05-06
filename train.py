@@ -28,7 +28,7 @@ from src.models.pruning import create_pruning_callback
 from src.evaluation.metrics import evaluate_metrics, calculate_bin_stats
 from src.utils.feature_selection import calculate_shap, calculate_mda, calculate_cfi
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
-from src.utils.sampling import apply_sampling, apply_target_stratified_sampling
+from src.utils.sampling import apply_sampling, apply_target_stratified_sampling, apply_2d_matrix_weight
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
 # alembic のロガーを取得し、ログレベルを WARNING に上げる
@@ -59,7 +59,7 @@ def train(cfg: DictConfig) -> float:
         mlflow.log_params(params)
         mlflow.log_dict({"feature_cols": feature_cols}, "configs/feature_cols.json")
 
-        direction = cfg.get("optimization_direction", "maximize")
+        direction = cfg.target.get("optimization_direction", "maximize")
         fallback_score = 999.0 if direction == "minimize" else -999.0
         fallback_metric = 999.0 if direction == "minimize" else -1.0
 
@@ -240,7 +240,7 @@ def train(cfg: DictConfig) -> float:
                 full_params["objective"] = cfg.target.objective
         # 目的関数に関連するパラメータをターゲットから取得
         # hparams側が優先されるようにして、個別のチューニングを許容する
-        target_keys = ["fair_c", "tweedie_variance_power", "asym_alpha", "asym_beta", "quantile", "custom_objective", "custom_metric"]
+        target_keys = ["fair_c", "tweedie_variance_power", "asym_alpha", "asym_beta", "quantile", "target_transform", "custom_objective", "custom_metric"]
         for key in target_keys:
             if key in cfg.target and key not in full_params:
                 full_params[key] = cfg.target[key]
@@ -332,6 +332,13 @@ def train(cfg: DictConfig) -> float:
             # 層化サンプリングの重みを適用 (mode_3の場合)
             if stratified_sampling_weights is not None:
                 w_train *= stratified_sampling_weights
+
+            # 2D Matrix Weight (based on Future_Close)
+            if cfg.get("preprocess", {}).get("matrix_weight", {}).get("enabled", False):
+                matrix_cfg = cfg.preprocess.matrix_weight
+                cost_buffer = matrix_cfg.get("cost_buffer", 0.003)
+                train_meta_subset = meta_df.loc[train_idx].copy()
+                w_train *= apply_2d_matrix_weight(train_meta_subset, return_col='Future_Close', cost_buffer=cost_buffer)
 
             # メモリ上の配列から必要な行のみを読み出し
             print(f"  🔹 Transforming data...")
@@ -427,7 +434,9 @@ def train(cfg: DictConfig) -> float:
                     # 評価用ICの計算対象として生リターン（Future_Close）を取得
                     y_ret = meta_df.loc[idx, 'Future_Close'].values - 1.0
                     dates = meta_df.loc[idx, 'date'].values
-                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10))
+                    # cost_buffer の取得 (configから)
+                    c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
+                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10), cost_buffer=c_buffer)
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
                     # Validの指定メトリクスを収集
@@ -507,7 +516,7 @@ def train(cfg: DictConfig) -> float:
                 shap_df = pd.DataFrame(all_fold_shap_values).T
                 shap_df.columns = ['fold_'+str(i) for i in range(len(all_fold_shap_values))]
                 shap_df.index = feature_cols
-                output_filename = f"screening_results_{cfg.domain.name}_{cfg.target.column}.csv"
+                output_filename = f"screening_results_{cfg.domain.name}_{cfg.target.name}.csv"
                 shap_df.to_csv(output_filename)
                 mlflow.log_artifact(output_filename)
                 print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
@@ -546,6 +555,7 @@ def train(cfg: DictConfig) -> float:
         if not oof_df.empty:
             print(f"  🔹 Calculating Pooled OOF Metrics...")
             y_ret_pooled = oof_df['Future_Close'].values - 1.0 if 'Future_Close' in oof_df.columns else None
+            c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
             pooled_metrics = evaluate_metrics(
                 y_true=oof_df['target'].values,
                 y_pred=oof_df['score'].values,
@@ -553,7 +563,8 @@ def train(cfg: DictConfig) -> float:
                 task_type=cfg.target.task_type,
                 target_col=cfg.target.column,
                 dates=oof_df['date'].values,
-                ndcg_k=ndcg_k
+                ndcg_k=ndcg_k,
+                cost_buffer=c_buffer
             )
             # --- 日次RankICベースのICIRを直接計算 ---
             if opt_metric_name in ["daily_icir", "daily_icir_reb"]:
@@ -595,10 +606,34 @@ def train(cfg: DictConfig) -> float:
             mean_score = np.nanmean(valid_metrics)
             std_score = np.nanstd(valid_metrics)
             min_score = np.nanmin(valid_metrics)
-            if opt_metric_name.startswith("worst_fold_"):
+            if opt_metric_name == "composite_tac":
+                # 統合指標の計算 (Step4 Final Sweep用)
+                rank_ic = pooled_metrics.get("RankIC", 0.0)
+                utility = pooled_metrics.get("cost_adjusted_top30_active_utility_scaled", 0.0)
+                spread = pooled_metrics.get("top_quintile_spread_scaled", 0.0)
+                alpha_ic = pooled_metrics.get("top30_rankic_alpha_scaled", 0.0)
+                pos_ratio = pooled_metrics.get("positive_day_ratio_scaled", 0.0)
+                worst_fold_rankic = min_score # eval_metric=RankIC である前提
+                
+                final_opt_score = (
+                    0.30 * rank_ic
+                    + 0.30 * utility
+                    + 0.15 * spread
+                    + 0.10 * alpha_ic
+                    + 0.10 * worst_fold_rankic
+                    + 0.05 * pos_ratio
+                )
+                print(f"  🔹 Composite Objective (TAC): {final_opt_score:.6f}")
+                print(f"    - RankIC: {rank_ic:.4f}, Utility: {utility:.4f}, Spread: {spread:.4f}")
+                print(f"    - AlphaIC: {alpha_ic:.4f}, WorstFoldIC: {worst_fold_rankic:.4f}, PosRatio: {pos_ratio:.4f}")
+            elif opt_metric_name.startswith("worst_fold_"):
                 final_opt_score = min_score
             elif opt_metric_name == "daily_icir_reb":
-                final_opt_score = pooled_metrics['daily_icir_reb']
+                final_opt_score = pooled_metrics.get('daily_icir_reb', fallback_metric)
+            elif opt_metric_name.startswith("pooled_oof_"):
+                # pooled_metricsの中身は接頭辞なしのキーなので、接頭辞を外して取得を試みる
+                base_key = opt_metric_name.replace("pooled_oof_", "")
+                final_opt_score = pooled_metrics.get(base_key, fallback_metric)
             else:
                 if direction == "minimize":
                     final_opt_score = mean_score + std_score
@@ -648,13 +683,12 @@ def train(cfg: DictConfig) -> float:
             print(f"\n🌟 Mode 'fix' detected. Promoting model to Staging and saving OOF data.")
             # OOFデータの保存 (Stacking用)
             oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
-            oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"
-            oof_df.to_csv(oof_filename, index=False)
-            mlflow.log_artifact(oof_filename, artifact_path="oof_data")
-            if os.path.exists(oof_filename):
-                os.remove(oof_filename)
+            with tempfile.TemporaryDirectory() as d:
+                oof_filename = os.path.join(d, f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv")
+                oof_df.to_csv(oof_filename, index=False)
+                mlflow.log_artifact(oof_filename, artifact_path="oof_data")
             # モデルレジストリへの登録とStagingへの昇格
-            registered_model_name = f"{cfg.model.name}_{cfg.target.column}"
+            registered_model_name = f"{cfg.model.name}_{cfg.target.name}"
             model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
             try:
                 mv = mlflow.register_model(model_uri, registered_model_name)

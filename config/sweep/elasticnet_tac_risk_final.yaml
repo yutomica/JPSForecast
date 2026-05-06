@@ -16,4 +16,3 @@ hydra:
     params:
       hparams.l1_ratio: interval(0.0, 0.5)
       hparams.alpha: tag(log, interval(0.0001, 100.0))
-      ++hparams.quantile: interval(0.05, 0.20)

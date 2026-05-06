@@ -14,6 +14,5 @@ hydra:
     storage: "sqlite:///optuna.db"
     n_trials: 50
     params:
-      hparams.l1_ratio: interval(0.0, 0.5)
-      hparams.alpha: tag(log, interval(0.0001, 1000.0))
-      ++hparams.tweedie_variance_power: interval(1.1, 1.9)
+      hparams.l1_ratio: interval(0.01, 0.4)
+      hparams.alpha: tag(log, interval(1e-5, 1e-1))

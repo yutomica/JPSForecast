@@ -5,26 +5,26 @@ promotions:
   - model: lgbm
     domain: tac
     role: alpha
-    study: "Final_Sweep_lgbm_tac_vol_scaled_asym_return_20260424_233543"
-    enabled: false
+    study: "final_sweep_lgbm_tac_alpha_20260505_135503"
+    enabled: true
 
   - model: lgbm
     domain: tac
     role: risk
     study: "Final_Sweep_lgbm_tac_max_neg_path_20260426_231149"
-    enabled: false
+    enabled: true
 
   - model: lgbm
     domain: str
     role: alpha
     study: "Final_Sweep_lgbm_str_sharpe_adj_20260426_200138"
-    enabled: false
+    enabled: true
 
   - model: lgbm
     domain: str
     role: risk
     study: "Final_Sweep_lgbm_str_mdd_20260427_031300"
-    enabled: false
+    enabled: true
 
   # --- TCN ---
   - model: tcn
@@ -81,12 +81,12 @@ promotions:
     domain: tac
     role: alpha
     study: "final_sweep_elasticnet_tac_alpha_20260503_111351"
-    enabled: true
+    enabled: false
 
   - model: elasticnet
     domain: tac
     role: risk
-    study: ""
+    study: "final_sweep_elasticnet_tac_risk_20260504_110658"
     enabled: false
 
   - model: elasticnet
@@ -98,5 +98,5 @@ promotions:
   - model: elasticnet
     domain: str
     role: risk
-    study: ""
+    study: "final_sweep_elasticnet_str_risk_20260504_123628"
     enabled: false

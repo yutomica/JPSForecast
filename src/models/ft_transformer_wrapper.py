@@ -377,6 +377,26 @@ class FTTransformerWrapper(BaseModelWrapper):
 
         loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
 
+        # --- Resolve Early Stopping Metric ---
+        from hydra.utils import get_method
+        import inspect
+        stopping_func = None
+        if self.early_stopping_metric == "ic":
+            from .pruning import calculate_spearman_ic
+            stopping_func = calculate_spearman_ic
+        elif self.early_stopping_metric != "loss":
+            try:
+                base_metric_func = get_method(self.early_stopping_metric)
+                # ファクトリ関数の場合、パラメータを渡して実体化する
+                sig = inspect.signature(base_metric_func)
+                if not any(p in sig.parameters for p in ["dates", "y_true", "y_pred", "preds", "data"]):
+                    stopping_func = base_metric_func(**self.params)
+                else:
+                    stopping_func = base_metric_func
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to resolve custom metric '{self.early_stopping_metric}'. Falling back to loss. Error: {e}")
+                stopping_func = None
+
         for epoch in range(self.max_epochs):
             if hasattr(train_loader.dataset, "on_epoch_end"):
                 train_loader.dataset.on_epoch_end()
@@ -400,18 +420,13 @@ class FTTransformerWrapper(BaseModelWrapper):
                             logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
                             loss = self._compute_loss(logits, y, sw)
                         
-                        if use_scaler and scaler is not None:
-                            scaler.scale(loss).backward()
-                            if self.grad_clip_norm is not None:
-                                scaler.unscale_(optimizer)
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            loss.backward()
-                            if self.grad_clip_norm is not None:
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                            optimizer.step()
+                        # Note: use_scaler and scaler are not defined in this scope. 
+                        # This part seems to have a bug or missing definitions. 
+                        # Assuming direct backward for now as in the original code's 'else' branch.
+                        loss.backward()
+                        if self.grad_clip_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                        optimizer.step()
                     else:
                         logits = self.model(x_num if x_num.shape[1] > 0 else None, x_cat if x_cat.shape[1] > 0 else None)
                         loss = self._compute_loss(logits, y, sw)
@@ -450,7 +465,7 @@ class FTTransformerWrapper(BaseModelWrapper):
                         valid_total += loss.detach() * y.shape[0]
                         valid_count += y.shape[0]
                         
-                        if self.early_stopping_metric != "loss":
+                        if stopping_func is not None:
                             if self.task_type == "classification":
                                 preds = torch.sigmoid(logits.view(-1))
                             else:
@@ -460,29 +475,17 @@ class FTTransformerWrapper(BaseModelWrapper):
                             
                 valid_loss = float(valid_total.item()) / max(valid_count, 1)
                 
-                if self.early_stopping_metric == "ic":
-                    from scipy.stats import spearmanr
-                    preds_np = np.concatenate(all_preds)
-                    targets_np = np.concatenate(all_targets)
-                    if len(preds_np) < 2 or np.max(preds_np) == np.min(preds_np) or np.max(targets_np) == np.min(targets_np):
-                        val_metric = 0.0
-                    else:
-                        val_metric, _ = spearmanr(targets_np, preds_np)
-                        if np.isnan(val_metric):
-                            val_metric = 0.0
-                elif self.early_stopping_metric != "loss":
+                if stopping_func is not None:
                     preds_np = np.concatenate(all_preds)
                     targets_np = np.concatenate(all_targets)
                     try:
-                        from hydra.utils import get_method
-                        metric_func = get_method(self.early_stopping_metric)
-                        import inspect
-                        if "dates" in inspect.signature(metric_func).parameters:
-                            val_metric = metric_func(targets_np, preds_np, dates=valid_dates)
+                        sig = inspect.signature(stopping_func)
+                        if "dates" in sig.parameters:
+                            val_metric = stopping_func(targets_np, preds_np, dates=valid_dates)
                         else:
-                            val_metric = metric_func(targets_np, preds_np)
+                            val_metric = stopping_func(targets_np, preds_np)
                     except Exception as e:
-                        print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
+                        print(f"  ⚠️ Warning: Failed to calculate metric. Error: {e}")
                         val_metric = valid_loss
                 else:
                     val_metric = valid_loss

@@ -1,0 +1,16 @@
+# Generated from Optuna study: final_sweep_elasticnet_tac_risk_20260504_110658
+# Best value (Objective): 14.977538330005045
+# Trial number: 9
+fit_intercept: true
+max_iter: 5000
+tol: 0.0001
+selection: cyclic
+random_state: 42
+positive: false
+warm_start: true
+patience: 150
+verbose: 1
+use_time_decay: false
+time_decay_rate: 0.9999
+l1_ratio: 0.21597250932105788
+alpha: 0.005589524205217926

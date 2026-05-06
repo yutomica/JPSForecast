@@ -154,14 +154,13 @@ def check_and_promote_model(client: MlflowClient, experiment_id: str, parent_run
         print(f"\n🌟 New best score ({optimization_score:.6f}) achieved! Promoting to Staging and saving OOF data.")
         # OOFデータの保存 (Stacking用)
         oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
-        oof_filename = f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv"
-        oof_df.to_csv(oof_filename, index=False)
-        mlflow.log_artifact(oof_filename, artifact_path="oof_data")
-        if os.path.exists(oof_filename):
-            os.remove(oof_filename)
+        with tempfile.TemporaryDirectory() as d:
+            oof_filename = os.path.join(d, f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv")
+            oof_df.to_csv(oof_filename, index=False)
+            mlflow.log_artifact(oof_filename, artifact_path="oof_data")
 
         # モデルレジストリへの登録とStagingへの昇格
-        registered_model_name = f"{cfg.model.name}_{cfg.target.column}"
+        registered_model_name = f"{cfg.model.name}_{cfg.target.name}"
         model_uri = f"runs:/{current_run_id}/model"
         try:
             mv = mlflow.register_model(model_uri, registered_model_name)

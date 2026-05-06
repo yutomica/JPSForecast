@@ -267,8 +267,8 @@ class NBeatsWrapper(BaseModelWrapper):
         self.model.train()
         losses = []
         for xb, yb in loader:
-            xb = xb.to(self.device)
-            yb = yb.to(self.device)
+            xb = xb.to(self.device, dtype=torch.float32)
+            yb = yb.to(self.device, dtype=torch.float32)
             optimizer.zero_grad()
             pred = self.model(xb)
             loss_vec = criterion(pred, yb)
@@ -285,8 +285,8 @@ class NBeatsWrapper(BaseModelWrapper):
         losses = []
         with torch.no_grad():
             for xb, yb in loader:
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
+                xb = xb.to(self.device, dtype=torch.float32)
+                yb = yb.to(self.device, dtype=torch.float32)
                 pred = self.model(xb)
                 loss_vec = criterion(pred, yb)
                 loss = loss_vec.mean()

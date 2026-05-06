@@ -1,4 +1,4 @@
-name: "str_mdd"
+name: "str_risk"
 column: "target_str_mdd"   # データセット内のどの列をターゲットにするか
 task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
 

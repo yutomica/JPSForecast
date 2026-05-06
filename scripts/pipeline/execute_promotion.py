@@ -117,14 +117,14 @@ def main():
             continue
 
         # 2. 最終モデルの学習実行 (train.py)
-        # +hparams@hparams の形式を確実に1つの引数として渡す
+        # experiment, mode は main.yaml の defaults に既に存在するため '+' は不要
         train_cmd = [
             "uv", "run", "python", "train.py",
             f"domain={domain}",
             f"target={target}",
             "data=master",
             f"features=features_{model}_{target}_fixed",
-            f"+experiment={model}_{target}",
+            f"experiment={model}_{target}",
             f"model={model}",
             f"+hparams@hparams={fix_hparams_filename}",
             "+mode=fix",

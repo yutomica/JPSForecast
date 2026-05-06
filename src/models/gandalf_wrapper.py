@@ -65,7 +65,7 @@ class ZarrBatchDataset(torch.utils.data.Dataset):
 
         y_batch = self.y[logical_batch]
         w_batch = self.w[logical_batch] if self.w is not None else np.ones(len(y_batch), dtype=np.float32)
-        return torch.from_numpy(X_batch), torch.from_numpy(y_batch), torch.from_numpy(w_batch)
+        return torch.from_numpy(X_batch).float(), torch.from_numpy(y_batch).float(), torch.from_numpy(w_batch).float()
 
     def on_epoch_end(self):
         if self.shuffle:
@@ -116,13 +116,14 @@ class GANDALFWrapper(BaseModelWrapper):
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         
-        y_train_np = np.asarray(y_train)
+        y_train_np = np.asarray(y_train, dtype=np.float32)
         is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
         
         train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
         if not is_zarr_train:
             X_train_np, train_feature_names = self._to_numpy_features(X_train)
             train_mask &= ~np.isnan(X_train_np).any(axis=1) & ~np.isinf(X_train_np).any(axis=1)
+            input_dim = X_train_np.shape[1]
         else:
             input_dim = zarr.open(X_train, mode='r').shape[1]
             train_feature_names = [f"feature_{i}" for i in range(input_dim)]
@@ -135,7 +136,7 @@ class GANDALFWrapper(BaseModelWrapper):
         if dropped_train > 0:
             print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
             
-        y_valid_np = np.asarray(y_valid) if y_valid is not None else None
+        y_valid_np = np.asarray(y_valid, dtype=np.float32) if y_valid is not None else None
         is_zarr_valid = isinstance(X_valid, str) and X_valid.endswith('.zarr')
         
         if X_valid is not None and y_valid_np is not None:
@@ -169,13 +170,6 @@ class GANDALFWrapper(BaseModelWrapper):
             else:
                 valid_dataset = self._make_dataset(X_valid_np[valid_mask], y_valid_np[valid_mask], None)
             valid_loader = DataLoader(valid_dataset, batch_size=None if is_zarr_valid else batch_size, shuffle=False, num_workers=num_workers, pin_memory=self.device.type == "cuda")
-
-        max_epochs = int(self.params.get("max_epochs", 100))
-        patience = int(self.params.get("patience", 10))
-        learning_rate = float(self.params.get("lr", self.params.get("learning_rate", 1e-3)))
-        weight_decay = float(self.params.get("weight_decay", 1e-5))
-        gradient_clip_val = float(self.params.get("gradient_clip_val", self.params.get("grad_clip_norm", 1.0)))
-        num_workers = int(self.params.get("num_workers", 0))
 
         gflu_stages = int(self.params.get("gflu_stages", self.params.get("n_blocks", self.params.get("n_layers", 6))))
         gflu_dropout = float(self.params.get("gflu_dropout", 0.0))
@@ -229,6 +223,10 @@ class GANDALFWrapper(BaseModelWrapper):
         print(f"Trainable Parameters: {trainable_params:,}")
         print("-" * 40)
 
+        learning_rate = float(self.params.get("lr", self.params.get("learning_rate", 1e-3)))
+        weight_decay = float(self.params.get("weight_decay", 1e-5))
+        gradient_clip_val = float(self.params.get("gradient_clip_val", self.params.get("grad_clip_norm", 1.0)))
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         scheduler_mode = "max" if self.metric_direction == "maximize" else "min"
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -239,68 +237,91 @@ class GANDALFWrapper(BaseModelWrapper):
             min_lr=float(self.params.get("min_lr", 1e-6)),
         )
 
+        # --- Resolve Early Stopping Metric ---
+        from hydra.utils import get_method
+        import inspect
+        stopping_func = None
+        if self.early_stopping_metric == "ic":
+            from .pruning import calculate_spearman_ic
+            stopping_func = calculate_spearman_ic
+        elif self.early_stopping_metric != "loss":
+            try:
+                base_metric_func = get_method(self.early_stopping_metric)
+                # ファクトリ関数の場合、パラメータを渡して実体化する
+                sig = inspect.signature(base_metric_func)
+                if not any(p in sig.parameters for p in ["dates", "y_true", "y_pred", "preds", "data"]):
+                    stopping_func = base_metric_func(**self.params)
+                else:
+                    stopping_func = base_metric_func
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to resolve custom metric '{self.early_stopping_metric}'. Falling back to loss. Error: {e}")
+                stopping_func = None
+
         best_metric_val = float("-inf") if self.metric_direction == "maximize" else float("inf")
         best_state = None
         bad_epochs = 0
         self.history = {"train_loss": [], "valid_loss": []}
         ema_val_metric = None
 
-        for epoch in range(max_epochs):
+        for epoch in range(int(self.params.get("max_epochs", 100))):
             if hasattr(train_loader.dataset, "on_epoch_end"):
                 train_loader.dataset.on_epoch_end()
-            train_loss = self._train_one_epoch(train_loader, optimizer, gradient_clip_val, epoch, max_epochs)
+            train_loss = self._train_one_epoch(train_loader, optimizer, gradient_clip_val, epoch, int(self.params.get("max_epochs", 100)))
             if valid_loader is not None:
-                valid_loss, val_metric = self._evaluate(valid_loader)
-            else:
-                valid_loss = train_loss
-                val_metric = train_loss
+                valid_loss, val_metric, all_preds, all_targets = self._evaluate(valid_loader)
                 
-            scheduler.step(val_metric)
+                # --- カスタムメトリクス計算 ---
+                if stopping_func is not None:
+                    preds_np = np.concatenate(all_preds)
+                    targets_np = np.concatenate(all_targets)
+                    try:
+                        sig = inspect.signature(stopping_func)
+                        if "dates" in sig.parameters:
+                            val_metric = stopping_func(targets_np, preds_np, dates=valid_dates)
+                        else:
+                            val_metric = stopping_func(targets_np, preds_np)
+                    except Exception as e:
+                        print(f"  ⚠️ Failed to calc {self.early_stopping_metric}: {e}")
+                        val_metric = valid_loss
+                else:
+                    val_metric = valid_loss
+                
+                scheduler.step(val_metric)
+                self.history["valid_loss"].append(valid_loss)
+                metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else ""
+                tqdm.write(f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f} | {metric_name_log}: {val_metric:.6f}")
+                
+                log_epoch_metrics(model_idx, epoch, {"train_loss": train_loss, "valid_loss": valid_loss, f"valid_{metric_name_log}": val_metric})
+
+                if epoch_callback is not None:
+                    execute_epoch_pruning(epoch_callback, epoch, np.concatenate(all_preds), np.concatenate(all_targets))
+
+                # Calculate EMA of validation metric
+                if ema_val_metric is None:
+                    ema_val_metric = val_metric
+                else:
+                    ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
+
+                is_best = False
+                if self.metric_direction == "maximize":
+                    if ema_val_metric > best_metric_val - 1e-8: is_best = True
+                else:
+                    if ema_val_metric < best_metric_val + 1e-8: is_best = True
+
+                if is_best:
+                    best_metric_val = ema_val_metric
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                    wait = 0
+                else:
+                    wait += 1
+                    if wait >= patience:
+                        print(f"Early stopping at epoch {epoch+1}")
+                        break
+            else:
+                tqdm.write(f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train Loss: {train_loss:.6f}")
+                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
 
             self.history["train_loss"].append(train_loss)
-            self.history["valid_loss"].append(valid_loss)
-
-            tqdm.write(
-                f"Epoch {epoch+1}/{max_epochs} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f}" +
-                (f" | Valid {self.early_stopping_metric}: {val_metric:.6f}" if self.early_stopping_metric != "loss" else "")
-            )
-            
-            # --- MLflow Logging ---
-            metrics_to_log = {"train_loss": train_loss}
-            if X_valid_np is not None:
-                metrics_to_log["valid_loss"] = valid_loss
-                if self.early_stopping_metric != "loss":
-                    metrics_to_log[f"valid_{self.early_stopping_metric}"] = val_metric
-            log_epoch_metrics(model_idx, epoch, metrics_to_log)
-            
-            # --- Epoch Callback (Pruning等) の実行 ---
-            if epoch_callback is not None and X_valid is not None:
-                valid_preds = self.predict(X_valid)
-                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid_np)
-
-            # Calculate EMA of validation metric to prevent stopping on noisy spikes
-            if ema_val_metric is None:
-                ema_val_metric = val_metric
-            else:
-                ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
-
-            is_best = False
-            if self.metric_direction == "maximize":
-                if ema_val_metric > best_metric_val - 1e-8:
-                    is_best = True
-            else:
-                if ema_val_metric < best_metric_val + 1e-8:
-                    is_best = True
-
-            if is_best:
-                best_metric_val = ema_val_metric
-                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
-                bad_epochs = 0
-            else:
-                bad_epochs += 1
-                if bad_epochs >= patience:
-                    tqdm.write(f"Early stopping triggered at epoch {epoch + 1}")
-                    break
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
@@ -331,7 +352,7 @@ class GANDALFWrapper(BaseModelWrapper):
 
         with torch.no_grad():
             for xb, _, _ in loader:
-                xb = xb.to(self.device)
+                xb = xb.to(self.device, dtype=torch.float32)
                 out = self.model(xb).squeeze(-1)
                 if self.is_binary_classification:
                     out = torch.sigmoid(out)
@@ -348,9 +369,9 @@ class GANDALFWrapper(BaseModelWrapper):
 
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{max_epochs}", leave=False) as pbar:
             for xb, yb, wb in pbar:
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
-                wb = wb.to(self.device)
+                xb = xb.to(self.device, dtype=torch.float32)
+                yb = yb.to(self.device, dtype=torch.float32)
+                wb = wb.to(self.device, dtype=torch.float32)
 
                 optimizer.zero_grad(set_to_none=True)
                 out = self.model(xb).squeeze(-1)
@@ -379,8 +400,8 @@ class GANDALFWrapper(BaseModelWrapper):
 
         with torch.no_grad():
             for xb, yb, _ in valid_loader:
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
+                xb = xb.to(self.device, dtype=torch.float32)
+                yb = yb.to(self.device, dtype=torch.float32)
                 out = self.model(xb).squeeze(-1)
                 loss_vec = self._loss_vector(out, yb)
                 total_loss += loss_vec.sum().detach()
@@ -396,35 +417,28 @@ class GANDALFWrapper(BaseModelWrapper):
 
         valid_loss = float(total_loss.item()) / max(total_count, 1)
         
-        if self.early_stopping_metric == "ic":
-            from scipy.stats import spearmanr
-            preds_np = np.concatenate(all_preds)
-            targets_np = np.concatenate(all_targets)
-            if len(preds_np) < 2 or np.max(preds_np) == np.min(preds_np) or np.max(targets_np) == np.min(targets_np):
-                val_metric = 0.0
-            else:
-                val_metric, _ = spearmanr(targets_np, preds_np)
-                if np.isnan(val_metric):
-                    val_metric = 0.0
-        elif self.early_stopping_metric != "loss":
-            preds_np = np.concatenate(all_preds)
-            targets_np = np.concatenate(all_targets)
-            try:
-                from hydra.utils import get_method
-                metric_func = get_method(self.early_stopping_metric)
-                val_metric = metric_func(targets_np, preds_np)
-            except Exception as e:
-                print(f"  ⚠️ Warning: Failed to calculate custom metric '{self.early_stopping_metric}'. Error: {e}")
-                val_metric = valid_loss
-        else:
-            val_metric = valid_loss
+        # val_metric placeholder
+        val_metric = valid_loss
             
-        return valid_loss, val_metric
+        return valid_loss, val_metric, all_preds, all_targets
 
     def _loss_vector(self, out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if self.is_binary_classification:
             return F.binary_cross_entropy_with_logits(out, y.float(), reduction="none")
-        return F.mse_loss(out, y.float(), reduction="none")
+        
+        objective = self.params.get("objective", "mse")
+        if objective == "asymmetric_mse":
+            alpha = float(self.params.get("alpha", 3.0))
+            beta = float(self.params.get("beta", 1.0))
+            diff = y - out
+            mask = (diff > 0).float()
+            return (mask * alpha + (1.0 - mask) * beta) * (diff ** 2)
+        elif objective == "quantile":
+            alpha = float(self.params.get("alpha", 0.5))
+            diff = y - out
+            return torch.maximum(alpha * diff, (alpha - 1.0) * diff)
+        else:
+            return F.mse_loss(out, y.float(), reduction="none")
 
     def _make_dataset(self, X_np, y_np, sample_weight=None):
         X_tensor = torch.from_numpy(np.asarray(X_np, dtype=np.float32))

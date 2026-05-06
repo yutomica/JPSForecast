@@ -964,6 +964,7 @@ class FeatureEngineer:
         self.df['Future_High_Tac'] = future_high_tac
         self.df['Future_Low_Tac'] = future_low_tac
         self.df['Future_Close_Tac'] = future_close_tac
+        self.df['target_ret_5'] = (future_close_tac / entry_price.replace(0, np.nan)) - 1.0
         # --- プロダクション仕様: TAC 攻めターゲット (Volatility-Scaled Asymmetric Return 対数残差版) ---
         log_market_ret = self.df['Market_Return'].fillna(0)
         market_ret_future_log = log_market_ret.groupby(self.df['scode']).apply(lambda x: _fwd_sum(x, self.horizon_tac)).reset_index(level=0, drop=True)
@@ -971,11 +972,12 @@ class FeatureEngineer:
         residual_ret_log = log_ret_5 - (self.df['BET_Beta60_RAW'] * market_ret_future_log)
         hv_floor = self.df.groupby('date')['Vol_20d'].transform(lambda x: x.quantile(0.10))
         vol_scaled_denom = np.maximum(self.df['Vol_20d'], hv_floor) * np.sqrt(self.horizon_tac)
-        clip_lower, clip_upper = -1.5, 3.5 # ※本来は学習データの1%~99.5%点等を動的に計算して適用
+        clip_lower, clip_upper = -1.5, 2.0 # ※本来は学習データの1%~99.5%点等を動的に計算して適用
         self.df['target_tac_vol_scaled_asym_return'] = residual_ret_log / (vol_scaled_denom + 1e-6)
         self.df['target_tac_vol_scaled_asym_return_clipped'] = np.clip(residual_ret_log / (vol_scaled_denom + 1e-6), clip_lower, clip_upper)
         # --- プロダクション仕様: TAC 守りターゲット (Max Negative Path Exposure 対数版) ---
         self.df['target_tac_max_neg_path'] = np.log(future_low_tac / entry_price.replace(0, np.nan))
+        self.df['target_tac_risk'] = np.log(future_low_tac / entry_price.replace(0, np.nan)) + np.log(future_high_tac / entry_price.replace(0, np.nan)) 
         # --- プロダクション仕様: Metaモデル ターゲット (Survival Return Raw 動的ペナルティ版) ---
         R_i = log_ret_5
         dynamic_threshold = -1.5 * self.df['Vol_20d'] # 銘柄ごとのHVに連動したペナルティ閾値
@@ -990,6 +992,7 @@ class FeatureEngineer:
         self.df['Future_High_Str'] = future_high_str
         self.df['Future_Low_Str'] = future_low_str
         self.df['Future_Close_Str'] = future_close_str
+        self.df['target_ret_60'] = (self.df['close'].shift(-self.horizon_str) / entry_price.replace(0, np.nan)) - 1.0
         # --- プロダクション仕様: STR 攻めターゲット (Sharpe Adjusted 60d 対数残差版) ---
         market_ret_60_log = log_market_ret.groupby(self.df['scode']).apply(
             lambda x: _fwd_sum(x, self.horizon_str)
@@ -1001,9 +1004,12 @@ class FeatureEngineer:
             hv_floor_60 = self.df.groupby('date')['VOL_Volatility60_RAW'].transform(lambda x: x.quantile(0.10))
         else:
             hv_60 = self.df['Vol_20d'] * np.sqrt(60 / 20)
-            hv_floor_60 = self.df.groupby('date')['Vol_20d'].transform(lambda x: x.quantile(0.10)) * np.sqrt(60 / 20)
-        vol_scaled_denom_60 = np.maximum(hv_60, hv_floor_60)
-        self.df['target_str_sharpe_adj'] = residual_log_60 / (vol_scaled_denom_60 + 1e-6)        
+            hv_floor_60 = self.df.groupby('date')['Vol_20d'].transform(lambda x: x.quantile(0.10)) 
+        vol_scaled_denom_daily = np.maximum(hv_60, hv_floor_60)
+        vol_scaled_denom_60 = vol_scaled_denom_daily * np.sqrt(self.horizon_str)
+        raw_target_str = residual_log_60 / (vol_scaled_denom_60 + 1e-6)
+        clip_lower, clip_upper = -3.0, 3.0
+        self.df['target_str_sharpe_adj'] = np.clip(raw_target_str, clip_lower, clip_upper)
         # Triple Barrier Method 
         # 3値分類ラベル: 1(利確), -1(損切), 0(時間切れ)
         # バリア幅の設定: ボラティリティベース (De Prado流)
@@ -1047,7 +1053,57 @@ class FeatureEngineer:
                     labels[idx[pos]] = -1.0        
         self.df['target_str_triple_barrier'] = labels
         self.df['target_str_mdd'] = mdd_labels
+        # --- プロダクション仕様: STR 守りターゲット (Volatility-Scaled MDD) ---
+        # MDDを20日HVで正規化し、レジーム間のボラティリティの差異を吸収する。
+        # ゼロ除算および過剰な感度を防ぐため、日次のクロスセクション10%タイルでフロアリングを実施。
+        hv_floor_20 = self.df.groupby('date')['Vol_20d'].transform(lambda x: x.quantile(0.10))
+        vol_scaled_denom_mdd = np.maximum(self.df['Vol_20d'], hv_floor_20)
+        self.df['target_str_vol_scaled_mdd'] = self.df['target_str_mdd'] / (vol_scaled_denom_mdd + 1e-6)
+
         return self
+
+    def apply_crosssectional_targets(self):
+        """クロスセクションターゲットの追加"""
+        new_cols = {}
+        # フラグによるフィルタリング（事前スキャン時やフラグ未計算時のフォールバック付）
+        tac_mask = self.df['is_candidate_tac'] == True if 'is_candidate_tac' in self.df.columns else pd.Series(True, index=self.df.index)
+        str_mask = self.df['is_candidate_str'] == True if 'is_candidate_str' in self.df.columns else pd.Series(True, index=self.df.index)
+
+        # --- 1. Era-wise Rank (Category A) ---
+        # 単純なRank (0.0 ~ 1.0)
+        tac_rank = self.df.loc[tac_mask].groupby('date')['target_ret_5'].rank(pct=True, method='average')
+        new_cols['target_tac_rank'] = tac_rank
+        # 既存: Gauss Rank (正規分布化)
+        epsilon = 1e-6
+        rank_clipped = tac_rank * (1 - 2 * epsilon) + epsilon
+        new_cols['target_tac_gauss_rank'] = (erfinv(2 * rank_clipped - 1)).clip(-3.0, 3.0)
+
+        # --- 2. Linear Residual (Category C) ---
+        indexer_sec = pd.api.indexers.FixedForwardWindowIndexer(window_size=self.horizon_tac)
+        sec_ret_fut = self.df['sector_return'].shift(-1).rolling(window=indexer_sec).sum()
+        mkt_ret_fut = self.df['Market_Return'].shift(-1).rolling(window=indexer_sec).sum()
+        
+        # 候補レコードのみに対して残差と相対フラグを計算
+        new_cols['target_tac_linear_residual'] = self.df.loc[tac_mask, 'target_ret_5'] - (0.5 * mkt_ret_fut.loc[tac_mask] + 0.5 * sec_ret_fut.loc[tac_mask])
+        new_cols['target_tac_sector_relative'] = (self.df.loc[tac_mask, 'target_ret_5'] > sec_ret_fut.loc[tac_mask]).astype(float)
+
+        # --- 戦略モデル用クロスセクション ---
+        # Relative Rank Change (60d)
+        str_rank = self.df.loc[str_mask].groupby('date')['target_ret_60'].rank(pct=True, method='average')
+        new_cols['target_str_rank'] = str_rank
+        str_rank_clipped = str_rank * (1 - 2 * epsilon) + epsilon
+        new_cols['target_str_gauss_rank'] = (erfinv(2 * str_rank_clipped - 1)).clip(-3.0, 3.0)
+        
+        # Peer Group Neutralized Alpha (60d)
+        sector_mean_60 = self.df.loc[str_mask].groupby(['date', 'sector33_code'])['target_ret_60'].transform('mean')
+        new_cols['target_str_peer_alpha'] = self.df.loc[str_mask, 'target_ret_60'] - sector_mean_60
+
+        # 一括結合（Indexアライメントにより非候補レコードは自動的にNaNになる）
+        if new_cols:
+            self.df = pd.concat([self.df, pd.DataFrame(new_cols, index=self.df.index)], axis=1)
+        return self
+
+
 
     def get_df(self):
         return self.df 

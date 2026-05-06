@@ -1,0 +1,16 @@
+# Generated from Optuna study: final_sweep_elasticnet_str_risk_20260504_123628
+# Best value (Objective): 3.5114868008680156
+# Trial number: 42
+fit_intercept: true
+max_iter: 5000
+tol: 0.0001
+selection: cyclic
+random_state: 42
+positive: false
+warm_start: true
+patience: 150
+verbose: 1
+use_time_decay: false
+time_decay_rate: 0.9999
+l1_ratio: 0.26570366769852705
+alpha: 0.004691675115078057

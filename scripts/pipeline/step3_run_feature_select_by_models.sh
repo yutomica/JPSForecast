@@ -45,7 +45,7 @@ run_feature_select() {
         model=${model} \
         period=${domain}_standard \
         cv=purged_kfold \
-        +experiment=${model}_${target} \
+        experiment=${model}_${target} \
         mlflow.experiment_name="${exp_name}" \
         +mode=feature_select \
         $gpu_args \
@@ -57,7 +57,7 @@ run_feature_select() {
 
 # --- Execution ---
 # run_feature_select "tac" "lgbm" "risk"  "0"
-# run_feature_select "str" "lgbm" "alpha" "0"
+run_feature_select "tac" "lgbm" "alpha_gr" "0"
 # run_feature_select "str" "lgbm" "risk"  "0"
 
 # run_feature_select "tac" "tcn" "alpha" "1"
@@ -65,7 +65,7 @@ run_feature_select() {
 # run_feature_select "str" "tcn" "alpha" "1"
 # run_feature_select "str" "tcn" "risk" "1"
 
-run_feature_select "tac" "ft_transformer" "alpha" "1"
-run_feature_select "tac" "ft_transformer" "risk" "1"
+# run_feature_select "tac" "ft_transformer" "alpha" "1"
+# run_feature_select "tac" "ft_transformer" "risk" "1"
 # run_feature_select "str" "ft_transformer" "alpha" "1"
 # run_feature_select "str" "ft_transformer" "risk" "1"

@@ -193,3 +193,42 @@ def apply_target_stratified_sampling(
     print(f"    - Sampled size     : {sampled_len:,} (Dropped {drop_ratio:.1%} overall)")
 
     return sampled_df
+
+
+def apply_2d_matrix_weight(df: pd.DataFrame, return_col: str, cost_buffer: float = 0.003) -> np.ndarray:
+    """
+    ターゲットリターンの値と日次クロスセクション順位の2次元マトリックスに基づき、サンプルウェイトを計算します。
+    Args:
+        df (pd.DataFrame): 'date' カラムと return_col カラムを含むデータフレーム。
+        return_col (str): 5日リターン（価格比 P_{t+5}/P_t）のカラム名。
+        cost_buffer (float): コストバッファの閾値。デフォルトは 0.003 (0.3%)。単なる売買コストではなく、「CSG上位をTrue Alphaとして強く学習させるための最低実現リターン閾値」
+    Returns:
+        np.ndarray: 計算されたサンプルウェイトの配列。
+    """
+    if return_col not in df.columns:
+        print(f"  [2D-Matrix Weight] Warning: return column '{return_col}' not found. Returning uniform weights.")
+        return np.ones(len(df))
+    raw_return = np.log(df[return_col]) # raw_return: log(target_ret_5d)
+    rank_pct = df.groupby('date')[return_col].transform(lambda x: x.rank(pct=True, ascending=True)) # 日次CS順位
+    weights = np.ones(len(df))
+    # true_alpha: rank_pct >= 0.80 and raw_return > cost_buffer
+    mask_true_alpha = (rank_pct >= 0.80) & (raw_return > cost_buffer)
+    weights[mask_true_alpha] = 1.5
+    # moderate_winner: 0.60 <= rank_pct < 0.80 and raw_return > cost_buffer
+    mask_mod_winner = (rank_pct >= 0.60) & (rank_pct < 0.80) & (raw_return > cost_buffer)
+    weights[mask_mod_winner] = 1.2
+    # rank_trap: rank_pct >= 0.80 and raw_return <= 0.0
+    mask_rank_trap = (rank_pct >= 0.80) & (raw_return <= 0.0)
+    weights[mask_rank_trap] = 0.8
+    # center: 0.30 <= rank_pct < 0.60
+    mask_center = (rank_pct >= 0.30) & (rank_pct < 0.60)
+    weights[mask_center] = 0.9
+    # clear_loser: rank_pct < 0.20 and raw_return < -cost_buffer
+    mask_clear_loser = (rank_pct < 0.20) & (raw_return < -cost_buffer)
+    weights[mask_clear_loser] = 1.0
+    # other: 上記以外 (デフォルトの 1.0)
+    print(f"  [2D-Matrix Weight] Applied weights based on {return_col} (cost_buffer={cost_buffer})")
+    print(f"    - True Alpha: {mask_true_alpha.sum():,}, Moderate Winner: {mask_mod_winner.sum():,}")
+    print(f"    - Rank Trap: {mask_rank_trap.sum():,}, Center: {mask_center.sum():,}")
+    print(f"    - Clear Loser: {mask_clear_loser.sum():,}, Others: {(weights == 1.0).sum():,}")
+    return weights

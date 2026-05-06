@@ -1,8 +1,22 @@
 # @package _global_
-mode: "feature_screening" 
 defaults:
-  - override /model: lgbm
-  - override /hparams: lgbm_screening
+  - /hparams/lgbm/base@hparams
   - override /features: all
+
+mode: "feature_screening" 
 mlflow:
   experiment_name: "Feature_Screening_LGBM"
+
+hparams:
+  # 1. シンプルな構造（個別の特徴量の寄与を捉えやすくする）
+  max_depth: 3
+  num_leaves: 7
+  min_child_samples: 2000
+  # 2. 特徴量の公平な評価
+  feature_fraction: 0.3
+  # 3. ノイズへの過剰適合防止
+  extra_trees: true
+  bagging_fraction: 0.7
+  bagging_freq: 1
+  # 4. 学習の安定性
+  learning_rate: 0.05

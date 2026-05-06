@@ -1,11 +1,11 @@
-# Generated from Optuna study: Final_Sweep_lgbm_tac_vol_scaled_asym_return_20260424_233543
-# Best value (Objective): 12.221463372096595
-# Trial number: 63
+# Generated from Optuna study: final_sweep_lgbm_tac_alpha_20260505_135503
+# Best value (Objective): 191.26359456392515
+# Trial number: 26
 learning_rate: 0.005
-feature_fraction: 0.330192781961956
-bagging_fraction: 0.8434696528992471
-lambda_l1: 4.325436673104546
-lambda_l2: 0.5318860776282814
+feature_fraction: 0.21662995859128467
+bagging_fraction: 0.8490672991216421
+lambda_l1: 0.29422895937085053
+lambda_l2: 0.013469496338866724
 seed: 42
 num_boost_round: 10000
 is_unbalance: true
@@ -14,8 +14,8 @@ time_decay_rate: 0.9999
 bagging_freq: 6
 patience: 150
 verbose: -1
-asym_alpha: 3.553956451970526
+asym_alpha: 2.709346206975103
 asym_beta: 1.0
 num_leaves: 7
 max_depth: 5
-min_child_samples: 50
+min_child_samples: 500
