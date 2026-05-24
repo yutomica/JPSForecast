@@ -126,13 +126,14 @@ def main():
             f"features=features_{model}_{target}_fixed",
             f"experiment={model}_{target}",
             f"model={model}",
-            f"+hparams@hparams={fix_hparams_filename}",
+            f"hparams={fix_hparams_filename}",
             "+mode=fix",
             f"variant={variant}",
             f"++mlflow.tags.source_study={study}",
             f"period={domain}_standard",
             "cv=anchored_walk_forward",
-            "mlflow.experiment_name=Fix_Model"
+            f"mlflow.experiment_name=JPSForecast_{target}",
+            f"++mlflow.run_name=Step5_Promotion_{model}_{target}"
         ]
         
         if not run_command(train_cmd, args.dry_run):

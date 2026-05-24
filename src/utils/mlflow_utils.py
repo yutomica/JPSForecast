@@ -11,8 +11,16 @@ from pathlib import Path
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
+def _sanitize_tracking_uri(uri: str) -> str:
+    """SQLiteの場合、並列実行時のロック対策として timeout を付与する"""
+    if uri.startswith("sqlite:///") and "timeout=" not in uri:
+        separator = "&" if "?" in uri else "?"
+        return f"{uri}{separator}timeout=60"
+    return uri
+
 def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name: str = None) -> str:
     """親ランのIDを取得または作成する。study_nameが指定された場合はタグ検索による再開を試みる。"""
+    tracking_uri = _sanitize_tracking_uri(tracking_uri)
     mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient()
     
@@ -72,6 +80,7 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
         absolute_uri = relative_uri # http://, file:// などの場合はそのまま
 
     mlflow_db_path = os.environ.get("MLFLOW_TRACKING_URI", absolute_uri)
+    mlflow_db_path = _sanitize_tracking_uri(mlflow_db_path)
     mlflow.set_tracking_uri(mlflow_db_path)
 
     client = MlflowClient()
@@ -101,7 +110,9 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
     target_col = cfg.target.get("name", "unknown")
     mode = cfg.get("mode", "train")
     timestamp = datetime.now().strftime("%m%d_%H%M")
-    base_run_name = f"{model_name}_{target_col}_{mode}_{timestamp}"
+    
+    # run_nameが明示的に指定されている場合はそれを使用し、なければ自動生成する
+    base_run_name = cfg.mlflow.get("run_name") or f"{model_name}_{target_col}_{mode}_{timestamp}"
 
     if HydraConfig.initialized() and "job" in HydraConfig.get():
         raw_num = int(HydraConfig.get().job.get("num", "0"))

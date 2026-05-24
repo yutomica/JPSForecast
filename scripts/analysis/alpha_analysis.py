@@ -148,7 +148,12 @@ def generate_alpha_scores(master_dir, meta_df, model_info):
             if isinstance(X_processed, str) and X_processed.endswith('.zarr'):
                 import shutil
                 shutil.rmtree(X_processed, ignore_errors=True)
-        all_preds[i : i + batch_size] = np.mean(batch_preds_folds, axis=0)
+        avg_preds = np.mean(batch_preds_folds, axis=0)
+        if avg_preds.ndim == 2:
+            # Multiclassの場合、期待値（クラスインデックスの加重平均）に変換
+            avg_preds = np.dot(avg_preds, np.arange(avg_preds.shape[1]))
+        
+        all_preds[i : i + batch_size] = avg_preds
         gc.collect()
     eval_df['alpha_score'] = all_preds
     return eval_df[['date', 'scode', 'alpha_score']]

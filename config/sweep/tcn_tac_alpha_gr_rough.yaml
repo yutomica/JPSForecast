@@ -1,0 +1,17 @@
+# @package _global_
+# Step 2: TAC Alpha (TCN) ラフチューニング
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 24
+    params:
+      ++hparams.num_channel: choice(16, 32, 64)
+      ++hparams.n_layers: choice(2, 3)
+      ++hparams.kernel_size: choice(3, 5)
+      ++hparams.window_size: choice(20, 40)

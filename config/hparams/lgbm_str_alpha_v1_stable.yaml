@@ -1,20 +1,23 @@
-# Generated from Optuna study: Final_Sweep_lgbm_str_sharpe_adj_20260426_200138
-# Best value (Objective): 128.00754623861184
-# Trial number: 41
-learning_rate: 0.001
-feature_fraction: 0.994269621616413
-bagging_fraction: 0.8
-lambda_l1: 16.644947836674262
-lambda_l2: 4.479940230449325
-seed: 42
-num_boost_round: 10000
+# Generated from Optuna study: final_sweep_lgbm_str_alpha_20260522_092932
+# Best value (Objective): 11.333341240455258
+# Trial number: 89
+learning_rate: 0.029916234741350932
+feature_fraction: 0.6174499653818807
+bagging_fraction: 0.7936136692406766
+lambda_l1: 0.00075152796247486
+lambda_l2: 1.176914770603025
+seed: 44
+num_boost_round: 6000
 is_unbalance: true
 use_time_decay: false
 time_decay_rate: 0.9999
 bagging_freq: 6
-patience: 150
+patience: 500
+burn_in_rounds: 1000
+early_stopping_ema_alpha: 0.1
 verbose: -1
-fair_c: 13.198955832636408
+fair_c: 10.0
 num_leaves: 7
-max_depth: 3
+max_depth: 4
 min_child_samples: 4000
+++alpha: 0.6393847513141596

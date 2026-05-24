@@ -16,10 +16,10 @@ export PYTHONPATH=$PYTHONPATH:.
 
 run_screening() {
     local domain=$1
-    local model=$2
-    local role=$3 # 'alpha' or 'risk'
+    local role=$2 # 'alpha' or 'risk'
     local target="${domain}_${role}"
-    shift 3
+    local exp_name="JPSForecast_${target}"
+    shift 2
     local extra_args=("$@")
     
     echo "============================================================"
@@ -27,14 +27,27 @@ run_screening() {
     echo "============================================================"
 
     uv run python train.py \
-        experiment=screening_lgbm \
+        experiment=lgbm_${domain}_${role} \
         domain=${domain} \
         data=master \
         target=${target} \
         period=${domain}_standard \
         cv=purged_kfold \
         ++mode=feature_screening \
+        ++mlflow.experiment_name="${exp_name}" \
+        ++mlflow.run_name="Step1_Feature_Screening" \
+        ++hparams.max_depth=3 \
+        ++hparams.num_leaves=7 \
+        ++hparams.min_child_samples=2000 \
+        ++hparams.feature_fraction=0.3 \
+        ++hparams.extra_trees=true \
+        ++hparams.bagging_fraction=0.7 \
+        ++hparams.bagging_freq=1 \
+        ++hparams.learning_rate=0.05 \
+        ++hparams.num_boost_round=1000 \
         "${extra_args[@]}"
+    
+    # uv run python ./scripts/pipeline/feature_allocation.py target=${target} features=features_${domain}_${role}_init data=master
         
     echo "✅ Finished Screening for $model ($domain) - $role."
     echo ""
@@ -42,15 +55,15 @@ run_screening() {
 
 # # 1. TAC (Tactical) 攻め/守り
 # run_screening "tac" "lgbm" "alpha" &
-# run_screening "tac" "lgbm" "risk" &
+run_screening "str" "alpha"
 
 # # 2. STR (Strategic) 攻め/守り
 # run_screening "str" "lgbm" "alpha" &
 # run_screening "str" "lgbm" "risk"
 
-run_screening "tac" "lgbm" "alpha_gr" \
- ++preprocess.matrix_weight.enabled=true \
- ++preprocess.matrix_weight.cost_buffer=0.005
+# run_screening "tac" "lgbm" "alpha_gr" \
+#  ++preprocess.matrix_weight.enabled=true \
+#  ++preprocess.matrix_weight.cost_buffer=0.005
 
 wait
 echo "🎉 All screening tasks completed successfully."

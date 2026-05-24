@@ -130,7 +130,8 @@ class NBeatsWrapper(BaseModelWrapper):
             metrics_to_log = {"train_loss": train_loss}
             if valid_loader is not None:
                 metrics_to_log["valid_loss"] = valid_loss
-            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+            if epoch % 10 == 0 or epoch == max_epochs - 1:
+                log_epoch_metrics(model_idx, epoch, metrics_to_log)
 
             # --- Epoch Callback (Pruning等) の実行 ---
             if epoch_callback is not None and X_valid is not None:

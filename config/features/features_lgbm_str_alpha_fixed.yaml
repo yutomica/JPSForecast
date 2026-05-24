@@ -1,42 +1,20 @@
-# Step 3 Feature Selection Result
-# Model: LightGBM (STR)
-# Target: str_sharpe_adj
-# Metric: Everyday RankIC
-# Filter: Feature Sharpe > 0.2
-# Total Selected Features: 33
 feature_cols:
-  - BET_MarketHV20_CSZ
-  - BET_MarketHV20_TSR_252D
-  - BET_MarketHV20_TSZ_20D
-  - BET_MarketTrendIdx_RAW
-  - BET_MarketVolChange_CSZ
-  - BET_MarketVolChange_TSZ_20D
-  - BET_SectorMomentum5d_RAW
-  - BET_SectorRel_CSR
-  - BET_SectorRel_SNZ
-  - CON_RevisionRate_CSZ
-  - EVT_IsMissingEPS_RAW
-  - LIQ_AmihudIlliq_CSZ
-  - LIQ_TurnoverRatio_CSZ
-  - MOM_DistSMA75_RAW
-  - MOM_LinRegSlope10_CSR
-  - MOM_LogReturn_RAW
-  - MOM_Momentum12-1_CSR
-  - MOM_Return5d_RAW
-  - MOM_Return6m_RAW
-  - QLT_ROA_TSR_252D
-  - SEA_Quarter_RAW
-  - SPD_MarginRatio_RAW
-  - SPD_MarketForeignBuy_TSZ_20D
-  - SPD_MarketIndividualBuy_TSZ_20D
-  - SPD_OverseaFlowTrend_TSZ_20D
-  - SPD_VWAPDev_CSZ
-  - VAL_EarningsYield_CSZ
-  - VAL_LogPBR_CSZ
-  - VOL_ATRRatio_SNZ
-  - VOL_ATRRatio_TSR_252D
-  - VOL_HV30_CSR
-  - VOL_LargeMoveCount_TSR_252D
-  - VOL_Volatility60_RAW
+- SPD_VWAPDev_CSZ
+- VOL_VolatilityParkinson_CSR
+- VAL_LogPBR_CSZ
+- VOL_DownsideDev60_CSR
+- SPD_MarginRatio_RAW
+- SPD_VWAPDev_CSR
+- VAL_LogPBR_SNZ
+- VOL_HV30_CSZ
+- VAL_EarningsYield_CSR
+- MOM_LinRegSlope10_CSZ
+- BET_SectorRelStrength60_TSR_252D
+- VOL_ATRRatio_TSR_252D
+- LIQ_AmihudIlliq_CSZ
+- BET_SectorRelStrength60_CSZ
+- LIQ_TurnoverRatio_RAW
+- EVT_IsMissingEPS_RAW
+- LIQ_LogTradingCap_CSR
 cat_cols:
-  - SEA_Quarter_RAW
+- EVT_IsMissingEPS_RAW

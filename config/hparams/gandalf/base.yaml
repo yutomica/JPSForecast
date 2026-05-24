@@ -1,0 +1,21 @@
+# GANDALF Hyperparameters (Financial ML Baseline)
+learning_rate: 5.0e-4
+weight_decay: 0.0001
+batch_size: 4096
+max_epochs: 100
+patience: 20
+gflu_stages: 6
+gflu_dropout: 0.0
+gflu_feature_init_sparsity: 0.3
+learnable_sparsity: True
+head_hidden_dims: [128, 64]
+head_dropout: 0.1
+gradient_clip_val: 1.0
+lr_decay_factor: 0.5
+lr_patience: 5
+min_lr: 1e-06
+early_stopping_ema_alpha: 1.0
+random_state: 42
+num_workers: 0
+use_time_decay: false
+time_decay_rate: 0.9999

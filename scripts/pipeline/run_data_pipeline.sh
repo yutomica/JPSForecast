@@ -32,19 +32,10 @@ echo "============================================================"
 echo ""
 echo "[Step 4/4] Creating master select data..."
 python scripts/data_prep/create_master_select_data.py \
- features_lgbm_tac_alpha_rough \
- features_lgbm_tac_risk_rough \
+ features_lgbm_tac_alpha_gr_rough \
  features_lgbm_str_alpha_rough \
- features_lgbm_str_risk_rough \
- features_tcn_tac_alpha_rough \
- features_tcn_tac_risk_rough \
- features_tcn_str_alpha_rough \
- features_tcn_str_risk_rough \
- features_ft_transformer_tac_alpha_rough \
- features_ft_transformer_tac_risk_rough \
- features_ft_transformer_str_alpha_rough \
- features_ft_transformer_str_risk_rough \
- features_lgbm_tac_alpha_gr_rough
+ features_tcn_tac_alpha_gr_rough \
+ features_gandalf_tac_alpha_gr_rough
 
 echo ""
 echo "============================================================"

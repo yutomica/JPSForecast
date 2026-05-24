@@ -1,102 +1,20 @@
 variant_global: "v1_stable"
 
 promotions:
-  # --- LightGBM ---
   - model: lgbm
     domain: tac
-    role: alpha
-    study: "final_sweep_lgbm_tac_alpha_20260505_135503"
-    enabled: true
-
-  - model: lgbm
-    domain: tac
-    role: risk
-    study: "Final_Sweep_lgbm_tac_max_neg_path_20260426_231149"
-    enabled: true
+    role: alpha_gr
+    study: "final_sweep_lgbm_tac_alpha_gr_20260509_212938"
+    enabled: false
 
   - model: lgbm
     domain: str
     role: alpha
-    study: "Final_Sweep_lgbm_str_sharpe_adj_20260426_200138"
+    study: "final_sweep_lgbm_str_alpha_20260522_092932"
+    enabled: false
+
+  - model: gandalf
+    domain: tac
+    role: alpha_gr
+    study: "final_sweep_gandalf_tac_alpha_gr_20260524_141241"
     enabled: true
-
-  - model: lgbm
-    domain: str
-    role: risk
-    study: "Final_Sweep_lgbm_str_mdd_20260427_031300"
-    enabled: true
-
-  # --- TCN ---
-  - model: tcn
-    domain: tac
-    role: alpha
-    study: "final_sweep_tcn_tac_alpha_20260502_184549"
-    enabled: false
-
-  - model: tcn
-    domain: tac
-    role: risk
-    study: ""
-    enabled: false
-
-  - model: tcn
-    domain: str
-    role: alpha
-    study: ""
-    enabled: false
-
-  - model: tcn
-    domain: str
-    role: risk
-    study: ""
-    enabled: false
-
-  # --- FT-Transformer ---
-  - model: ft_transformer
-    domain: tac
-    role: alpha
-    study: ""
-    enabled: false
-
-  - model: ft_transformer
-    domain: tac
-    role: risk
-    study: ""
-    enabled: false
-
-  - model: ft_transformer
-    domain: str
-    role: alpha
-    study: ""
-    enabled: false
-
-  - model: ft_transformer
-    domain: str
-    role: risk
-    study: ""
-    enabled: false
-
-  # --- ElasticNet ---
-  - model: elasticnet
-    domain: tac
-    role: alpha
-    study: "final_sweep_elasticnet_tac_alpha_20260503_111351"
-    enabled: false
-
-  - model: elasticnet
-    domain: tac
-    role: risk
-    study: "final_sweep_elasticnet_tac_risk_20260504_110658"
-    enabled: false
-
-  - model: elasticnet
-    domain: str
-    role: alpha
-    study: "final_sweep_elasticnet_str_alpha_20260503_134622"
-    enabled: false
-
-  - model: elasticnet
-    domain: str
-    role: risk
-    study: "final_sweep_elasticnet_str_risk_20260504_123628"
-    enabled: false

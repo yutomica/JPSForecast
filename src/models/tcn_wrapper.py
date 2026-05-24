@@ -492,7 +492,8 @@ class TCNWrapper(BaseModelWrapper):
                 metrics_to_log[f"valid_{loss_name}"] = valid_loss
                 if self.early_stopping_metric != "loss":
                     metrics_to_log[f"valid_{metric_name_log}"] = val_metric
-            log_epoch_metrics(model_idx, epoch, metrics_to_log)
+            if epoch % 10 == 0 or epoch == self.max_epochs - 1:
+                log_epoch_metrics(model_idx, epoch, metrics_to_log)
 
             if epoch_callback is not None and X_valid is not None:
                 valid_preds = self.predict(X_valid)

@@ -6,25 +6,12 @@ defaults:
   - data: sample
   - features: all
   - model: lgbm
+  - hparams: null
   - period: tac_standard
   - cv: fixed
   - sweep: null
   - mode: null
   - experiment: lgbm_tac_alpha
-
-# [共通基盤] 全モデルが構造として共有するパラメータのプレースホルダ
-# 実行時に各モデルの base.yaml や理論レイヤーによって上書きされる
-hparams:
-  num_workers: 0
-  lr: 0.0001
-  weight_decay: 0.0001
-  batch_size: 512
-  max_epochs: 150
-  patience: 30
-  use_time_decay: true
-  time_decay_rate: 0.9999
-  device_name: "mps"
-  random_state: 42
 
 # ターゲット層化サンプリングのデフォルト設定
 preprocess:
@@ -37,7 +24,11 @@ preprocess:
     center_keep_ratio: 0.25
   matrix_weight:
     enabled: false
-    cost_buffer: 0.005
+    cost_buffer: 0.002
+  class_weight:
+    enabled: false
+  hard_negative_weighting:
+    enabled: false
 
 # MLflow設定
 mlflow:

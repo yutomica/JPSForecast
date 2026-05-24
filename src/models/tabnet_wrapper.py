@@ -14,13 +14,14 @@ from pytorch_tabnet.callbacks import Callback
 from pytorch_tabnet.pretraining import TabNetPretrainer
 
 class MLflowAndPruningCallback(Callback):
-    def __init__(self, wrapper, X_val, y_val, cb, m_idx):
+    def __init__(self, wrapper, X_val, y_val, cb, m_idx, max_epochs):
         super().__init__()
         self.wrapper = wrapper
         self.X_val = X_val
         self.y_val = y_val
         self.cb = cb
         self.m_idx = m_idx
+        self.max_epochs = max_epochs
     def on_epoch_end(self, epoch, logs=None):
         if self.cb is not None and self.X_val is not None:
             preds = self.wrapper.predict(self.X_val)
@@ -32,7 +33,8 @@ class MLflowAndPruningCallback(Callback):
                 if k.startswith('valid_'):
                     metrics[k] = v
             if metrics:
-                log_epoch_metrics(self.m_idx, epoch, metrics)
+                if epoch % 10 == 0 or epoch == self.max_epochs - 1:
+                    log_epoch_metrics(self.m_idx, epoch, metrics)
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -141,7 +143,8 @@ class TabNetWrapper(BaseModelWrapper):
 
         # --- Epoch Callback (Pruning等) と MLflow Logging の準備 ---
         callbacks = []
-        callbacks.append(MLflowAndPruningCallback(self, X_valid, y_valid, epoch_callback, model_idx))
+        max_epochs = self.params.get('max_epochs', 100)
+        callbacks.append(MLflowAndPruningCallback(self, X_valid, y_valid, epoch_callback, model_idx, max_epochs))
 
         # --- 事前学習 (Pretraining) ---
         if self.use_pretrain:

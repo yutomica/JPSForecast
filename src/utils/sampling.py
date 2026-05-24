@@ -232,3 +232,76 @@ def apply_2d_matrix_weight(df: pd.DataFrame, return_col: str, cost_buffer: float
     print(f"    - Rank Trap: {mask_rank_trap.sum():,}, Center: {mask_center.sum():,}")
     print(f"    - Clear Loser: {mask_clear_loser.sum():,}, Others: {(weights == 1.0).sum():,}")
     return weights
+
+
+def make_train_fold_class_weight(
+    y_train: pd.Series,
+    num_classes: int = 4,
+    clip_min: float = 1.0,
+    clip_max: float = 10.0,
+) -> tuple[dict[int, float], np.ndarray]:
+    """
+    各CV foldのtrainデータのみを使って、クラス出現頻度に基づいた重みを計算します。
+    """
+    y = y_train.dropna().astype(int).to_numpy()
+
+    counts = np.bincount(y, minlength=num_classes)
+    total = counts.sum()
+
+    # sklearn.utils.class_weight.compute_class_weight('balanced', ...) と同等の計算
+    # weight_c = N / (K * N_c)
+    raw_weights = total / (num_classes * np.maximum(counts, 1))
+    clipped_weights = np.clip(raw_weights, clip_min, clip_max)
+
+    weight_dict = {
+        cls: float(clipped_weights[cls])
+        for cls in range(num_classes)
+    }
+    return weight_dict, counts
+
+
+def make_sample_weight(
+    y_train: pd.Series,
+    class_weight: dict[int, float],
+) -> np.ndarray:
+    """
+    各サンプルに対して、計算されたクラス重みを割り当てます。
+    """
+    return (
+        y_train.astype(int)
+        .map(class_weight)
+        .astype("float32")
+        .to_numpy()
+    )
+
+
+def apply_hard_negative_weighting(df: pd.DataFrame) -> np.ndarray:
+    """
+    リターン情報に基づき、Hard Negativeに対するサンプリングウェイトを計算します。
+    """
+    # 必要なカラムの存在チェック (train.py 内でのリネーム後カラム名)
+    req_cols = ['Future_High', 'Future_Low', 'Future_Close']
+    for col in req_cols:
+        if col not in df.columns:
+            print(f"  [Hard Negative Weighting] Warning: required column '{col}' not found. Returning uniform weights.")
+            return np.ones(len(df))
+
+    hit_tp = df["Future_High"] >= 1.07
+    hit_sl = df["Future_Low"] < 0.98
+    close_bad = df["Future_Close"] < 1.0
+
+    positive = hit_tp & (~hit_sl) & (~close_bad)
+    hard_negative = hit_tp & (hit_sl | close_bad)
+    easy_negative = ~hit_tp
+
+    sample_weight = np.ones(len(df))
+    sample_weight[positive] = 3.0
+    sample_weight[hard_negative] = 4.0
+    sample_weight[easy_negative] = 1.0
+
+    print(f"  [Hard Negative Weighting] Applied weights:")
+    print(f"    - Positive       (w=3.0): {positive.sum():,}")
+    print(f"    - Hard Negative  (w=4.0): {hard_negative.sum():,}")
+    print(f"    - Easy Negative  (w=1.0): {easy_negative.sum():,}")
+
+    return sample_weight

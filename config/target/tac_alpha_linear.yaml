@@ -1,0 +1,19 @@
+
+name: "tac_alpha_linear"
+column: "target_tac_linear_residual"   # データセット内のどの列をターゲットにするか
+task_type: "regression"        # 回帰(continuous)か分類(binary/multiclass)か
+prediction_horizon: 5       # 何日先を予測するか（5日後など）
+
+# # コスト関数
+# objective: "huber"
+
+# # 監視指標
+# early_stopping_metric: "src.models.custom_metrics.mean_daily_spearman_ic"
+# metric_direction: maximize
+
+# # 評価関数
+# eval_metric: "RankIC"
+
+# # 最適化指標
+# optimization_metric: "objective_v2"
+# optimization_direction: "maximize"

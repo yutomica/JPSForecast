@@ -1,0 +1,16 @@
+# @package _global_
+# Step 2: TAC Risk (LGBM) ラフチューニング
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 27
+    params:
+      ++hparams.gflu_stages: choice(2, 3, 4)
+      ++hparams.gflu_feature_init_sparsity: choice(0.2, 0.4, 0.6)
+      ++hparams.head_hidden_dims: choice([64], [128, 64], [128, 64, 32])

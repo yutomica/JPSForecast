@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /hparams/gandalf/tac_alpha_gr@hparams
+  - /hparams/anchor@hparams: gandalf_tac_alpha_gr

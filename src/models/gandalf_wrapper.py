@@ -77,7 +77,8 @@ class GANDALFWrapper(BaseModelWrapper):
 
     想定タスク:
     - regression
-    - classification (binary only)
+    - classification
+    - multiclass
 
     主要仕様:
     - fit(X_train, y_train, X_valid, y_valid, sample_weight, model_idx)
@@ -110,9 +111,12 @@ class GANDALFWrapper(BaseModelWrapper):
         self.feature_importances_ = None
         self.feature_names_ = None
         self.is_binary_classification = task_type == "classification"
+        self.is_multiclass = task_type == "multiclass"
+        self.is_classification = self.is_binary_classification or self.is_multiclass
         self.early_stopping_metric = params.pop("early_stopping_metric", "loss")
         self.metric_direction = params.pop("metric_direction", "minimize")
         self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
+        self.classes_ = None
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         
@@ -154,7 +158,23 @@ class GANDALFWrapper(BaseModelWrapper):
 
         batch_size = int(self.params.get("batch_size", 1024))
         num_workers = int(self.params.get("num_workers", 0))
-        
+
+        if self.is_multiclass:
+            self.classes_ = np.sort(np.unique(y_train_np[~np.isnan(y_train_np)]))
+            output_dim = int(len(self.classes_))
+            y_train_np = np.searchsorted(self.classes_, y_train_np).astype(np.float32)
+            y_valid_np = np.searchsorted(self.classes_, y_valid_np).astype(np.float32) if y_valid_np is not None else None
+            target_bias = 0.0
+        elif self.is_binary_classification:
+            y_train_np = self._to_binary_target(y_train_np)
+            y_valid_np = self._to_binary_target(y_valid_np) if y_valid_np is not None else None
+            output_dim = 1
+            target_bias = self._initial_binary_bias(y_train_np)
+        else:
+            # Regression
+            output_dim = 1
+            target_bias = float(np.nanmean(y_train_np)) if len(y_train_np) else 0.0
+
         if is_zarr_train:
             w_np = np.asarray(sample_weight, dtype=np.float32) if sample_weight is not None else None
             train_dataset = ZarrBatchDataset(X_train, y_train_np, w_np, np.where(train_mask)[0], batch_size)
@@ -184,24 +204,6 @@ class GANDALFWrapper(BaseModelWrapper):
 
         if input_dim <= 0:
             raise ValueError("GANDALF received zero input features after preprocessing.")
-
-        if self.task_type == "classification":
-            unique_vals = np.unique(y_train_np[~pd.isna(y_train_np)])
-            if len(unique_vals) > 2:
-                raise ValueError(
-                    "This wrapper currently supports binary classification only. "
-                    f"Detected classes: {unique_vals.tolist()}"
-                )
-            y_train_np = self._to_binary_target(y_train_np)
-            y_valid_np = self._to_binary_target(y_valid_np) if y_valid_np is not None else None
-            output_dim = 1
-            target_bias = self._initial_binary_bias(y_train_np)
-            self.is_binary_classification = True
-        else:
-            # Regression
-            output_dim = 1
-            target_bias = float(np.nanmean(y_train_np)) if len(y_train_np) else 0.0
-            self.is_binary_classification = False
 
         self.model_init_kwargs = {
             "input_dim": input_dim,
@@ -236,6 +238,7 @@ class GANDALFWrapper(BaseModelWrapper):
             patience=max(1, int(self.params.get("lr_patience", 3))),
             min_lr=float(self.params.get("min_lr", 1e-6)),
         )
+        patience = int(self.params.get("patience", self.params.get("early_stopping_patience", 10)))
 
         # --- Resolve Early Stopping Metric ---
         from hydra.utils import get_method
@@ -262,6 +265,7 @@ class GANDALFWrapper(BaseModelWrapper):
         bad_epochs = 0
         self.history = {"train_loss": [], "valid_loss": []}
         ema_val_metric = None
+        loss_name = self._get_loss_name()
 
         for epoch in range(int(self.params.get("max_epochs", 100))):
             if hasattr(train_loader.dataset, "on_epoch_end"):
@@ -274,6 +278,11 @@ class GANDALFWrapper(BaseModelWrapper):
                 if stopping_func is not None:
                     preds_np = np.concatenate(all_preds)
                     targets_np = np.concatenate(all_targets)
+                    
+                    if self.is_multiclass:
+                        # Map targets back to original labels
+                        targets_np = self.classes_[targets_np.astype(int)]
+                    
                     try:
                         sig = inspect.signature(stopping_func)
                         if "dates" in sig.parameters:
@@ -289,9 +298,14 @@ class GANDALFWrapper(BaseModelWrapper):
                 scheduler.step(val_metric)
                 self.history["valid_loss"].append(valid_loss)
                 metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else ""
-                tqdm.write(f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train Loss: {train_loss:.6f} | Valid Loss: {valid_loss:.6f} | {metric_name_log}: {val_metric:.6f}")
                 
-                log_epoch_metrics(model_idx, epoch, {"train_loss": train_loss, "valid_loss": valid_loss, f"valid_{metric_name_log}": val_metric})
+                msg = f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}"
+                if metric_name_log:
+                    msg += f" | {metric_name_log}: {val_metric:.6f}"
+                tqdm.write(msg)
+                
+                if epoch % 10 == 0 or epoch == int(self.params.get("max_epochs", 100)) - 1:
+                    log_epoch_metrics(model_idx, epoch, {"train_loss": train_loss, "valid_loss": valid_loss, f"valid_{metric_name_log}": val_metric})
 
                 if epoch_callback is not None:
                     execute_epoch_pruning(epoch_callback, epoch, np.concatenate(all_preds), np.concatenate(all_targets))
@@ -318,7 +332,7 @@ class GANDALFWrapper(BaseModelWrapper):
                         print(f"Early stopping at epoch {epoch+1}")
                         break
             else:
-                tqdm.write(f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train Loss: {train_loss:.6f}")
+                tqdm.write(f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train {loss_name}: {train_loss:.6f}")
                 best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
 
             self.history["train_loss"].append(train_loss)
@@ -353,14 +367,37 @@ class GANDALFWrapper(BaseModelWrapper):
         with torch.no_grad():
             for xb, _, _ in loader:
                 xb = xb.to(self.device, dtype=torch.float32)
-                out = self.model(xb).squeeze(-1)
-                if self.is_binary_classification:
-                    out = torch.sigmoid(out)
-                preds.append(out.detach().cpu().numpy())
+                out = self.model(xb)
+                if self.is_multiclass:
+                    probs = torch.softmax(out, dim=1).detach().cpu().numpy()
+                    preds.append(probs)
+                elif self.is_binary_classification:
+                    out = torch.sigmoid(out.squeeze(-1))
+                    preds.append(out.detach().cpu().numpy())
+                else:
+                    out = out.squeeze(-1)
+                    preds.append(out.detach().cpu().numpy())
 
         if not preds:
             return np.array([], dtype=np.float32)
+        
+        if self.is_multiclass:
+            return np.concatenate(preds, axis=0)
         return np.concatenate(preds, axis=0).astype(np.float32, copy=False).reshape(-1)
+
+    def _get_loss_name(self) -> str:
+        if self.is_multiclass:
+            return "CE"
+        if self.is_binary_classification:
+            return "BCE"
+        obj = self.params.get("objective", "mse")
+        if obj == "mse":
+            return "MSE"
+        if obj == "asymmetric_mse":
+            return "AsymMSE"
+        if obj == "quantile":
+            return "Quantile"
+        return obj.upper()
 
     def _train_one_epoch(self, train_loader, optimizer, gradient_clip_val: float, epoch: int, max_epochs: int) -> float:
         self.model.train()
@@ -374,7 +411,9 @@ class GANDALFWrapper(BaseModelWrapper):
                 wb = wb.to(self.device, dtype=torch.float32)
 
                 optimizer.zero_grad(set_to_none=True)
-                out = self.model(xb).squeeze(-1)
+                out = self.model(xb)
+                if out.shape[1] == 1:
+                    out = out.squeeze(-1)
                 loss_vec = self._loss_vector(out, yb)
                 # wb.sum()によるゼロ除算/Loss爆発を防ぐためmeanを使用
                 loss = (loss_vec * wb).mean()
@@ -402,13 +441,17 @@ class GANDALFWrapper(BaseModelWrapper):
             for xb, yb, _ in valid_loader:
                 xb = xb.to(self.device, dtype=torch.float32)
                 yb = yb.to(self.device, dtype=torch.float32)
-                out = self.model(xb).squeeze(-1)
+                out = self.model(xb)
+                if out.shape[1] == 1:
+                    out = out.squeeze(-1)
                 loss_vec = self._loss_vector(out, yb)
                 total_loss += loss_vec.sum().detach()
                 total_count += int(loss_vec.numel())
                 
                 if self.early_stopping_metric != "loss":
-                    if self.is_binary_classification:
+                    if self.is_multiclass:
+                        preds = torch.softmax(out, dim=1)
+                    elif self.is_binary_classification:
                         preds = torch.sigmoid(out)
                     else:
                         preds = out
@@ -423,6 +466,8 @@ class GANDALFWrapper(BaseModelWrapper):
         return valid_loss, val_metric, all_preds, all_targets
 
     def _loss_vector(self, out: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if self.is_multiclass:
+            return F.cross_entropy(out, y.long(), reduction="none")
         if self.is_binary_classification:
             return F.binary_cross_entropy_with_logits(out, y.float(), reduction="none")
         
@@ -516,13 +561,14 @@ class GANDALFWrapper(BaseModelWrapper):
         if not self.history or len(self.history.get("train_loss", [])) == 0:
             return
 
+        loss_name = self._get_loss_name()
         plt.figure(figsize=(10, 6))
-        plt.plot(self.history["train_loss"], label="train_loss")
+        plt.plot(self.history["train_loss"], label=f"train_{loss_name.lower()}")
         if len(self.history.get("valid_loss", [])) > 0:
-            plt.plot(self.history["valid_loss"], label="valid_loss")
+            plt.plot(self.history["valid_loss"], label=f"valid_{loss_name.lower()}")
         plt.title(f"GANDALF Learning Curve (Model {model_idx})")
         plt.xlabel("Epochs")
-        plt.ylabel("Loss")
+        plt.ylabel(loss_name)
         plt.legend()
         plt.grid(True)
 

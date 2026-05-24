@@ -399,7 +399,8 @@ class ElasticNetWrapper(BaseModelWrapper):
                     if val_metric is not None and self.early_stopping_metric != "loss":
                         metrics_to_log[f"valid_{metric_name_log}"] = val_metric
                         
-                    log_epoch_metrics(model_idx, epoch, metrics_to_log)
+                    if epoch % 10 == 0 or epoch == 1 or epoch == total_epochs:
+                        log_epoch_metrics(model_idx, epoch, metrics_to_log)
                     
                     if epoch_callback is not None and X_valid is not None:
                         # Pruningは transformed space での予測値を使用 (y_valid も transformed)

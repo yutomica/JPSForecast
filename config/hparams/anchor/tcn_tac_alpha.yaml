@@ -1,5 +1,0 @@
-# [確定レイヤー] TCN 岩盤パラメータ (Grid Search 勝者)
-num_channel: 32
-n_layers: 3
-kernel_size: 3
-window_size: 20

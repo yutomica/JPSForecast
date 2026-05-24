@@ -169,18 +169,18 @@ def predict(target_date: str):
     latest_date = features_df['date'].max()
     all_scores = features_df[features_df['date'] == latest_date][['date', 'scode']].drop_duplicates(subset='scode').copy()
     registered_models = client.search_registered_models(filter_string="name LIKE '%'")
-    production_models = []
+    models = []
     for rm in registered_models:
         for v in rm.latest_versions:
             if v.current_stage == 'Production':
-                production_models.append(v)
+                models.append(v)
                 print(f"  - Found: {v.name} (Version: {v.version}, Stage: {v.current_stage})")
                 break
-    if not production_models:
+    if not models:
         print("No models found in 'Production' stage. Exiting.")
         return
 
-    for model_version in production_models:
+    for model_version in models:
         model_name = model_version.name
         model_uri = f"models:/{model_name}/Production"
         print(f"\nScoring with {model_name}...")
@@ -284,8 +284,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--date",
         type=str,
-        default=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
-        help="Target date for prediction in YYYY-MM-DD format. Defaults to yesterday."
+        default=datetime.now().strftime('%Y-%m-%d'),
+        help="Target date for prediction in YYYY-MM-DD format. Defaults to today."
     )
     args = parser.parse_args()
 

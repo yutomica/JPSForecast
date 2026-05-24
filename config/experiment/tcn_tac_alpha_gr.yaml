@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /hparams/tcn/tac_alpha_gr@hparams
+  - /hparams/anchor@hparams: tcn_tac_alpha_gr

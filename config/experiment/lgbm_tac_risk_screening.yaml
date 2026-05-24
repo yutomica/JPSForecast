@@ -3,5 +3,11 @@ defaults:
   - lgbm_tac_risk
   - override /hparams: lgbm_screening
 mode: "feature_screening"
+preprocess:
+  class_weight:
+    enabled: True
+    num_classes: 4
+    clip_min: 1.0
+    clip_max: 10.0
 mlflow:
   experiment_name: "Feature_Screening"

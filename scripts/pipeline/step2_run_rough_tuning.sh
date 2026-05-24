@@ -14,7 +14,6 @@ export LOKY_MAX_CPU_COUNT=1
 # MLflow設定
 DB_ABS_PATH="$(pwd)/mlflow.db"
 export MLFLOW_TRACKING_URI="sqlite:///${DB_ABS_PATH}"
-export exp_name="Rough_Tuning"
 export PYTHONPATH=$PYTHONPATH:.
 
 run_sweep() {
@@ -30,6 +29,7 @@ run_sweep() {
     local features="features_${model}_${target}_rough"
     local sweep="${model}_${target}_rough"
     local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local exp_name="JPSForecast_${target}"
 
     local study_name=${OPTUNA_STUDY_NAME:-"rough_tuning_${model}_${target}_${timestamp}"}
 
@@ -77,9 +77,10 @@ run_sweep() {
         period=${domain}_standard \
         features=${features} \
         experiment=${model}_${target} \
+        ++mlflow.experiment_name="${exp_name}" \
+        ++mlflow.run_name="Step2_Rough_Tuning_${model}_${target}" \
         sweep=${sweep} \
         cv=cpcv \
-        mlflow.experiment_name="${exp_name}" \
         hydra.sweeper.study_name="${study_name}" \
         $gpu_args \
         "${extra_args[@]}"
@@ -90,19 +91,8 @@ run_sweep() {
 }
 
 # --- Execution ---
-# run_sweep "tac" "lgbm" "alpha" "8" "0"
-# run_sweep "tac" "lgbm" "risk"  "8" "0"
-# run_sweep "str" "lgbm" "alpha" "8" "0"
-# run_sweep "str" "lgbm" "risk"  "8" "0"
-run_sweep "tac" "lgbm" "alpha_gr" "9" "0" 
+# run_sweep "tac" "lgbm" "alpha_gr" "9" "0" 
+# run_sweep "str" "lgbm" "alpha" "9" "0" 
+# run_sweep "tac" "gandalf" "alpha_gr" "6" "1"
 
-
-# run_sweep "tac" "tcn" "alpha" "8" "1"
-# run_sweep "tac" "tcn" "risk" "8" "1"
-# run_sweep "str" "tcn" "alpha"  "4" "1"
-# run_sweep "str" "tcn" "risk"  "4" "1"
-
-# run_sweep "tac" "ft_transformer" "alpha" "2" "1"
-# run_sweep "tac" "ft_transformer" "risk" "6" "1"
-# run_sweep "str" "ft_transformer" "alpha" "2" "1"
-# run_sweep "str" "ft_transformer" "risk" "2" "1"
+run_sweep "tac" "tcn" "alpha_gr" "8" "1"

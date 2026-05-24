@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /hparams/gandalf/tac_risk@hparams
+  - /hparams/anchor@hparams: gandalf_tac_risk
+
+preprocess:
+  class_weight:
+    enabled: true
+    num_classes: 4
+    clip_min: 1.0
+    clip_max: 10.0

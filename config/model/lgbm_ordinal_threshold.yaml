@@ -1,0 +1,5 @@
+name: lgbm_ordinal_threshold
+group: lgbm
+data_category: tabular
+preprocessor_target: src.preprocess.preprocess_lgbm.LGBMPreprocessor
+model_target: src.models.lgbm_wrapper.LGBMOrdinalThresholdWrapper

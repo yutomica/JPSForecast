@@ -15,5 +15,5 @@ metric_direction: maximize
 eval_metric: "RankIC"
 
 # 最適化指標
-optimization_metric: "composite_tac"
+optimization_metric: "objective_v2"
 optimization_direction: "maximize"

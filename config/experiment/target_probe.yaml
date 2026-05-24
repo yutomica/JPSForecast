@@ -1,0 +1,28 @@
+# @package _global_
+hparams:
+  n_estimators: 300
+  num_leaves: 7
+  max_depth: 3
+  min_child_samples: 500
+  subsample: 0.8
+  subsample_freq: 1
+  colsample_bytree: 0.8
+  reg_alpha: 1.0
+  reg_lambda: 5.0
+  max_bin: 255
+  random_state: 42
+  n_jobs: -1
+  use_time_decay: false
+  verbose: -1
+  # ordinal threshold wrapper用
+  ordinal_thresholds: [1, 2, 3]
+  ordinal_score_weights: [0.2, 0.3, 0.5]
+  output_mode: weighted_score
+  enforce_monotonic_probs: true
+  early_stopping_enabled: false
+
+ordinal_pos_weight:
+  enabled: true
+  method: sqrt_neg_pos_ratio
+  max_scale_pos_weight: 5.0 
+  learning_rate: 0.05

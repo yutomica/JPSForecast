@@ -1,7 +1,0 @@
-# @package _global_
-defaults:
-  - lgbm_str_alpha
-  - override /hparams: lgbm_screening
-mode: "feature_screening"
-mlflow:
-  experiment_name: "Feature_Screening"

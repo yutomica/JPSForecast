@@ -1,9 +1,0 @@
-# [理論レイヤー] STR Alpha (TCN): 60日トレンド
-defaults:
-  - base
-
-fair_c: 12.0
-
-# 中長期的な安定性を重視したボトルネック設計
-dropout: 0.25
-grad_accum_steps: 2

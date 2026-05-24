@@ -1,4 +1,0 @@
-# [確定レイヤー] Step 2で見つけたLGBM岩盤パラメータ
-num_leaves: 3
-max_depth: 2
-min_child_samples: 1000

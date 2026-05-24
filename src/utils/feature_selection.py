@@ -57,10 +57,24 @@ def calculate_shap(model, X_valid):
         explainer = shap.TreeExplainer(model.model)
 
     shap_values = explainer.shap_values(X_input)
-    # 回帰の場合、shap_valuesはndarray。クラス分類の場合はリストの可能性あり
+    
+    # 評価値の集計 (1Dの重要度ベクトルを生成)
     if isinstance(shap_values, list):
-        shap_values = shap_values[1] # バイナリ分類のPositiveクラスなどを想定
-    abs_shap = np.abs(shap_values).mean(axis=0)
+        # 多クラス分類等の場合、各クラスの絶対SHAP値の平均をとる
+        # shap_values は [ (n_samples, n_features), ... ] のリスト
+        abs_shap_list = [np.abs(sv).mean(axis=0) for sv in shap_values]
+        abs_shap = np.mean(abs_shap_list, axis=0)
+    else:
+        # ndarrayの場合 (回帰や、SHAPバージョンにより多クラスが3D ndarrayで返る場合)
+        # axis=0 でサンプル方向に平均をとる
+        abs_shap_agg = np.abs(shap_values).mean(axis=0)
+        if abs_shap_agg.ndim > 1:
+            # 3D ndarray (n_samples, n_features, n_classes) だった場合、
+            # axis=0平均で (n_features, n_classes) になっているので、クラス方向にさらに平均
+            abs_shap = abs_shap_agg.mean(axis=-1)
+        else:
+            abs_shap = abs_shap_agg
+            
     return abs_shap
 
 def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, feature_cols, baseline_score, task_type, target_col, opt_metric="ic", n_repeats=5, random_state=42):
@@ -72,6 +86,15 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
     # 型変換とデータのコピーを作成
     X_mat = _ensure_float32_ndarray(X_valid).copy()
     
+    # 外部のbaseline_scoreとデータ型変換(float32 ndarray化)による予測スコアのズレを防ぐため、
+    # 変換後の X_mat を用いて内部ベースラインを再計算する
+    p_internal_base = model.predict(X_mat)
+    m_internal_base = evaluate_metrics(y_valid, p_internal_base, y_ret=y_ret_valid, task_type=task_type, target_col=target_col, dates=dates_for_shuffle)
+    internal_baseline_score = m_internal_base.get(opt_metric)
+    if internal_baseline_score is None:
+        m_base_lower = {k.lower(): v for k, v in m_internal_base.items()}
+        internal_baseline_score = m_base_lower.get(opt_metric.lower(), np.nan)
+
     # 実行環境（Apple Silicon等）での高速化のため、
     # 日付グループごとのシャッフルインデックスを事前にn_repeats回分計算してキャッシュする
     _, date_ids = np.unique(dates_for_shuffle, return_inverse=True)
@@ -105,11 +128,17 @@ def calculate_mda(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
             # シャッフル後のデータで予測
             p_permuted = model.predict(X_mat)
             m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=task_type, target_col=target_col, dates=dates_for_shuffle)
-            permuted_score = m_permuted.get(opt_metric, np.nan)
+            
+            # Case-insensitive metric lookup
+            permuted_score = m_permuted.get(opt_metric)
+            if permuted_score is None:
+                m_perm_lower = {k.lower(): v for k, v in m_permuted.items()}
+                permuted_score = m_perm_lower.get(opt_metric.lower(), np.nan)
+            
             scores.append(permuted_score)
             
         # 平均精度低下幅を記録 (MDA)
-        mda_val = baseline_score - np.nanmean(scores)
+        mda_val = internal_baseline_score - np.nanmean(scores)
         fold_mda[col_name] = 0.0 if abs(mda_val) < 1e-15 else mda_val
         
         # --- 対象列を元の値に復元 (In-place) ---
@@ -213,7 +242,13 @@ def calculate_cfi(model, X_valid, y_valid, y_ret_valid, dates_for_shuffle, featu
             
         p_permuted = model.predict(X_pred_input)
         m_permuted = evaluate_metrics(y_valid, p_permuted, y_ret=y_ret_valid, task_type=task_type, target_col=target_col, dates=dates_for_shuffle)
-        permuted_score = m_permuted.get(opt_metric, np.nan)
+        
+        # Case-insensitive metric lookup
+        permuted_score = m_permuted.get(opt_metric)
+        if permuted_score is None:
+            m_perm_lower = {k.lower(): v for k, v in m_permuted.items()}
+            permuted_score = m_perm_lower.get(opt_metric.lower(), np.nan)
+            
         cfi_val = baseline_score - permuted_score
         fold_cfi[group_name] = 0.0 if abs(cfi_val) < 1e-15 else cfi_val
         

@@ -2,6 +2,3 @@
 defaults:
   - base
 
-asym_alpha: 3.5
-asym_beta: 1.0
-

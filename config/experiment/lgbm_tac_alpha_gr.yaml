@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /hparams/lgbm/tac_alpha_gr@hparams
-  - /hparams/anchor@hparams: lgbm_tac_alpha
+  - /hparams/anchor@hparams: lgbm_tac_alpha_gr
 
 preprocess:
   matrix_weight:

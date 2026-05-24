@@ -25,10 +25,21 @@ from src.cv.cv_viz import log_split_info
 from src.preprocess.weights import calculate_time_decay_weights, calculate_sample_weights
 from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
-from src.evaluation.metrics import evaluate_metrics, calculate_bin_stats
+from src.evaluation.metrics import (
+    evaluate_metrics, calculate_bin_stats,
+    calc_fold_metrics, calculate_extra_bin_metrics
+)
+from src.evaluation.objectives import (
+    aggregate_fold_metrics, calc_objective_v2,
+    calc_tac_risk_objective
+)
+
 from src.utils.feature_selection import calculate_shap, calculate_mda, calculate_cfi
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
-from src.utils.sampling import apply_sampling, apply_target_stratified_sampling, apply_2d_matrix_weight
+from src.utils.sampling import (
+    apply_sampling, apply_target_stratified_sampling, apply_2d_matrix_weight,
+    make_train_fold_class_weight, make_sample_weight, apply_hard_negative_weighting
+)
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
 # alembic のロガーを取得し、ログレベルを WARNING に上げる
@@ -50,6 +61,10 @@ def train(cfg: DictConfig) -> float:
     client, experiment_id, parent_run_id, stack = setup_mlflow_run(cfg)
 
     with stack:
+        # --- タグの記録 ---
+        if "tags" in cfg.mlflow:
+            mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags, resolve=True))
+            
         mlflow.log_param("model_group", cfg.model.get("group", "unknown"))
         # --- コンフィグの保存 ---
         # 全設定を辞書形式にして記録（ドメイン、ターゲット、特徴量、HParams全てが含まれる）
@@ -237,7 +252,7 @@ def train(cfg: DictConfig) -> float:
         # ターゲット共通の目的関数設定をマージ (hparams側に設定がない場合のみターゲットから取得)
         if "objective" in cfg.target:
             if "objective" not in full_params and "loss" not in full_params:
-                full_params["objective"] = cfg.target.objective
+                full_params["objective"] = cfg.target.get("objective")
         # 目的関数に関連するパラメータをターゲットから取得
         # hparams側が優先されるようにして、個別のチューニングを許容する
         target_keys = ["fair_c", "tweedie_variance_power", "asym_alpha", "asym_beta", "quantile", "target_transform", "custom_objective", "custom_metric"]
@@ -245,7 +260,7 @@ def train(cfg: DictConfig) -> float:
             if key in cfg.target and key not in full_params:
                 full_params[key] = cfg.target[key]
         # モデルごとのパラメータ名マッピング
-        obj = cfg.target.objective
+        obj = cfg.target.get("objective")
         if obj == "asymmetric_mse":
             # TCN/FT-Transformer は alpha/beta という名前を期待する場合がある (Wrapper実装に合わせる)
             if cfg.model.name.lower() in ["tcn", "ft_transformer"]:
@@ -268,6 +283,8 @@ def train(cfg: DictConfig) -> float:
         models = []
         all_results = []
         valid_metrics = []
+        train_metrics = []
+        fold_metrics_results = []
         # スクリーニング結果格納用
         all_fold_mda_values = []
         all_fold_cfi_values = []
@@ -340,6 +357,43 @@ def train(cfg: DictConfig) -> float:
                 train_meta_subset = meta_df.loc[train_idx].copy()
                 w_train *= apply_2d_matrix_weight(train_meta_subset, return_col='Future_Close', cost_buffer=cost_buffer)
 
+            # Hard Negative Weighting
+            if cfg.get("preprocess", {}).get("hard_negative_weighting", {}).get("enabled", False):
+                train_meta_subset = meta_df.loc[train_idx].copy()
+                w_train *= apply_hard_negative_weighting(train_meta_subset)
+
+            # Class Weighting for imbalanced multiclass target
+            if cfg.get("preprocess", {}).get("class_weight", {}).get("enabled", False):
+                cw_cfg = cfg.preprocess.class_weight
+                num_classes = cw_cfg.get("num_classes", 4)
+                clip_min = cw_cfg.get("clip_min", 1.0)
+                clip_max = cw_cfg.get("clip_max", 10.0)
+                # train fold の y_train のみを使って重みを計算 (Data Leakage 防止)
+                y_train_series = meta_df.loc[train_idx, target_col]
+                class_weight_dict, class_counts = make_train_fold_class_weight(
+                    y_train_series, 
+                    num_classes=num_classes, 
+                    clip_min=clip_min, 
+                    clip_max=clip_max
+                )
+                # サンプルごとの重みに変換
+                w_class = make_sample_weight(y_train_series, class_weight_dict)
+                w_train *= w_class
+                # MLflow へのログ記録 (各Foldごと)
+                total_n = class_counts.sum()
+                for cls_idx in range(num_classes):
+                    mlflow.log_metric(f"fold{i}_class_count_{cls_idx}", float(class_counts[cls_idx]))
+                    mlflow.log_metric(f"fold{i}_class_weight_{cls_idx}", float(class_weight_dict[cls_idx]))
+                # ポジティブ率 (5%, 7%, 10% 閾値) の計算・記録
+                if num_classes >= 4:
+                    pos_rate_5 = (class_counts[1] + class_counts[2] + class_counts[3]) / total_n
+                    pos_rate_7 = (class_counts[2] + class_counts[3]) / total_n
+                    pos_rate_10 = class_counts[3] / total_n
+                    mlflow.log_metric(f"fold{i}_positive_rate_5", float(pos_rate_5))
+                    mlflow.log_metric(f"fold{i}_positive_rate_7", float(pos_rate_7))
+                    mlflow.log_metric(f"fold{i}_positive_rate_10", float(pos_rate_10))
+                print(f"    - Class weight mode enabled.")
+
             # メモリ上の配列から必要な行のみを読み出し
             print(f"  🔹 Transforming data...")
             # 各Foldごとに独立したインスタンスを使用するためディープコピー
@@ -409,11 +463,34 @@ def train(cfg: DictConfig) -> float:
                 mlflow.log_metric(f"fold{i}_best_iteration", float(best_iter))
 
             # 予測の実行
-            preds = {
+            preds_raw = {
                 'train': model.predict(X_train),
                 'valid': model.predict(X_valid),
                 'test':  model.predict(X_test) if X_test is not None else None
             }
+            
+            # DataFrame格納用に1D化 (マルチクラスの場合は期待値または代表値)
+            preds_1d = {}
+            for phase, p in preds_raw.items():
+                if p is None:
+                    preds_1d[phase] = None
+                elif p.ndim == 2:
+                    # Multiclass probabilities (N, C) -> Expected class index (N,)
+                    preds_1d[phase] = np.dot(p, np.arange(p.shape[1]))
+                else:
+                    preds_1d[phase] = p
+
+            # --- Fold別詳細メトリクス算出 (Step4 Objective用) ---
+            if preds_raw['valid'] is not None:
+                eval_df_fold = pd.DataFrame({
+                    'date': valid_dates,
+                    'pred': preds_1d['valid'],
+                    'y_true': y_valid,
+                    'y_ret': meta_df.loc[valid_idx, 'Future_Close'].values - 1.0
+                })
+                c_buffer_fold = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
+                f_metrics = calc_fold_metrics(eval_df_fold, cost_buffer=c_buffer_fold, y_pred=preds_raw['valid'])
+                fold_metrics_results.append(f_metrics)
 
             # --- 特徴量スクリーニングロジック ---
             if cfg.get("mode") == "feature_screening":
@@ -428,7 +505,7 @@ def train(cfg: DictConfig) -> float:
             # メトリクス算出 (Train / Valid / Test)
             valid_score = None
             for phase in ['train', 'valid', 'test']:
-                if preds[phase] is not None:
+                if preds_raw[phase] is not None:
                     idx = locals()[f'{phase}_idx']
                     y_true = locals()[f'y_{phase}']
                     # 評価用ICの計算対象として生リターン（Future_Close）を取得
@@ -436,10 +513,22 @@ def train(cfg: DictConfig) -> float:
                     dates = meta_df.loc[idx, 'date'].values
                     # cost_buffer の取得 (configから)
                     c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
-                    m = evaluate_metrics(y_true, preds[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10), cost_buffer=c_buffer)
+                    m = evaluate_metrics(y_true, preds_raw[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10), cost_buffer=c_buffer)
+
+                    # --- 追加指標 (Bin/Top10) ---
+                    if phase == 'valid':
+                        eval_df_extra = pd.DataFrame({
+                            'date': dates,
+                            'score': preds_1d[phase],
+                        })
+                        for c in ['Future_High', 'Future_Low', 'Future_Close']:
+                            eval_df_extra[c] = meta_df.loc[idx, c].values
+                        extra_m = calculate_extra_bin_metrics(eval_df_extra, score_col='score')
+                        m.update(extra_m)
+
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
-                    # Validの指定メトリクスを収集
+                    # 指定メトリクスを収集
                     if phase == 'valid':
                         score = m.get(eval_metric)
                         if score is None:
@@ -448,6 +537,8 @@ def train(cfg: DictConfig) -> float:
                             score = m_lower.get(eval_metric.lower(), np.nan)
                         valid_metrics.append(score)
                         valid_score = score
+                    elif phase == 'train':
+                        train_metrics.append(m.get(eval_metric, np.nan))
             
             # 特徴量精査 (MDA) ロジックの追加
             if cfg.get("mode") == "feature_select":
@@ -463,32 +554,16 @@ def train(cfg: DictConfig) -> float:
                 )
                 all_fold_mda_values.append(fold_mda)
                 
-                # # CFI (Clustered Feature Importance) の計算
-                # feature_groups_path = cfg.get("feature_groups_path", "clustered_features.yaml")
-                # if os.path.exists(feature_groups_path):
-                #     print(f"  🔹 [Selection] Calculating CFI using {opt_metric_name} for Fold {i}...")
-                #     with open(feature_groups_path, 'r') as f:
-                #         yaml_data = yaml.safe_load(f)
-                #         feature_groups = yaml_data.get("feature_groups", {})
-                #     if feature_groups:
-                #         fold_cfi = calculate_cfi(
-                #             model=model, X_valid=X_valid, y_valid=y_valid, y_ret_valid=y_ret_valid,
-                #             dates_for_shuffle=dates_for_shuffle, feature_groups=feature_groups,
-                #             feature_cols=feature_cols, baseline_score=baseline_score,
-                #             task_type=cfg.target.task_type, target_col=target_col, opt_metric=opt_metric_name
-                #         )
-                #         all_fold_cfi_values.append(fold_cfi)
-            
             # ビン分析用データの蓄積 
             # メタデータ(Future_High/Low/Close)を含めてDataFrame化
             for phase in ['valid', 'test']:
-                if preds[phase] is not None:
+                if preds_raw[phase] is not None:
                     idx = locals()[f'{phase}_idx'] # valid_idx or test_idx
                     res_df = pd.DataFrame({
                         'date': meta_df.loc[idx, 'date'],
                         'scode': meta_df.loc[idx, 'scode'],
                         'target': locals()[f'y_{phase}'],
-                        'score': preds[phase],
+                        'score': preds_1d[phase],
                         'phase': phase,
                         'fold': i
                     }).reset_index(drop=True)
@@ -529,49 +604,74 @@ def train(cfg: DictConfig) -> float:
             mlflow.log_artifact(output_filename)
             print(f"✅ Feature Sharpe results saved to {output_filename} (Group Threshold check needed).")
             
-        # # CFI の集計と保存 ---
-        # if cfg.get("mode") == "feature_select" and all_fold_cfi_values:
-        #     cfi_df = pd.DataFrame(all_fold_cfi_values)
-        #     output_filename_cfi = f"cfi_results_{cfg.model.name}_{cfg.domain.name}_{cfg.target.name}.csv"
-        #     cfi_df.to_csv(output_filename_cfi)
-        #     mlflow.log_artifact(output_filename_cfi)
-        #     print(f"✅ CFI results saved to {output_filename_cfi}.")
-        
-
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
         if cv_method in ["purged_kfold", "cpcv", "anchored_walk_forward"]:
             test_res = full_res_df[full_res_df['phase'] == 'valid']
         else: 
             test_res = full_res_df[full_res_df['phase'] == 'test']
-        bin_stats = calculate_bin_stats(
-            test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
-            metadata_cols=['Future_High', 'Future_Low', 'Future_Close']
-        )
+            
+        if cfg.get("mode") == "target_probe":
+            max_fold = test_res['fold'].max()
+            metrics = ['Future_High_mean', 'Future_Low_mean', 'Future_Close_mean']
+            combined_df = pd.DataFrame()
+            
+            for f in range(max_fold + 1):
+                fold_data = test_res[test_res['fold'] == f]
+                if not fold_data.empty:
+                    stats = calculate_bin_stats(
+                        fold_data, score_col='score', target_col='target', task_type=cfg.target.task_type,
+                        metadata_cols=['Future_High', 'Future_Low', 'Future_Close'],
+                        date_col='date', n_bins=20
+                    )
+                    for m in metrics:
+                        combined_df[f'fold{f}_{m}'] = stats[m]
+            ordered_cols = []
+            for m in metrics:
+                for f in range(max_fold + 1):
+                    col = f'fold{f}_{m}'
+                    if col in combined_df.columns:
+                        ordered_cols.append(col)
+            bin_stats = combined_df[ordered_cols]
+            output_filename = f"bin_analysis_{cfg.domain.name}_{cfg.target.name}.csv"
+            bin_stats.to_csv(output_filename)
+            print(f"✅ Bin analysis results saved to {output_filename}")
+        else:
+            bin_stats = calculate_bin_stats(
+                test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
+                metadata_cols=['Future_High', 'Future_Low', 'Future_Close'],
+                date_col='date', n_bins=20
+            )
         
         # --- Pooled OOF Metric の算出 ---
         oof_df = full_res_df[full_res_df['phase'] == 'valid']
-        ndcg_k = cfg.get("ndcg_k", 10)
         if not oof_df.empty:
-            print(f"  🔹 Calculating Pooled OOF Metrics...")
-            y_ret_pooled = oof_df['Future_Close'].values - 1.0 if 'Future_Close' in oof_df.columns else None
-            c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
-            pooled_metrics = evaluate_metrics(
-                y_true=oof_df['target'].values,
-                y_pred=oof_df['score'].values,
-                y_ret=y_ret_pooled,
-                task_type=cfg.target.task_type,
-                target_col=cfg.target.column,
-                dates=oof_df['date'].values,
-                ndcg_k=ndcg_k,
-                cost_buffer=c_buffer
-            )
-            # --- 日次RankICベースのICIRを直接計算 ---
+            print(f"  🔹 Calculating Pooled OOF Metrics (Specialized)...")
+            # CPCV等で同一 date, scode に複数予測がある場合は重複排除
+            # pred: mean, y_true: first, y_ret: first
+            oof_df_clean = oof_df.groupby(['date', 'scode']).agg({
+                'score': 'mean',
+                'target': 'first',
+                'Future_Close': 'first'
+            }).reset_index()
+            
+            eval_df_pooled = pd.DataFrame({
+                'date': oof_df_clean['date'],
+                'pred': oof_df_clean['score'],
+                'y_true': oof_df_clean['target'],
+                'y_ret': oof_df_clean['Future_Close'].values - 1.0
+            })
+            c_buffer_pooled = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
+            pooled_metrics = calc_fold_metrics(eval_df_pooled, cost_buffer=c_buffer_pooled)
+            
+            # MLflowにロギング
+            mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
+
+            # --- 日次RankICベースのICIRを直接計算 (互換性のため) ---
             if opt_metric_name in ["daily_icir", "daily_icir_reb"]:
                 from scipy.stats import spearmanr
                 daily_ics = []
-                df_tmp = oof_df.copy()
-                df_tmp['date'] = pd.to_datetime(df_tmp['date']).dt.date
+                df_tmp = eval_df_pooled.copy()
                 unique_dates = np.sort(df_tmp['date'].unique())
                 if opt_metric_name == "daily_icir_reb":
                     target_dates = set(unique_dates[::11])
@@ -580,8 +680,8 @@ def train(cfg: DictConfig) -> float:
                 for d, group in df_tmp.groupby('date'):
                     if d not in target_dates:
                         continue
-                    g_y_true = group['target'].values
-                    g_y_pred = group['score'].values
+                    g_y_true = group['y_true'].values
+                    g_y_pred = group['pred'].values
                     if len(g_y_true) < 2 or np.max(g_y_pred) == np.min(g_y_pred) or np.max(g_y_true) == np.min(g_y_true): 
                         continue
                     ic, _ = spearmanr(g_y_true, g_y_pred)
@@ -590,11 +690,9 @@ def train(cfg: DictConfig) -> float:
                 if daily_ics:
                     ic_mean = np.mean(daily_ics)
                     ic_std = np.std(daily_ics)
-                    pooled_metrics[opt_metric_name] = ic_mean / (ic_std + 1e-8)
-                else:
-                    pooled_metrics[opt_metric_name] = fallback_metric
-            # MLflowにロギング
-            mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
+                    icir = ic_mean / (ic_std + 1e-8)
+                    mlflow.log_metric(f"pooled_oof_{opt_metric_name}", icir)
+                    pooled_metrics[opt_metric_name] = icir
         else:
             pooled_metrics = {}
             
@@ -606,10 +704,55 @@ def train(cfg: DictConfig) -> float:
             mean_score = np.nanmean(valid_metrics)
             std_score = np.nanstd(valid_metrics)
             min_score = np.nanmin(valid_metrics)
-            if opt_metric_name == "composite_tac":
-                # 統合指標の計算 (Step4 Final Sweep用)
-                rank_ic = pooled_metrics.get("RankIC", 0.0)
-                utility = pooled_metrics.get("cost_adjusted_top30_active_utility_scaled", 0.0)
+            
+            # --- 新規 Objective v2 の計算 ---
+            obj_v2 = 0.0
+            penalty_v2 = 0.0
+            aggregated_f_metrics = {}
+            if fold_metrics_results:
+                aggregated_f_metrics = aggregate_fold_metrics(fold_metrics_results)
+                # MLflowに集計メトリクスを記録 (valid_ prefix)
+                mlflow.log_metrics({f"valid_{k}": v for k, v in aggregated_f_metrics.items()})
+                
+                # 特殊なエイリアスを個別に記録
+                mlflow.log_metric("valid_mean_daily_rankic_mean", aggregated_f_metrics.get('mean_daily_rankic_mean', np.nan))
+                mlflow.log_metric("valid_worst_fold_rankic", aggregated_f_metrics.get('worst_fold_rankic', np.nan))
+                mlflow.log_metric("valid_top30_active_mean_raw", aggregated_f_metrics.get('top30_active_mean_raw_mean', np.nan))
+                mlflow.log_metric("valid_top20_active_mean_raw", aggregated_f_metrics.get('top20_active_mean_raw_mean', np.nan))
+                mlflow.log_metric("valid_top10_active_mean_raw", aggregated_f_metrics.get('top10_active_mean_raw_mean', np.nan))
+
+                obj_v2, penalty_v2 = calc_objective_v2(aggregated_f_metrics)
+                mlflow.log_metric("objective_v2", obj_v2)
+                mlflow.log_metric("objective_penalty_total", penalty_v2)
+                
+                # 成分ごとの記録
+                mlflow.log_metric("objective_component_mean_daily_rankic", aggregated_f_metrics.get('mean_daily_rankic_mean', 0))
+                mlflow.log_metric("objective_component_top30_active_mean_scaled", aggregated_f_metrics.get('top30_active_mean_scaled_mean', 0))
+                mlflow.log_metric("objective_component_top20_active_mean_scaled", aggregated_f_metrics.get('top20_active_mean_scaled_mean', 0))
+                mlflow.log_metric("objective_component_top_quintile_spread_scaled", aggregated_f_metrics.get('top_quintile_spread_scaled_mean', 0))
+                mlflow.log_metric("objective_component_top30_rankic_alpha_scaled", aggregated_f_metrics.get('top30_rankic_alpha_scaled_mean', 0))
+                mlflow.log_metric("objective_component_worst_fold_rankic", aggregated_f_metrics.get('worst_fold_rankic', 0))
+                mlflow.log_metric("objective_component_positive_day_ratio_scaled", aggregated_f_metrics.get('positive_day_ratio_scaled_mean', 0))
+
+            # 過学習診断 gap
+            train_mean_ic = np.nanmean(train_metrics) if train_metrics else 0.0
+            valid_mean_ic = aggregated_f_metrics.get('mean_daily_rankic_mean', 0.0)
+            mlflow.log_metric("train_valid_rankic_gap", train_mean_ic - valid_mean_ic)
+            
+            train_top30_active = np.nanmean([m.get('top30_active_mean_raw', 0.0) for m in fold_metrics_results]) if fold_metrics_results else 0.0
+            valid_top30_active = aggregated_f_metrics.get('top30_active_mean_raw_mean', 0.0)
+            mlflow.log_metric("train_valid_top30_active_mean_gap", train_top30_active - valid_top30_active)
+
+            if opt_metric_name == "objective_v2":
+                final_opt_score = obj_v2
+                print(f"  🔹 Objective V2: {final_opt_score:.6f} (Penalty: {penalty_v2:.4f})")
+            elif opt_metric_name == "tac_risk_class_guarded_ap":
+                final_opt_score = calc_tac_risk_objective(fold_metrics_results)
+                print(f"  🔹 TAC Risk Guarded AP Objective: {final_opt_score:.6f}")
+            elif opt_metric_name == "composite_tac":
+                # 統合指標の計算 (Step4 Final Sweep用 - 互換性のために残すが objective_v2 を推奨)
+                rank_ic = pooled_metrics.get("RankIC", pooled_metrics.get("mean_daily_rankic", 0.0))
+                utility = pooled_metrics.get("top30_active_utility_scaled", 0.0)
                 spread = pooled_metrics.get("top_quintile_spread_scaled", 0.0)
                 alpha_ic = pooled_metrics.get("top30_rankic_alpha_scaled", 0.0)
                 pos_ratio = pooled_metrics.get("positive_day_ratio_scaled", 0.0)

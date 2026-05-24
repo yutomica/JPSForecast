@@ -2,7 +2,7 @@
 _target_: src.cv.anchored_walk_forward.AnchoredWalkForwardPurgedCV
 
 # 例: 最初の252営業日で学習し、その後63営業日ごとに検証
-n_splits: 5
+n_splits: 7
 min_train_size: 252
 val_size: 252
 step_size: 252

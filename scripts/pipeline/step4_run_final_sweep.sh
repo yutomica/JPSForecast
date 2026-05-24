@@ -12,7 +12,6 @@ export NUMEXPR_NUM_THREADS=1
 export LOKY_MAX_CPU_COUNT=1
 
 export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
-export exp_name="Final_Sweep"
 export PYTHONPATH=$PYTHONPATH:.
 
 # ドライランモード
@@ -32,6 +31,7 @@ run_final_sweep() {
     local features="features_${model}_${target}_fixed"
     local sweep="${model}_${target}_final"
     local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local exp_name="JPSForecast_${target}"
 
     local study_name=${OPTUNA_STUDY_NAME:-"final_sweep_${model}_${target}_${timestamp}"}
 
@@ -93,6 +93,7 @@ run_final_sweep() {
         mlflow.experiment_name="${exp_name}" \
         sweep=${sweep} \
         +mode=final_sweep \
+        ++mlflow.run_name="Step4_Final_Sweep_${model}_${target}" \
         experiment=${model}_${target} \
         "${optuna_args[@]}" \
         $gpu_args \
@@ -104,17 +105,8 @@ run_final_sweep() {
 }
 
 # --- Execution ---
-run_final_sweep "tac" "lgbm" "alpha_gr" "12" "0"
-# run_final_sweep "tac" "lgbm" "risk"  "8" "0"
-# run_final_sweep "str" "lgbm" "risk"  "8" "0"
-# run_final_sweep "tac" "elasticnet" "alpha" "10" "0"
-# run_final_sweep "tac" "elasticnet" "risk" "10" "0"
-# run_final_sweep "str" "elasticnet" "alpha" "10" "0"
-# run_final_sweep "str" "elasticnet" "risk" "10" "0"
+# run_final_sweep "tac" "lgbm" "alpha_gr" "8" "0"
+# run_final_sweep "str" "lgbm" "alpha"  "8" "0"
+run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0"
 
-
-# run_final_sweep "tac" "tcn" "alpha" "8" "1"
-
-# run_final_sweep "tac" "tcn" "risk" "4" "1"
-# run_final_sweep "tac" "ft_transformer" "alpha" "2" "1"
-# run_final_sweep "tac" "ft_transformer" "risk" "2" "1"
+# run_final_sweep "tac" "tcn" "alpha_gr" "8" "1"

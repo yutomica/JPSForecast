@@ -32,7 +32,7 @@ def create_pruning_callback(client, experiment_id, parent_run_id=None, fold_idx=
         past_fold_scores = []
     warmup_epochs = int(total_epochs * warmup_ratio)
     target_metric = f"fold{fold_idx}_accumulated_epoch_valid_ic"
-    
+
     # 過去のRunを取得
     filter_string = f"tags.mlflow.parentRunId = '{parent_run_id}'" if parent_run_id else ""
     runs = client.search_runs(
@@ -40,7 +40,7 @@ def create_pruning_callback(client, experiment_id, parent_run_id=None, fold_idx=
         filter_string=filter_string,
         max_results=1000
     )
-    
+
     # エポックごとのスコア履歴を集計
     epoch_scores = {}
     for run in runs:
@@ -53,10 +53,10 @@ def create_pruning_callback(client, experiment_id, parent_run_id=None, fold_idx=
                 epoch_scores[epoch].append(m.value)
         except Exception:
             continue
-            
+
     # n_startup_trials以上の履歴があるエポックのみ中央値を計算
     epoch_medians = {ep: np.median(scores) for ep, scores in epoch_scores.items() if len(scores) >= n_startup_trials}
-    
+
     # 連続で下回った回数をカウントするクロージャ用変数
     state = {"underperform_count": 0}
 
@@ -68,17 +68,19 @@ def create_pruning_callback(client, experiment_id, parent_run_id=None, fold_idx=
             accumulated_score = current_score
 
         # 現在のエポックの蓄積スコアをMLflowに記録（次回のTrialの中央値計算に必要）
-        mlflow.log_metric(target_metric, accumulated_score, step=epoch)
-        
+        # SQLiteの負荷軽減のため、10イテレーションごとにログを記録する
+        if epoch % 10 == 0 or epoch == total_epochs - 1:
+            mlflow.log_metric(target_metric, accumulated_score, step=epoch)
+
         # 序盤のウォームアップ期間（例：3割）は枝刈りしない
         if epoch <= warmup_epochs:
             return
-            
+
         if epoch in epoch_medians:
             median_score = epoch_medians[epoch]
             # マージンを引いた閾値を設定
             threshold = median_score - pruning_margin
-            
+
             print(f"   [Pruning Check] Fold {fold_idx} Epoch {epoch} | Acc IC: {accumulated_score:.4f} | Median IC: {median_score:.4f} (Threshold: {threshold:.4f})")
             if accumulated_score < threshold:
                 state["underperform_count"] += 1
@@ -90,5 +92,5 @@ def create_pruning_callback(client, experiment_id, parent_run_id=None, fold_idx=
             else:
                 # 基準を上回ったらカウントをリセット
                 state["underperform_count"] = 0
-                
+
     return pruning_callback
