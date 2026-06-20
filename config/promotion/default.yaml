@@ -5,16 +5,34 @@ promotions:
     domain: tac
     role: alpha_gr
     study: "final_sweep_lgbm_tac_alpha_gr_20260509_212938"
-    enabled: false
+    enabled: true
 
   - model: lgbm
     domain: str
     role: alpha
     study: "final_sweep_lgbm_str_alpha_20260522_092932"
-    enabled: false
+    enabled: true
+
+  - model: lgbm
+    domain: 10d
+    role: alpha_gr
+    study: "final_sweep_lgbm_10d_alpha_gr_20260615_140104"
+    enabled: true
+
+  - model: lgbm
+    domain: 20d
+    role: alpha_gr
+    study: "final_sweep_lgbm_20d_alpha_gr_20260617_112117"
+    enabled: true
 
   - model: gandalf
     domain: tac
     role: alpha_gr
-    study: "final_sweep_gandalf_tac_alpha_gr_20260524_141241"
+    study: "final_sweep_gandalf_tac_alpha_gr_20260619_095457"
+    enabled: true
+  
+  - model: tcn
+    domain: tac
+    role: alpha_gr
+    study: "final_sweep_tcn_tac_alpha_gr_20260531_210335"
     enabled: true

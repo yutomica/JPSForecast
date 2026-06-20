@@ -4,3 +4,4 @@ _target_: "src.models.tcn_wrapper.TCNWrapper"
 preprocessor_target: "src.preprocess.preprocess_tcn.TCNPreprocessor"
 model_target: "src.models.tcn_wrapper.TCNWrapper"
 data_category: "timeseries"
+ensemble_size: 1

@@ -116,6 +116,11 @@ class GANDALFWrapper(BaseModelWrapper):
         self.early_stopping_metric = params.pop("early_stopping_metric", "loss")
         self.metric_direction = params.pop("metric_direction", "minimize")
         self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
+        self.early_stopping_smooth_window = int(params.pop("early_stopping_smooth_window", 1))
+
+        # smooth_window が指定されている場合は alpha に変換 (EMAとして扱う)
+        if self.early_stopping_smooth_window > 1 and self.early_stopping_ema_alpha == 1.0:
+            self.early_stopping_ema_alpha = 2.0 / (self.early_stopping_smooth_window + 1.0)
         self.classes_ = None
 
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
@@ -262,7 +267,8 @@ class GANDALFWrapper(BaseModelWrapper):
 
         best_metric_val = float("-inf") if self.metric_direction == "maximize" else float("inf")
         best_state = None
-        bad_epochs = 0
+        self.best_epoch_ = int(self.params.get("max_epochs", 100)) - 1
+        wait = 0
         self.history = {"train_loss": [], "valid_loss": []}
         ema_val_metric = None
         loss_name = self._get_loss_name()
@@ -302,19 +308,25 @@ class GANDALFWrapper(BaseModelWrapper):
                 msg = f"Epoch {epoch+1}/{int(self.params.get('max_epochs', 100))} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}"
                 if metric_name_log:
                     msg += f" | {metric_name_log}: {val_metric:.6f}"
-                tqdm.write(msg)
                 
-                if epoch % 10 == 0 or epoch == int(self.params.get("max_epochs", 100)) - 1:
-                    log_epoch_metrics(model_idx, epoch, {"train_loss": train_loss, "valid_loss": valid_loss, f"valid_{metric_name_log}": val_metric})
-
-                if epoch_callback is not None:
-                    execute_epoch_pruning(epoch_callback, epoch, np.concatenate(all_preds), np.concatenate(all_targets))
-
                 # Calculate EMA of validation metric
                 if ema_val_metric is None:
                     ema_val_metric = val_metric
                 else:
                     ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
+
+                if self.early_stopping_ema_alpha < 1.0:
+                    msg += f" | {metric_name_log}_smoothed: {ema_val_metric:.6f}"
+                tqdm.write(msg)
+                
+                if epoch % 10 == 0 or epoch == int(self.params.get("max_epochs", 100)) - 1:
+                    metrics_to_log = {"train_loss": train_loss, "valid_loss": valid_loss, f"valid_{metric_name_log}": val_metric}
+                    if self.early_stopping_ema_alpha < 1.0:
+                        metrics_to_log[f"valid_{metric_name_log}_smoothed"] = ema_val_metric
+                    log_epoch_metrics(model_idx, epoch, metrics_to_log)
+
+                if epoch_callback is not None:
+                    execute_epoch_pruning(epoch_callback, epoch, np.concatenate(all_preds), np.concatenate(all_targets))
 
                 is_best = False
                 if self.metric_direction == "maximize":
@@ -325,6 +337,7 @@ class GANDALFWrapper(BaseModelWrapper):
                 if is_best:
                     best_metric_val = ema_val_metric
                     best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                    self.best_epoch_ = epoch
                     wait = 0
                 else:
                     wait += 1
@@ -618,3 +631,32 @@ class GANDALFWrapper(BaseModelWrapper):
             torch.backends.cudnn.benchmark = False
             import os
             os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if "models" in state and state["models"]:
+            state["_models_state_dicts"] = [{k: v.cpu() for k, v in m.state_dict().items()} for m in state["models"]]
+            del state["models"]
+        elif "model" in state and state["model"] is not None:
+            state["_model_state_dict"] = {k: v.cpu() for k, v in state["model"].state_dict().items()}
+        if "model" in state: 
+            del state["model"]
+        return state
+
+    def __setstate__(self, state):
+        models_states = state.pop("_models_state_dicts", [])
+        model_state = state.pop("_model_state_dict", None)
+        self.__dict__.update(state)
+        if models_states:
+            self.models = []
+            for m_state in models_states:
+                m = GANDALFNet(**self.model_init_kwargs)
+                m.load_state_dict(m_state); m.to(self.device).eval()
+                self.models.append(m)
+            self.model = self.models[0]
+        elif model_state:
+            self.model = GANDALFNet(**self.model_init_kwargs)
+            self.model.load_state_dict(model_state)
+            self.model.to(self.device).eval()
+        else:
+            self.model = None

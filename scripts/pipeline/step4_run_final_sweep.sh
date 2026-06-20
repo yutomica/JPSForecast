@@ -89,7 +89,7 @@ run_final_sweep() {
         features=${features} \
         model=${model} \
         period=${domain}_standard \
-        cv=purged_kfold \
+        cv=anchored_walk_forward \
         mlflow.experiment_name="${exp_name}" \
         sweep=${sweep} \
         +mode=final_sweep \
@@ -105,8 +105,10 @@ run_final_sweep() {
 }
 
 # --- Execution ---
-# run_final_sweep "tac" "lgbm" "alpha_gr" "8" "0"
+# run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0"
 # run_final_sweep "str" "lgbm" "alpha"  "8" "0"
-run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0"
+# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0"
+run_final_sweep "tac" "tcn" "alpha_gr" "3" "0"
 
-# run_final_sweep "tac" "tcn" "alpha_gr" "8" "1"
+# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0"
+# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0"

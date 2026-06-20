@@ -1,14 +1,15 @@
 #!/bin/bash
-# step5_fix_model.sh
-# 承認済みマニフェスト（YAML）に基づき、モデルの固定（Fix）とStaging昇格を一括実行します。
+# step5_fix_models.sh
+# 承認済みマニフェスト（YAML）に基づき、Optunaの最良試行から固定ハイパーパラメータを生成します。
 
 set -e
 
 # デフォルトのマニフェストファイル
 MANIFEST=${1:-"config/promotion/default.yaml"}
+EXTRA_ARGS=("${@:2}")
 
 echo "============================================================"
-echo "🎯 Starting Model Promotion Pipeline"
+echo "🎯 Starting Fixed Model Config Generation"
 echo "   Manifest: ${MANIFEST}"
 echo "============================================================"
 
@@ -23,9 +24,8 @@ export NUMEXPR_NUM_THREADS=1
 export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
 export PYTHONPATH=$PYTHONPATH:.
 
-# Python司令塔スクリプトの実行
-uv run python scripts/pipeline/execute_promotion.py "${MANIFEST}"
+# Pythonスクリプトの実行
+uv run python scripts/pipeline/execute_promotion.py "${MANIFEST}" "${EXTRA_ARGS[@]}"
 
 echo ""
-echo "🎉 Promotion process finished."
-echo "   Please run 'scripts/analysis/evaluate_holdout.py' next to verify scores."
+echo "🎉 Fixed model config generation finished."

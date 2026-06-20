@@ -11,9 +11,10 @@ class FoldPipeline:
 
 class EnsembleInferencePipeline(mlflow.pyfunc.PythonModel):
     """全フォールドのペアを管理し、アンサンブル予測を行う"""
-    def __init__(self, fold_pipelines, col_indices):
+    def __init__(self, fold_pipelines, col_indices, oof_cols=None):
         self.fold_pipelines = fold_pipelines # List[FoldPipeline]
         self.col_indices = col_indices
+        self.oof_cols = oof_cols or []
 
     def predict(self, context: mlflow.pyfunc.PythonModelContext, model_input: pd.DataFrame) -> np.ndarray:
         """
@@ -27,7 +28,21 @@ class EnsembleInferencePipeline(mlflow.pyfunc.PythonModel):
             # 1. そのフォールド固有の統計量で前処理
             # Preprocessor is expected to handle a DataFrame for inference.
             X = fp.preprocessor.transform(model_input)
-            # 2. そのフォールドのモデルで予測
+            
+            # 2. OOF特徴量が存在する場合はオンザフライで結合
+            if self.oof_cols:
+                # pandas DataFrame から values を取得して横結合
+                X_oof = model_input[self.oof_cols].values
+                if isinstance(X, pd.DataFrame):
+                    # In case preprocessor returns DataFrame
+                    X_df = X.copy()
+                    for i, col in enumerate(self.oof_cols):
+                        X_df[col] = X_oof[:, i]
+                    X = X_df
+                else:
+                    X = np.hstack([X, X_oof])
+
+            # 3. そのフォールドのモデルで予測
             preds = fp.model.predict(X)
             all_preds.append(preds)
         

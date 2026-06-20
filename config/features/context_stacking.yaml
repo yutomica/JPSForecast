@@ -1,0 +1,9 @@
+feature_cols:
+  # 例: マーケットやセクターの動向、ボラティリティ状況など
+  - BET_MarketReturn_RAW
+  - BET_MarketReturn_TSZ_20D
+  - BET_MarketTrendIdx_TSR_252D
+  - BET_MarketHV20_RAW
+  - BET_SectorReturn_RAW
+  # - VOL_HistVol20_TSR_252D
+cat_cols: []

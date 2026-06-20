@@ -18,8 +18,8 @@ def _sanitize_tracking_uri(uri: str) -> str:
         return f"{uri}{separator}timeout=60"
     return uri
 
-def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name: str = None) -> str:
-    """親ランのIDを取得または作成する。study_nameが指定された場合はタグ検索による再開を試みる。"""
+def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name: str = None, parent_run_name: str = None) -> str:
+    """親ランのIDを取得または作成する。study_name または parent_run_name が指定された場合は再開・紐付けを試みる。"""
     tracking_uri = _sanitize_tracking_uri(tracking_uri)
     mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient()
@@ -31,6 +31,7 @@ def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name
     mlflow.set_experiment(experiment_name)
     exp = client.get_experiment_by_name(experiment_name)
     
+    # 既存のランを検索 (Study Name優先、次に Parent Run Name)
     if study_name:
         runs = client.search_runs(
             experiment_ids=[exp.experiment_id],
@@ -39,10 +40,20 @@ def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name
         )
         if runs:
             return str(runs[0].info.run_id)
+    
+    if parent_run_name:
+        runs = client.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string=f"tags.'mlflow.runName' = '{parent_run_name}'",
+            max_results=1
+        )
+        if runs:
+            return str(runs[0].info.run_id)
             
     # 新規作成
-    run_name = f"Sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run = client.create_run(experiment_id=exp.experiment_id, run_name=run_name)
+    default_name = f"Sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    actual_run_name = parent_run_name or default_name
+    run = client.create_run(experiment_id=exp.experiment_id, run_name=actual_run_name)
     if study_name:
         client.set_tag(run.info.run_id, "optuna_study_name", study_name)
     
@@ -55,10 +66,11 @@ if __name__ == "__main__":
     parser.add_argument("--tracking-uri", required=True)
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--study-name", default=None)
+    parser.add_argument("--parent-run-name", default=None)
     args = parser.parse_args()
     
     if args.action == "resolve_parent":
-        print(get_or_create_parent_run(args.tracking_uri, args.experiment_name, args.study_name))
+        print(get_or_create_parent_run(args.tracking_uri, args.experiment_name, args.study_name, args.parent_run_name))
 
 def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, contextlib.ExitStack]:
     """MLflowの初期設定、実験の復元、Runコンテキスト（親・子）の開始を行う"""
@@ -120,7 +132,8 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
         trial_num = raw_num + offset
     else:
         trial_num = "0"
-    trial_run_name = f"Trial_{trial_num}_{model_name}"
+        
+    trial_run_name = cfg.mlflow.get("child_run_name") or f"Trial_{trial_num}_{model_name}"
 
     stack = contextlib.ExitStack()
     if parent_run_id:

@@ -11,7 +11,7 @@ defaults:
   - cv: fixed
   - sweep: null
   - mode: null
-  - experiment: lgbm_tac_alpha
+  - experiment: null
 
 # ターゲット層化サンプリングのデフォルト設定
 preprocess:

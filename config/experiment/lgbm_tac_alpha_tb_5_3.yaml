@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /hparams/lgbm/tac_alpha_tb_5_3@hparams
+  - /hparams/anchor@hparams: lgbm_tac_alpha_tb_5_3

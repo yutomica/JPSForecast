@@ -1,0 +1,8 @@
+# config/period/tac_standard.yaml
+purge_days: 10
+embargo_days: 20                # パージング後の追加の重なり禁止期間
+n_splits: 6                     # 分割数
+n_test_chunks: 2                # CPCVでのテストチャンク数
+train_start_date: "2017-01-01" 
+valid_start_date: "2025-01-01"  # cv=fixのみ
+test_start_date: "2025-09-01"   # Step1 ~ 3のみ

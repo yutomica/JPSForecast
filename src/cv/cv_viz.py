@@ -57,19 +57,23 @@ def timeline(
     tr_pos: Optional[np.ndarray],
     va_pos: Optional[np.ndarray],
     n_days: int,
+    te_pos: Optional[np.ndarray] = None,
     width: int = 100,
 ) -> str:
     """
     ASCII timeline bar:
-      V = valid/test, T = train, . = neither (purged/embargo)
+      V = valid, S = test (sample), T = train, . = neither (purged/embargo)
     """
     tr = np.zeros(n_days, dtype=np.int8)
     va = np.zeros(n_days, dtype=np.int8)
+    te = np.zeros(n_days, dtype=np.int8)
 
     if tr_pos is not None and len(tr_pos) > 0:
         tr[np.asarray(tr_pos, dtype=np.int64)] = 1
     if va_pos is not None and len(va_pos) > 0:
         va[np.asarray(va_pos, dtype=np.int64)] = 1
+    if te_pos is not None and len(te_pos) > 0:
+        te[np.asarray(te_pos, dtype=np.int64)] = 1
 
     bins = np.linspace(0, n_days, num=width + 1, dtype=int)
     chars: List[str] = []
@@ -77,7 +81,9 @@ def timeline(
         a, b = int(bins[j]), int(bins[j + 1])
         if b <= a:
             b = a + 1
-        if va[a:b].any():
+        if te[a:b].any():
+            chars.append("S")
+        elif va[a:b].any():
             chars.append("V")
         elif tr[a:b].any():
             chars.append("T")
@@ -91,21 +97,26 @@ def summarize_split_for_logging(
     tr_pos: np.ndarray,
     va_pos: np.ndarray,
     pos_to_date: pd.Series,
+    te_pos: Optional[np.ndarray] = None,
     timeline_width: int = 100,
 ) -> Dict[str, Any]:
     """Return a dict suitable for console + MLflow artifact (json/csv)."""
-    tr_pos = np.asarray(tr_pos, dtype=np.int64)
-    va_pos = np.asarray(va_pos, dtype=np.int64)
+    tr_pos = np.asarray(tr_pos, dtype=np.int64) if tr_pos is not None else np.array([], dtype=np.int64)
+    va_pos = np.asarray(va_pos, dtype=np.int64) if va_pos is not None else np.array([], dtype=np.int64)
+    te_pos = np.asarray(te_pos, dtype=np.int64) if te_pos is not None else np.array([], dtype=np.int64)
 
     tr_segs = segments_from_pos(tr_pos)
     va_segs = segments_from_pos(va_pos)
+    te_segs = segments_from_pos(te_pos)
 
     tr_start = pd.to_datetime(pos_to_date.iloc[int(tr_pos.min())]).date() if tr_pos.size else None
     tr_end = pd.to_datetime(pos_to_date.iloc[int(tr_pos.max())]).date() if tr_pos.size else None
     va_start = pd.to_datetime(pos_to_date.iloc[int(va_pos.min())]).date() if va_pos.size else None
     va_end = pd.to_datetime(pos_to_date.iloc[int(va_pos.max())]).date() if va_pos.size else None
+    te_start = pd.to_datetime(pos_to_date.iloc[int(te_pos.min())]).date() if te_pos.size else None
+    te_end = pd.to_datetime(pos_to_date.iloc[int(te_pos.max())]).date() if te_pos.size else None
 
-    bar = timeline(tr_pos, va_pos, n_days=len(pos_to_date), width=timeline_width)
+    bar = timeline(tr_pos, va_pos, n_days=len(pos_to_date), te_pos=te_pos, width=timeline_width)
 
     gap_before = None
     gap_after = None
@@ -128,16 +139,21 @@ def summarize_split_for_logging(
         "fold": int(fold),
         "train_days": int(tr_pos.size),
         "valid_days": int(va_pos.size),
+        "test_days": int(te_pos.size),
         "train_segs": int(len(tr_segs)),
         "valid_segs": int(len(va_segs)),
+        "test_segs": int(len(te_segs)),
         "train_start": str(tr_start),
         "train_end": str(tr_end),
         "valid_start": str(va_start),
         "valid_end": str(va_end),
+        "test_start": str(te_start),
+        "test_end": str(te_end),
         "gap_before": gap_before,
         "gap_after": gap_after,
         "train_segments_str": fmt_segments(tr_segs, "TR", pos_to_date),
         "valid_segments_str": fmt_segments(va_segs, "VA", pos_to_date),
+        "test_segments_str": fmt_segments(te_segs, "TE", pos_to_date),
         "timeline": bar,
     }
 
@@ -147,7 +163,9 @@ def log_split_info(
     tr_pos: np.ndarray,
     va_pos: np.ndarray,
     pos_to_date: pd.Series,
+    te_pos: Optional[np.ndarray] = None,
     timeline_width: int = 100,
+    label: str = "CV",
 ) -> Dict[str, Any]:
     """
     分割情報を集計し、コンソールへの出力とMLflowへのメトリクス記録を行います。
@@ -157,6 +175,7 @@ def log_split_info(
         tr_pos=tr_pos,
         va_pos=va_pos,
         pos_to_date=pos_to_date,
+        te_pos=te_pos,
         timeline_width=timeline_width,
     )
     
@@ -164,20 +183,37 @@ def log_split_info(
     gap_a_str = f"{info['gap_after']}d" if info['gap_after'] is not None else "N/A"
 
     print(
-        f"[CV] fold={fold} | "
+        f"[{label}] fold={fold} | "
         f"TRAIN days={info['train_days']} segs={info['train_segs']} ({info['train_start']}..{info['train_end']}) | "
         f"VALID days={info['valid_days']} segs={info['valid_segs']} ({info['valid_start']}..{info['valid_end']})"
     )
-    print(f"      Gap Before Valid (Purge): {gap_b_str} | Gap After Valid (Purge + Embargo): {gap_a_str}")
+    if info['test_days'] > 0:
+        print(f"      TEST  days={info['test_days']} segs={info['test_segs']} ({info['test_start']}..{info['test_end']})")
+    
+    if label == "CV":
+        print(f"      Gap Before Valid (Purge): {gap_b_str} | Gap After Valid (Purge + Embargo): {gap_a_str}")
+    
     print(f"      {info['train_segments_str']}")
-    print(f"      {info['valid_segments_str']}")
+    if info['valid_days'] > 0:
+        print(f"      {info['valid_segments_str']}")
+    if info['test_days'] > 0:
+        print(f"      {info['test_segments_str']}")
     print(f"      {info['timeline']}")
     
     # MLflow metrics (Runがアクティブな場合のみ記録)
-    if mlflow.active_run():
+    if label == "CV" and mlflow.active_run():
         mlflow.log_metric("cv_train_days", info["train_days"], step=fold)
         mlflow.log_metric("cv_valid_days", info["valid_days"], step=fold)
         mlflow.log_metric("cv_train_segs", info["train_segs"], step=fold)
         mlflow.log_metric("cv_valid_segs", info["valid_segs"], step=fold)
         
     return info
+
+def log_fixed_split_info(
+    fold: int,
+    train_dates: pd.Series,
+    valid_dates: pd.Series,
+    test_dates: Optional[pd.Series] = None,
+) -> Dict[str, Any]:
+    # 互換性のためのスタブ
+    return {}

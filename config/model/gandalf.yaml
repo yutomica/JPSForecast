@@ -7,3 +7,4 @@ preprocessor_target: "src.preprocess.preprocess_gandalf.GANDALFPreprocessor"
 model_target: "src.models.gandalf_wrapper.GANDALFWrapper"
 # このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
 data_category: "tabular"
+ensemble_size: 1

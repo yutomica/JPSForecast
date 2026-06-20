@@ -1,0 +1,9 @@
+# @package _global_
+domain:
+  name: "20D"
+  description: "20日先の値動き予測"
+
+preprocess:
+  sampling:
+    enabled: true
+    interval: 4

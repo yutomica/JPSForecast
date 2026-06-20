@@ -514,12 +514,15 @@ def calc_fold_metrics(df, cost_buffer=0.005, y_pred=None):
     """calc_fold_metrics 互換用ラッパー (evaluate_metrics に統合済み)"""
     return evaluate_metrics(y_true=df, y_pred=y_pred, cost_buffer=cost_buffer)
 
-def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression', metadata_cols=None, n_bins=20, date_col='date'):
+def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression', metadata_cols=None, n_bins=20, date_col='date', global_bin=False):
     df_eval = df_eval.copy()
     # 1. Bin分割
-    df_eval['bin_id'] = df_eval.groupby(date_col)[score_col].transform(
-        lambda x: pd.qcut(x.rank(method='first'), n_bins, labels=False, duplicates='drop')
-    )
+    if global_bin:
+        df_eval['bin_id'] = pd.qcut(df_eval[score_col].rank(method='first'), n_bins, labels=False, duplicates='drop')
+    else:
+        df_eval['bin_id'] = df_eval.groupby(date_col)[score_col].transform(
+            lambda x: pd.qcut(x.rank(method='first'), n_bins, labels=False, duplicates='drop')
+        )
     # NaNチェック
     if df_eval['bin_id'].isna().all():
         return pd.DataFrame()
@@ -530,6 +533,8 @@ def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression', 
     stats = df_eval.groupby('bin_label', observed=True).size().to_frame(name='sample_count')
     # Binラベルのソート順を保証 (Bin 01, Bin 02, ...)
     stats = stats.sort_index()
+    # スコア平均
+    stats['score_mean'] = df_eval.groupby('bin_label', observed=True)[score_col].mean()
     # ターゲット平均
     stats['target_mean'] = df_eval.groupby('bin_label', observed=True)[target_col].mean()
     # メタデータの統計量

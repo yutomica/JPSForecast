@@ -41,7 +41,7 @@ run() {
         domain=${domain} \
         model=${model} \
         data=master \
-        features=features_target_probe_vol_excluded \
+        features=features_target_probe \
         target=${target} \
         period=${domain}_standard \
         cv=anchored_walk_forward \
@@ -70,35 +70,39 @@ run() {
 # run "tac" "lgbm_ordinal_threshold" "alpha_class"
 # run "tac" "lgbm_ordinal_threshold" "alpha_upclass"
 # run "tac" "lgbm_ordinal_threshold" "alpha_qlclass"
-run "tac" "lgbm" "alpha_gr"
-run "tac" "lgbm" "alpha"
+# run "tac" "lgbm" "alpha_gr"
+# run "tac" "lgbm" "alpha"
 # run "tac" "lgbm" "alpha_sector"
 # run "tac" "lgbm" "alpha_linear"
 
 # run "tac" "lgbm_ordinal_threshold" "risk"
 
-run "str" "lgbm" "alpha" \
- ++preprocess.sampling.enabled=true \
- ++preprocess.sampling.interval=11
-run "str" "lgbm" "alpha_gr" \
- ++preprocess.sampling.enabled=true \
- ++preprocess.sampling.interval=11
-run "str" "lgbm_ordinal_threshold" "alpha_tb" \
- ++preprocess.sampling.enabled=true \
- ++preprocess.sampling.interval=11
+# run "str" "lgbm" "alpha" \
+#  ++preprocess.sampling.enabled=true \
+#  ++preprocess.sampling.interval=11
+# run "str" "lgbm" "alpha_gr" \
+#  ++preprocess.sampling.enabled=true \
+#  ++preprocess.sampling.interval=11
+# run "str" "lgbm_ordinal_threshold" "alpha_tb" \
+#  ++preprocess.sampling.enabled=true \
+#  ++preprocess.sampling.interval=11
 
-run "str" "lgbm" "risk" \
- ++preprocess.sampling.enabled=true \
- ++preprocess.sampling.interval=11
+# run "str" "lgbm" "risk" \
+#  ++preprocess.sampling.enabled=true \
+#  ++preprocess.sampling.interval=11
 
-# run "tac" "lgbm" "alpha_tb_5_2"
-# run "tac" "lgbm" "alpha_tb_7_2"
-# run "tac" "lgbm" "alpha_tb_10_2"
 # run "tac" "lgbm" "alpha_tb_5_3"
-# run "tac" "lgbm" "alpha_tb_7_3"
-# run "tac" "lgbm" "alpha_tb_10_3"
 # run "tac" "lgbm" "alpha_tb_7_4"
-# run "tac" "lgbm" "alpha_tb_10_4"
+
+run "10d" "lgbm" "alpha_gr" \
+ ++preprocess.sampling.enabled=true \
+ ++preprocess.sampling.interval=1
+run "20d" "lgbm" "alpha_gr" \
+ ++preprocess.sampling.enabled=true \
+ ++preprocess.sampling.interval=4
+run "40d" "lgbm" "alpha_gr" \
+ ++preprocess.sampling.enabled=true \
+ ++preprocess.sampling.interval=7
 
 wait
 echo "🎉 All tasks completed successfully."

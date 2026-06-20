@@ -98,6 +98,7 @@ class NBeatsWrapper(BaseModelWrapper):
 
         best_metric = np.inf
         best_epoch = -1
+        self.best_epoch_ = max_epochs - 1
         epochs_without_improve = 0
         ema_metric = None
 

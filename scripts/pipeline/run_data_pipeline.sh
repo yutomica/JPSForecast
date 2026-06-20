@@ -33,9 +33,18 @@ echo ""
 echo "[Step 4/4] Creating master select data..."
 python scripts/data_prep/create_master_select_data.py \
  features_lgbm_tac_alpha_gr_rough \
+ features_lgbm_10d_alpha_gr_rough \
+ features_lgbm_20d_alpha_gr_rough \
+ features_lgbm_40d_alpha_gr_rough \
  features_lgbm_str_alpha_rough \
  features_tcn_tac_alpha_gr_rough \
  features_gandalf_tac_alpha_gr_rough
+
+# 特徴量データの配置 (移動)
+mkdir -p ./data/master_select
+rm -rf ./data/master_select/features
+mv ./data/master/features_select ./data/master_select/features
+mv ./data/master/features_select_names.json ./data/master_select/feature_names.json
 
 echo ""
 echo "============================================================"

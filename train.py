@@ -33,13 +33,13 @@ from src.evaluation.objectives import (
     aggregate_fold_metrics, calc_objective_v2,
     calc_tac_risk_objective
 )
-
 from src.utils.feature_selection import calculate_shap, calculate_mda, calculate_cfi
 from src.utils.mlflow_utils import setup_mlflow_run, check_and_promote_model, bundle_and_upload_artifacts
 from src.utils.sampling import (
     apply_sampling, apply_target_stratified_sampling, apply_2d_matrix_weight,
     make_train_fold_class_weight, make_sample_weight, apply_hard_negative_weighting
 )
+from src.utils.stacking_utils import load_stacking_oof, combine_features_with_oof
 path_to_gdrive = os.environ.get('path_to_gdrive', '') 
 import logging
 # alembic のロガーを取得し、ログレベルを WARNING に上げる
@@ -126,27 +126,40 @@ def train(cfg: DictConfig) -> float:
         if train_val_meta.empty:
             print(f"⚠️ WARNING: No valid samples left after dropping NaNs for {target_col}. Skipping.")
             return fallback_score
+            
+        # --- スタッキング用 OOFデータの動的ロード ---
+        meta_df, train_val_meta, oof_cols = load_stacking_oof(cfg, client, meta_df, train_val_meta)
         
         # --- データ分割・CV ---
         # エンバーゴ（Embargo）日数の設定
         cv_method = HydraConfig.get().runtime.choices.cv
         embargo_td = pd.Timedelta(days=cfg.period.embargo_days)
         print(f"🪓 Split Method: {cv_method}")
+        
+        # Always prepare base CV info for visualization and index mapping
+        samples_info, date_to_indices, unique_dates = prepare_purged_cv_input(train_val_meta)
+        pos_to_date = pd.Series(unique_dates, index=np.arange(len(unique_dates)))
+
         if cv_method == "fixed":
-            # 固定分割（Config指定の期間）
-            test_start = pd.to_datetime(cfg.period.test_start_date)
-            valid_start = pd.to_datetime(cfg.period.valid_start_date)
+            # 固定分割（Config指定の期間、cv側の設定を優先）
+            test_start = pd.to_datetime(cfg.cv.get('test_start_date', cfg.period.get('test_start_date')))
+            valid_start = pd.to_datetime(cfg.cv.get('valid_start_date', cfg.period.get('valid_start_date')))
+            train_start = pd.to_datetime(cfg.cv.get('train_start_date', cfg.period.get('train_start_date', '2000-01-01')))
             test_idx = train_val_meta.index[train_val_meta['date'] >= test_start]
             valid_idx = train_val_meta.index[
                 (train_val_meta['date'] >= valid_start) & 
                 (train_val_meta['date'] < (test_start - embargo_td))
             ]
-            train_idx = train_val_meta.index[train_val_meta['date'] < (valid_start - embargo_td)]
+            train_idx = train_val_meta.index[(train_val_meta['date'] >= train_start) & (train_val_meta['date'] < (valid_start - embargo_td))]
+            
+            # Calculate positional indices for visualization
+            tr_pos = np.where(np.isin(unique_dates, train_val_meta.loc[train_idx, 'date'].unique()))[0]
+            val_pos = np.where(np.isin(unique_dates, train_val_meta.loc[valid_idx, 'date'].unique()))[0]
+            te_pos = np.where(np.isin(unique_dates, train_val_meta.loc[test_idx, 'date'].unique()))[0] if not test_idx.empty else None
+            
             # 1つの分割としてリスト化
-            splits = [(train_idx, valid_idx, test_idx, None, None)]
+            splits = [(train_idx, valid_idx, test_idx, tr_pos, val_pos, te_pos)]
         else:
-            samples_info, date_to_indices, unique_dates = prepare_purged_cv_input(train_val_meta)
-            pos_to_date = pd.Series(unique_dates, index=np.arange(len(unique_dates)))
             cv = instantiate(
                 cfg.cv, 
                 samples_info_sets=samples_info,
@@ -160,7 +173,7 @@ def train(cfg: DictConfig) -> float:
                 val_dates = unique_dates[val_pos]
                 train_idx = pd.Index(np.concatenate([date_to_indices[pd.Timestamp(d)] for d in tr_dates]))
                 valid_idx = pd.Index(np.concatenate([date_to_indices[pd.Timestamp(d)] for d in val_dates]))
-                splits.append((train_idx, valid_idx, None, tr_pos, val_pos))
+                splits.append((train_idx, valid_idx, None, tr_pos, val_pos, None))
         
         # --- データロード＆前処理 ---
         # 全特徴量名のロード
@@ -276,6 +289,15 @@ def train(cfg: DictConfig) -> float:
         # early stopping
         full_params["early_stopping_metric"] = cfg.target.get("early_stopping_metric", "ic")
         full_params["metric_direction"] = cfg.target.get("metric_direction", "maximize")
+        # Always store the original ensemble_size from config
+        ensemble_size_orig = cfg.model.get("ensemble_size", 1)
+        # For initial fold training (Step 1 or normal CV), use ensemble_size from config
+        # unless in production mode, where we want to find best_iter quickly.
+        if cfg.get("mode") == "production":
+            full_params["ensemble_size"] = 1
+        else:
+            full_params["ensemble_size"] = ensemble_size_orig
+            
         full_params.update(model_meta_params)
 
         # --- モデルの学習 ---
@@ -290,13 +312,12 @@ def train(cfg: DictConfig) -> float:
         all_fold_cfi_values = []
         all_fold_shap_values = []
         fold_pipelines = []
-        for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos) in enumerate(splits):
-            print(f"\n{'-'*25} Fold {i} {'-'*25}")
+        for i, (train_idx, valid_idx, test_idx, tr_pos, val_pos, te_pos) in enumerate(splits):
+            print(f"{'-'*25} Fold {i} {'-'*25}")
             
             # CVサマリー
-            if tr_pos is not None and val_pos is not None:
-                info = log_split_info(i, tr_pos, val_pos, pos_to_date)
-                cv_summaries.append(info)
+            info = log_split_info(i, tr_pos, val_pos, pos_to_date, te_pos=te_pos)
+            cv_summaries.append(info)
             
             # --- 学習データのみ Date-interval サンプリングを適用 ---
             if cfg.get("preprocess", {}).get("sampling", {}).get("enabled", False):
@@ -337,62 +358,51 @@ def train(cfg: DictConfig) -> float:
                     stratified_sampling_weights = train_meta_processed.loc[train_idx, 'sample_weight'].values
                     print(f"    - Weighting mode enabled. Sample count remains {len(train_idx):,}.")
 
-            # --- ウェイトの計算 ---
-            w_train = np.ones(len(train_idx))
-            # log_market_capによるウエイト（STRのウエイトを軽くする）
-            w_train *= calculate_sample_weights(meta_df.loc[train_idx, 'log_market_cap'].values, cfg.domain.name)
-            # Time Decay
-            if cfg.hparams.use_time_decay:
-                # 学習セットの日付のみを抽出してウェイトを算出 decay_rate は config から取得 (デフォルト: 0.9999)
-                decay_rate = cfg.hparams.get('time_decay_rate', 0.9999)
-                w_train *= calculate_time_decay_weights(meta_df.loc[train_idx, 'date'], decay_rate=decay_rate)
-            # 層化サンプリングの重みを適用 (mode_3の場合)
-            if stratified_sampling_weights is not None:
-                w_train *= stratified_sampling_weights
+            # --- ウェイトの計算を関数化 ---
+            def calc_weights(idx, is_train=True):
+                w = np.ones(len(idx))
+                w *= calculate_sample_weights(meta_df.loc[idx, 'log_market_cap'].values, cfg.domain.name)
+                if cfg.hparams.use_time_decay:
+                    decay_rate = cfg.hparams.get('time_decay_rate', 0.9999)
+                    w *= calculate_time_decay_weights(meta_df.loc[idx, 'date'], decay_rate=decay_rate)
+                if is_train and stratified_sampling_weights is not None:
+                    # target_stratified_samplingはtrain_idxにのみ適用されているため
+                    w *= stratified_sampling_weights
+                if cfg.get("preprocess", {}).get("matrix_weight", {}).get("enabled", False):
+                    matrix_cfg = cfg.preprocess.matrix_weight
+                    cost_buffer = matrix_cfg.get("cost_buffer", 0.003)
+                    meta_subset = meta_df.loc[idx].copy()
+                    w *= apply_2d_matrix_weight(meta_subset, return_col='Future_Close', cost_buffer=cost_buffer)
+                if cfg.get("preprocess", {}).get("hard_negative_weighting", {}).get("enabled", False):
+                    meta_subset = meta_df.loc[idx].copy()
+                    w *= apply_hard_negative_weighting(meta_subset)
+                if cfg.get("preprocess", {}).get("class_weight", {}).get("enabled", False):
+                    cw_cfg = cfg.preprocess.class_weight
+                    num_classes = cw_cfg.get("num_classes", 4)
+                    clip_min = cw_cfg.get("clip_min", 1.0)
+                    clip_max = cw_cfg.get("clip_max", 10.0)
+                    # train fold の y のみを使って重みを計算 (Data Leakage 防止)
+                    y_series = meta_df.loc[idx, target_col]
+                    class_weight_dict, class_counts = make_train_fold_class_weight(
+                        y_series, num_classes=num_classes, clip_min=clip_min, clip_max=clip_max
+                    )
+                    w *= make_sample_weight(y_series, class_weight_dict)
+                    if is_train:
+                        total_n = class_counts.sum()
+                        for cls_idx in range(num_classes):
+                            mlflow.log_metric(f"fold{i}_class_count_{cls_idx}", float(class_counts[cls_idx]))
+                            mlflow.log_metric(f"fold{i}_class_weight_{cls_idx}", float(class_weight_dict[cls_idx]))
+                        if num_classes >= 4:
+                            pos_rate_5 = (class_counts[1] + class_counts[2] + class_counts[3]) / total_n
+                            pos_rate_7 = (class_counts[2] + class_counts[3]) / total_n
+                            pos_rate_10 = class_counts[3] / total_n
+                            mlflow.log_metric(f"fold{i}_positive_rate_5", float(pos_rate_5))
+                            mlflow.log_metric(f"fold{i}_positive_rate_7", float(pos_rate_7))
+                            mlflow.log_metric(f"fold{i}_positive_rate_10", float(pos_rate_10))
+                        print(f"    - Class weight mode enabled.")
+                return w
 
-            # 2D Matrix Weight (based on Future_Close)
-            if cfg.get("preprocess", {}).get("matrix_weight", {}).get("enabled", False):
-                matrix_cfg = cfg.preprocess.matrix_weight
-                cost_buffer = matrix_cfg.get("cost_buffer", 0.003)
-                train_meta_subset = meta_df.loc[train_idx].copy()
-                w_train *= apply_2d_matrix_weight(train_meta_subset, return_col='Future_Close', cost_buffer=cost_buffer)
-
-            # Hard Negative Weighting
-            if cfg.get("preprocess", {}).get("hard_negative_weighting", {}).get("enabled", False):
-                train_meta_subset = meta_df.loc[train_idx].copy()
-                w_train *= apply_hard_negative_weighting(train_meta_subset)
-
-            # Class Weighting for imbalanced multiclass target
-            if cfg.get("preprocess", {}).get("class_weight", {}).get("enabled", False):
-                cw_cfg = cfg.preprocess.class_weight
-                num_classes = cw_cfg.get("num_classes", 4)
-                clip_min = cw_cfg.get("clip_min", 1.0)
-                clip_max = cw_cfg.get("clip_max", 10.0)
-                # train fold の y_train のみを使って重みを計算 (Data Leakage 防止)
-                y_train_series = meta_df.loc[train_idx, target_col]
-                class_weight_dict, class_counts = make_train_fold_class_weight(
-                    y_train_series, 
-                    num_classes=num_classes, 
-                    clip_min=clip_min, 
-                    clip_max=clip_max
-                )
-                # サンプルごとの重みに変換
-                w_class = make_sample_weight(y_train_series, class_weight_dict)
-                w_train *= w_class
-                # MLflow へのログ記録 (各Foldごと)
-                total_n = class_counts.sum()
-                for cls_idx in range(num_classes):
-                    mlflow.log_metric(f"fold{i}_class_count_{cls_idx}", float(class_counts[cls_idx]))
-                    mlflow.log_metric(f"fold{i}_class_weight_{cls_idx}", float(class_weight_dict[cls_idx]))
-                # ポジティブ率 (5%, 7%, 10% 閾値) の計算・記録
-                if num_classes >= 4:
-                    pos_rate_5 = (class_counts[1] + class_counts[2] + class_counts[3]) / total_n
-                    pos_rate_7 = (class_counts[2] + class_counts[3]) / total_n
-                    pos_rate_10 = class_counts[3] / total_n
-                    mlflow.log_metric(f"fold{i}_positive_rate_5", float(pos_rate_5))
-                    mlflow.log_metric(f"fold{i}_positive_rate_7", float(pos_rate_7))
-                    mlflow.log_metric(f"fold{i}_positive_rate_10", float(pos_rate_10))
-                print(f"    - Class weight mode enabled.")
+            w_train = calc_weights(train_idx, is_train=True)
 
             # メモリ上の配列から必要な行のみを読み出し
             print(f"  🔹 Transforming data...")
@@ -400,6 +410,11 @@ def train(cfg: DictConfig) -> float:
             preprocessor = copy.deepcopy(base_preprocessor)
             X_train = preprocessor.transform(features_array, row_indices=train_idx, col_indices=col_indices)
             X_valid = preprocessor.transform(features_array, row_indices=valid_idx, col_indices=col_indices)
+            
+            # --- OOF特徴量のオンザフライ結合 ---
+            X_train = combine_features_with_oof(X_train, meta_df, train_idx, oof_cols)
+            X_valid = combine_features_with_oof(X_valid, meta_df, valid_idx, oof_cols)
+
             y_train = meta_df.loc[train_idx, target_col].values
             y_valid = meta_df.loc[valid_idx, target_col].values
             
@@ -413,6 +428,7 @@ def train(cfg: DictConfig) -> float:
                 print(f"  🔹 Samples: Train={len(train_idx):,}, Valid={len(valid_idx):,}")
             else:
                 X_test = preprocessor.transform(features_array, row_indices=test_idx, col_indices=col_indices)
+                X_test = combine_features_with_oof(X_test, meta_df, test_idx, oof_cols)
                 y_test = meta_df.loc[test_idx, target_col].values
                 print(f"  🔹 Samples: Train={len(train_idx):,}, Valid={len(valid_idx):,}, Test={len(test_idx):,}")
             # モデルのインスタンス化と学習
@@ -421,26 +437,8 @@ def train(cfg: DictConfig) -> float:
             if hasattr(model, 'device'):
                 print(f"  🔹 Using device: {model.device}")
 
-            # --- エポック単位の枝刈り用コールバックの設定 (Sweep時) ---
-            # 各Foldのエポックにおいて、それまでのFoldの確定スコアと
-            # 現在のエポックスコアの平均（蓄積スコア）を計算して判定する
-            # fit_kwargs = {}
-            # is_sweep = HydraConfig.get().runtime.choices.get("sweep") not in [None, "null"]
-            # if is_sweep:
-            #     total_epochs = cfg.hparams.get("max_epochs", cfg.hparams.get("num_boost_round", 1000))
-            #     fit_kwargs["epoch_callback"] = create_pruning_callback(
-            #         client=client, 
-        #         experiment_id=experiment_id, 
-            #         parent_run_id=parent_run_id,
-            #         fold_idx=i,
-            #         past_fold_scores=valid_metrics.copy(),
-            #         n_startup_trials=30, 
-            #         warmup_ratio=0.3,  # 各Foldの3割終了時点から枝刈り開始
-            #         total_epochs=total_epochs
-            #     )
             print(f"  🔹 Training model...")
             try:
-                # model.fit(X_train, y_train, X_valid, y_valid, sample_weight=w_train, model_idx=i, **fit_kwargs)
                 model.fit(
                     X_train, y_train, 
                     X_valid, y_valid, 
@@ -469,6 +467,58 @@ def train(cfg: DictConfig) -> float:
                 'test':  model.predict(X_test) if X_test is not None else None
             }
             
+            # --- Production Mode: Step 2 本学習 ---
+            if cfg.get("mode") == "production":
+                ensemble_size = cfg.model.get("ensemble_size", 1)
+                print(f"\n  🌟 [Production] Step 2: Training on Train+Valid data (Ensemble Size: {ensemble_size}) using best_iter={best_iter}...")
+                full_train_idx = train_idx.append(valid_idx)
+                
+                # Visualize production period
+                full_train_dates = train_val_meta.loc[full_train_idx, 'date'].unique()
+                tr_pos_prod = np.where(np.isin(unique_dates, full_train_dates))[0]
+                log_split_info(i, tr_pos_prod, np.array([]), pos_to_date, label="PROD")
+                w_full = calc_weights(full_train_idx, is_train=True)
+                
+                # Full data features
+                X_full = preprocessor.transform(features_array, row_indices=full_train_idx, col_indices=col_indices)
+                X_full = combine_features_with_oof(X_full, meta_df, full_train_idx, oof_cols)
+                y_full = meta_df.loc[full_train_idx, target_col].values
+                
+                # params update for full training
+                prod_params = copy.deepcopy(full_params)
+                # Productionの個別学習時は wrapper 内の ensemble_size は 1 に固定する（ここでループ制御するため）
+                prod_params["ensemble_size"] = 1
+                
+                if best_iter is not None:
+                    # LGBM or NN max epochs
+                    if cfg.model.name.lower() in ["lgbm", "lightgbm"]:
+                        prod_params['num_boost_round'] = int(best_iter)
+                        prod_params['early_stopping_rounds'] = 0 # 無効化
+                    else:
+                        prod_params['max_epochs'] = int(best_iter)
+                        prod_params['patience'] = int(best_iter) + 1 # 無効化
+                
+                base_seed = cfg.get("seed", 42)
+                for s in range(ensemble_size):
+                    if ensemble_size > 1:
+                        print(f"    - Training ensemble model {s+1}/{ensemble_size} with seed {base_seed + s}...")
+                    
+                    curr_params = copy.deepcopy(prod_params)
+                    # 各モデルのシード値を変更
+                    curr_params['seed'] = base_seed + s
+                    curr_params['random_state'] = base_seed + s
+                    
+                    model_prod = model_class(task_type=cfg.target.task_type, **curr_params)
+                    model_prod.fit(X_full, y_full, X_valid=None, y_valid=None, sample_weight=w_full, model_idx=f"{i}_s{s}")
+                    
+                    if s < ensemble_size - 1:
+                        # 最後の1つ以外を先にパイプラインに追加
+                        fold_pipelines.append(FoldPipeline(preprocessor, model_prod))
+                    else:
+                        # 最後の1つ（または唯一の1つ）を model にセット
+                        # この後の既存処理で fold_pipelines に追加され、artifact保存対象になる
+                        model = model_prod
+
             # DataFrame格納用に1D化 (マルチクラスの場合は期待値または代表値)
             preds_1d = {}
             for phase, p in preds_raw.items():
@@ -606,14 +656,14 @@ def train(cfg: DictConfig) -> float:
             
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
-        if cv_method in ["purged_kfold", "cpcv", "anchored_walk_forward"]:
+        if cv_method in ["purged_kfold", "cpcv", "anchored_walk_forward"] or cfg.get("mode") == "production":
             test_res = full_res_df[full_res_df['phase'] == 'valid']
         else: 
             test_res = full_res_df[full_res_df['phase'] == 'test']
             
         if cfg.get("mode") == "target_probe":
             max_fold = test_res['fold'].max()
-            metrics = ['Future_High_mean', 'Future_Low_mean', 'Future_Close_mean']
+            metrics = ['sample_count', 'target_mean', 'Future_High_mean', 'Future_Low_mean', 'Future_Close_mean']
             combined_df = pd.DataFrame()
             
             for f in range(max_fold + 1):
@@ -794,7 +844,8 @@ def train(cfg: DictConfig) -> float:
             # パイプライン
             final_pipeline = EnsembleInferencePipeline(
                 fold_pipelines=fold_pipelines,
-                col_indices=col_indices
+                col_indices=col_indices,
+                oof_cols=oof_cols
             )
             try:
                 with warnings.catch_warnings():
@@ -812,44 +863,89 @@ def train(cfg: DictConfig) -> float:
                 mlflow_models_logger.setLevel(prev_models_level)
                 mlflow_pyfunc_logger.setLevel(prev_pyfunc_level)
             # ビン分析
-            bin_stats_path = os.path.join(d, "test_bin_analysis.csv")
+            bin_stats_path = os.path.join(d, "test_bin_analysis_daily.csv")
             bin_stats.to_csv(bin_stats_path)
             mlflow.log_artifact(bin_stats_path)
+            
+            # 全期間でのビン分析
+            bin_stats_global = calculate_bin_stats(
+                test_res, score_col='score', target_col='target', task_type=cfg.target.task_type,
+                metadata_cols=['Future_High', 'Future_Low', 'Future_Close'],
+                date_col='date', n_bins=20, global_bin=True
+            )
+            bin_stats_global_path = os.path.join(d, "test_bin_analysis_global.csv")
+            bin_stats_global.to_csv(bin_stats_global_path)
+            mlflow.log_artifact(bin_stats_global_path)
         # Hydraの最終的なconfigファイル自体も保存（完全な再現用）
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             OmegaConf.save(config=cfg, f=f.name)
             mlflow.log_artifact(f.name, artifact_path="config")
         os.remove(f.name)
         
-        # --- fixモード：Staging昇格・OOF保存 ---
-        if cfg.get("mode") == "fix":
-            print(f"\n🌟 Mode 'fix' detected. Promoting model to Staging and saving OOF data.")
-            # OOFデータの保存 (Stacking用)
-            oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
-            with tempfile.TemporaryDirectory() as d:
-                oof_filename = os.path.join(d, f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv")
-                oof_df.to_csv(oof_filename, index=False)
-                mlflow.log_artifact(oof_filename, artifact_path="oof_data")
-            # モデルレジストリへの登録とStagingへの昇格
-            registered_model_name = f"{cfg.model.name}_{cfg.target.name}"
+        # --- fixモード / productionモード / stacking_baseモード：モデルレジストリへの登録と昇格 ---
+        current_mode = cfg.get("mode")
+        if current_mode in ["fix", "production", "stacking_base", "stacking_ensemble"]:
+            
+            # --- OOFデータの保存 (Stacking用) ---
+            if current_mode in ["fix", "stacking_base"]:
+                oof_df = full_res_df[full_res_df['phase'] == 'valid'].copy()
+                with tempfile.TemporaryDirectory() as d:
+                    oof_filename = os.path.join(d, f"oof_predictions_{cfg.model.name}_{cfg.target.column}.csv")
+                    oof_df.to_csv(oof_filename, index=False)
+                    mlflow.log_artifact(oof_filename, artifact_path="oof_data")
+                    
+            # --- 役割（Role）に基づくモデル名の決定 ---
+            if current_mode == "stacking_base":
+                registered_model_name = f"Base_{cfg.model.name}_{cfg.target.name}_OOF"
+                target_stage = "None" # または "Staging"
+            elif current_mode == "stacking_ensemble":
+                registered_model_name = f"Stacked_{cfg.target.name}_Final"
+                target_stage = "Production"
+            elif current_mode == "production":
+                # Stackingが有効な場合はメタモデルとして扱う
+                if cfg.get("stacking", {}).get("enabled", False):
+                    registered_model_name = f"Stacked_{cfg.target.name}_Final"
+                else:
+                    registered_model_name = f"Base_{cfg.model.name}_{cfg.target.name}_INF"
+                target_stage = "Production"
+            else: # fallback (fix)
+                registered_model_name = f"{cfg.model.name}_{cfg.target.name}"
+                target_stage = "Staging"
+                
+            print(f"\n🌟 Mode '{current_mode}' detected. Registering model as '{registered_model_name}' and promoting to {target_stage}.")
+
             model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
             try:
                 mv = mlflow.register_model(model_uri, registered_model_name)
                 # Variant管理のため archive_existing_versions=False に変更
-                client.transition_model_version_stage(
-                    name=registered_model_name, version=mv.version, stage="Staging", archive_existing_versions=False
-                )
+                if target_stage != "None":
+                    client.transition_model_version_stage(
+                        name=registered_model_name, version=mv.version, stage=target_stage, archive_existing_versions=False
+                    )
                 
                 # タグの付与
                 variant = cfg.get("variant", "default")
                 client.set_model_version_tag(registered_model_name, mv.version, "variant", variant)
+                
+                # 役割の記録
+                if current_mode == "stacking_base":
+                    client.set_model_version_tag(registered_model_name, mv.version, "nature", "base_oof_generator")
+                elif current_mode == "production" and not cfg.get("stacking", {}).get("enabled", False):
+                    client.set_model_version_tag(registered_model_name, mv.version, "nature", "inference_base")
+                elif current_mode in ["production", "stacking_ensemble"] and cfg.get("stacking", {}).get("enabled", False):
+                    client.set_model_version_tag(registered_model_name, mv.version, "nature", "stacking_meta")
+                    # 依存モデルを記録
+                    target_models = cfg.get("stacking", {}).get("target_models", [])
+                    client.set_model_version_tag(registered_model_name, mv.version, "dependencies", json.dumps(target_models))
+                
                 # 特徴量構成やターゲット情報も付与しておくと後で便利
                 feature_choice = HydraConfig.get().runtime.choices.get("features", "unknown")
                 client.set_model_version_tag(registered_model_name, mv.version, "feature_config", feature_choice)
                 
-                print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) with variant '{variant}' and transitioned to Staging.")
+                print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) with variant '{variant}' and transitioned to {target_stage}.")
             except Exception as e:
                 print(f"⚠️ Failed to register model to registry: {e}")
+
 
         # --- MLflow成果物の一括ZIP化とGoogle Driveへの移動 ---
         if cfg.get("output_gdrive", False):

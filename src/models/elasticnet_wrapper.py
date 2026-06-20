@@ -341,6 +341,7 @@ class ElasticNetWrapper(BaseModelWrapper):
             best_valid_metric = float("inf") if self.metric_direction == "minimize" else -float("inf")
             best_model_state = None
             wait = 0
+            self.best_epoch_ = self.params.get("max_iter", 1000) - 1
             
             metric_func = None
             if self.early_stopping_metric != "loss":

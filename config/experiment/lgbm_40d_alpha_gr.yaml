@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /hparams/lgbm/40d_alpha_gr@hparams
+  - /hparams/anchor@hparams: lgbm_40d_alpha_gr

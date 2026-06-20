@@ -1,0 +1,35 @@
+feature_cols:
+  - VAL_EarningsYield_CSZ
+  - MOM_PricePos120_SNZ
+  - VOL_ATRRatio_SNZ
+  - MOM_Return20d_CSZ
+  - GOV_MarketSegment_RAW
+  - MOM_RCI26_TSR_252D
+  - BET_RelSectorReturn5d_CSZ
+  - VOL_VolumeMA25_SNZ
+  - VOL_RealizedSkew20_TSR_252D
+  - SPD_VWAPDev_CSR
+  - SPD_VWAPDev_CSZ
+  - CON_RevisionRate_SNZ
+  - MOM_DistHigh60_TSZ_20D
+  - MOM_NewHighFlag3_TSR_252D
+  - MOM_MaxGain5_CSZ
+  - MOM_GapRate_TSR_252D
+  - VOL_VolatilityParkinson_CSR
+  - CON_RevisionRate_CSR
+  - VOL_HV30_TSR_252D
+  - MOM_ClosePosition_CSZ
+  - CON_ProgressRate_CSR
+  - EVT_LogDaysSincePub_SNZ
+  - EVT_EPSActual_SNZ
+  - BET_Beta60_TSZ_20D
+  - QLT_Accruals_TSR_252D
+  - SPD_MarginBuyImpact_CSZ
+  - VOL_DownsideDev60_CSR
+  - MOM_RCI26_SNZ
+  - BET_SectorMomentum5d_SNZ
+  - BET_SectorMomentum5d_CSR
+  - LIQ_VolumeLog_TSZ_20D
+  - BET_SectorRelStrength60_SNZ
+cat_cols:
+  - GOV_MarketSegment_RAW

@@ -2,3 +2,4 @@ name: "FeatureTokenizer Transformer"
 preprocessor_target: "src.preprocess.preprocess_ft_transformer.FTTransformerPreprocessor"
 model_target: "src.models.ft_transformer_wrapper.FTTransformerWrapper"
 data_category: "tabular"
+ensemble_size: 1

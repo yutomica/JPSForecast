@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - override /model: lgbm
+  - override /features: context_stacking
+
+hparams:
+  # スタッキング向けの浅いLightGBM設定（過学習を防ぎつつ非線形な関係を学習）
+  num_boost_round: 100
+  learning_rate: 0.05
+  num_leaves: 4
+  max_depth: 3
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_data_in_leaf: 1000
+  use_time_decay: true
+  verbose: -1
+
+stacking:
+  enabled: true
+  source_stage: "None"
+  # 特定のモデルに絞る場合はリスト化
+  target_models:
+    - Base_LightGBM_tac_alpha_gr_OOF
+    - Base_gandalf_tac_alpha_gr_OOF
+    - Base_tcn_tac_alpha_gr_OOF

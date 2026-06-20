@@ -1,0 +1,9 @@
+# @package _global_
+domain:
+  name: "40D"
+  description: "40日先の値動き予測"
+
+preprocess:
+  sampling:
+    enabled: true
+    interval: 7

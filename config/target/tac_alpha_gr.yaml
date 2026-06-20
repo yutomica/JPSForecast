@@ -15,5 +15,6 @@ metric_direction: maximize
 eval_metric: "RankIC"
 
 # 最適化指標
-optimization_metric: "objective_v2"
+# optimization_metric: "objective_v2"
+optimization_metric: "RankIC"
 optimization_direction: "maximize"

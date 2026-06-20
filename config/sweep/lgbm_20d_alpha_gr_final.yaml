@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - override /hydra/sweeper: optuna
+hydra:
+  sweeper:
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+      n_startup_trials: 18
+      multivariate: true
+    direction: maximize
+    storage: "sqlite:///optuna.db"
+    n_trials: 81
+    params:
+      # ---- Step4 HPO search space ----
+      hparams.learning_rate: tag(log, interval(0.009, 0.022))
+      hparams.feature_fraction: interval(0.58, 0.88)
+      hparams.bagging_fraction: interval(0.6, 0.92)
+      hparams.lambda_l1: tag(log, interval(0.3, 8.0))
+      hparams.lambda_l2: tag(log, interval(0.5, 50.0))
+      +hparams.alpha: interval(0.7, 1.35)
+      hparams.verbose: -1

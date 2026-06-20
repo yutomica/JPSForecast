@@ -1,7 +1,7 @@
 # @package cv
 train_start_date: "2022-01-01"
-valid_start_date: "2025-05-01"
-test_start_date: "2026-01-01"
+valid_start_date: "2025-11-01"
+test_start_date: "2026-07-01"
 n_splits: ${period.n_splits}
 purge_days: ${period.purge_days}         # 追記: period設定から渡す
 embargo_days: ${period.embargo_days}     # 追記: period設定から渡す

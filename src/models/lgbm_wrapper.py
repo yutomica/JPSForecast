@@ -460,6 +460,8 @@ class LGBMOrdinalThresholdWrapper(BaseModelWrapper):
         
         self.params = params
         self.models_ = {}
+        self.ensembles_ = [] # List of dicts {threshold: model}
+        self.ensemble_size = int(params.pop("ensemble_size", 1))
         self.feature_importances_ = None
 
     def _from_ipc_handle(self, X):

@@ -6,3 +6,4 @@ data_category: tabular
 
 preprocessor_target: src.preprocess.preprocess_elasticnet.ElasticNetPreprocessor
 model_target: src.models.elasticnet_wrapper.ElasticNetWrapper
+ensemble_size: 1

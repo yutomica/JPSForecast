@@ -1,0 +1,36 @@
+feature_cols:
+- VOL_VolumeMA25_SNZ
+- VOL_VolatilityParkinson_CSR
+- VOL_Volatility60_TSR_252D
+- VOL_LargeMoveCount_CSZ
+- VOL_HV30_CSZ
+- VOL_DownsideDev60_CSR
+- VOL_ATRRatio_TSR_252D
+- VOL_ATRRatio_RAW
+- VAL_LogPBR_SNZ
+- VAL_LogPBR_CSZ
+- VAL_EarningsYield_CSR
+- SEA_DayOfWeek_RAW
+- SPD_VWAPDev_RAW
+- SPD_VWAPDev_CSZ
+- SPD_OverseaFlowTrend_RAW
+- SPD_MarginRatio_CSR
+- SPD_MarginBuyImpact_CSZ
+- SPD_MarginBuyImpact_CSR
+- MOM_Return6m_CSR
+- MOM_Momentum12-1_TSR_252D
+- MOM_MADev200_RAW
+- MOM_LinRegSlope10_CSZ
+- QLT_SalesGrowthYOY_SNZ
+- QLT_SalesGrowthYOY_CSR
+- QLT_OperatingProfitGrowthYOY_RAW
+- QLT_Accruals_TSR_252D
+- QLT_Accruals_CSZ
+- SIZ_LogMarketCap_CSR
+- BET_SectorRelStrength60_RAW
+- GOV_Sector33Code_RAW
+- GOV_MarketSegment_RAW
+cat_cols:
+- SEA_DayOfWeek_RAW
+- GOV_Sector33Code_RAW
+- GOV_MarketSegment_RAW

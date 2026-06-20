@@ -6,5 +6,6 @@ use_gpu: true
 # 前処理クラスのパスを記述（後述のスクリプトで動的ロード）
 preprocessor_target: "src.preprocess.preprocess_lgbm.LGBMPreprocessor"
 model_target: "src.models.lgbm_wrapper.LGBMWrapper"
+ensemble_size: 1
 # このモデルが必要とするデータ種別（data/フォルダの設定と紐付け）
 data_category: "tabular"

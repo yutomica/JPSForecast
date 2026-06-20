@@ -2,8 +2,8 @@
 _target_: src.cv.anchored_walk_forward.AnchoredWalkForwardPurgedCV
 
 # 例: 最初の252営業日で学習し、その後63営業日ごとに検証
-n_splits: 7
-min_train_size: 252
+n_splits: 20
+min_train_size: 504
 val_size: 252
 step_size: 252
 
@@ -11,6 +11,6 @@ step_size: 252
 max_train_size: null
 
 # 末尾が val_size 未満でも最後のfoldを使いたい場合のみ true
-allow_incomplete_last_fold: false
-train_start_date: ${period.train_start_date}
-test_start_date: ${period.test_start_date}
+allow_incomplete_last_fold: true
+train_start_date: "2018-01-01"
+test_start_date: "2025-12-31"

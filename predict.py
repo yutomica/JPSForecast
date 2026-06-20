@@ -171,6 +171,9 @@ def predict(target_date: str):
     registered_models = client.search_registered_models(filter_string="name LIKE '%'")
     models = []
     for rm in registered_models:
+        # 役割ベースのフィルタリング: Base_{Model}_{Target}_INF または Stacked_{Target}_Final
+        if not (('Base' in rm.name and 'INF' in rm.name) or ('Stacked' in rm.name)):
+            continue
         for v in rm.latest_versions:
             if v.current_stage == 'Production':
                 models.append(v)

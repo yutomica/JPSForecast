@@ -1,0 +1,26 @@
+# Generated from Optuna study: final_sweep_gandalf_tac_alpha_gr_20260619_095457
+# Best value (Objective): 4.093200127254522
+# Trial number: 30
+learning_rate: 0.0007311789663955036
+weight_decay: 3.0e-07
+batch_size: 4096
+max_epochs: 100
+patience: 20
+gflu_stages: 6
+gflu_dropout: 0.12436928724379501
+gflu_feature_init_sparsity: 0.3
+learnable_sparsity: true
+head_hidden_dims:
+- 128
+- 64
+head_dropout: 0.2302919240696891
+gradient_clip_val: 1.0
+lr_decay_factor: 0.5
+lr_patience: 5
+min_lr: 1e-06
+early_stopping_ema_alpha: 1.0
+random_state: 42
+num_workers: 0
+use_time_decay: false
+time_decay_rate: 0.9999
++alpha: 1.0

@@ -53,9 +53,11 @@ run_screening() {
     echo ""
 }
 
-# # 1. TAC (Tactical) 攻め/守り
-# run_screening "tac" "lgbm" "alpha" &
-run_screening "str" "alpha"
+# run_screening "str" "alpha"
+# run_screening "tac" "alpha_tb_5_3"
+# run_screening "10d" "alpha_gr"
+run_screening "20d" "alpha_gr" &
+run_screening "40d" "alpha_gr"
 
 # # 2. STR (Strategic) 攻め/守り
 # run_screening "str" "lgbm" "alpha" &

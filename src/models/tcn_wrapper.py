@@ -135,6 +135,7 @@ class TCNWrapper(BaseModelWrapper):
         self.early_stopping_metric = params.pop("early_stopping_metric", "loss")
         self.metric_direction = params.pop("metric_direction", "minimize")
         self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
+        self.ensemble_size = int(params.pop("ensemble_size", 1))
 
         if self.device_name == "auto":
             if torch.cuda.is_available():
@@ -151,6 +152,7 @@ class TCNWrapper(BaseModelWrapper):
             print("  ⚠️ Notice: Using num_workers>0 on MPS. If you experience hangs, set num_workers=0.")
 
         self.model = None
+        self.models = []
         self.history = {"train_loss": [], "valid_loss": []}
         self.feature_importances_ = None
         self.best_epoch_ = None
@@ -252,53 +254,28 @@ class TCNWrapper(BaseModelWrapper):
     def fit(self, X_train, y_train, X_valid=None, y_valid=None, sample_weight=None, model_idx=0, epoch_callback=None, train_dates=None, valid_dates=None):
         y_train_np = np.asarray(y_train)
         is_zarr_train = isinstance(X_train, str) and X_train.endswith('.zarr')
-
         if is_zarr_train:
             z = zarr.open(X_train, mode='r')
-            self._build_model_from_shape(z.shape)
+            self.window_size_, self.input_dim_ = int(z.shape[1]), int(z.shape[2])
         else:
             X_train = np.asarray(X_train, dtype=np.float32)
-            self._build_model_from_shape(X_train.shape)
+            self.window_size_, self.input_dim_ = int(X_train.shape[1]), int(X_train.shape[2])
 
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f"\n--- TCN Model Summary (Fold {model_idx}) ---")
-        print(f"Total Parameters:     {total_params:,}")
-        print(f"Trainable Parameters: {trainable_params:,}")
-        print(f"Input Shape:          [N, {self.window_size_}, {self.input_dim_}]")
-        print(f"Channels:             {self.num_channels}")
-        print("-" * 40)
-
-        # --- Validation Loader の準備とメモリ解放 ---
+        # --- Validation Loader ---
         valid_loader = None
         if X_valid is not None and y_valid is not None:
             y_valid_np = np.asarray(y_valid)
             is_zarr_valid = isinstance(X_valid, str) and X_valid.endswith('.zarr')
             valid_mask = ~np.isnan(y_valid_np) & ~np.isinf(y_valid_np)
-            if not is_zarr_valid:
-                valid_mask &= np.isfinite(X_valid).all(axis=(1, 2))
-
-            dropped_valid = len(y_valid_np) - int(np.sum(valid_mask))
-            if dropped_valid > 0:
-                print(f"  ⚠️ Dropped {dropped_valid:,} validation samples due to NaN/Inf.")
-
+            if not is_zarr_valid: valid_mask &= np.isfinite(X_valid).all(axis=(1, 2))
             valid_loader = self._build_dataloader(X_valid, y_valid_np, None, valid_mask, self.batch_size, shuffle=False)
-            gc.collect()
-
-        # --- Training Loader の準備とメモリ解放 ---
+            
+        # --- Training Loader ---
         train_mask = ~np.isnan(y_train_np) & ~np.isinf(y_train_np)
-        if not is_zarr_train:
-            train_mask &= np.isfinite(X_train).all(axis=(1, 2))
-
+        if not is_zarr_train: train_mask &= np.isfinite(X_train).all(axis=(1, 2))
         if sample_weight is not None:
             sample_weight = np.nan_to_num(sample_weight, nan=0.0, posinf=1.0, neginf=0.0)
-            sample_weight = np.clip(sample_weight, 0.0, None)
-            train_mask &= (sample_weight > 0)
-
-        dropped_train = len(y_train_np) - int(np.sum(train_mask))
-        if dropped_train > 0:
-            print(f"  ⚠️ Dropped {dropped_train:,} training samples due to NaN/Inf or zero weights.")
-
+            train_mask &= (np.clip(sample_weight, 0.0, None) > 0)
         w_np = None
         if sample_weight is not None:
             w_np = sample_weight.astype(np.float32)
@@ -306,237 +283,136 @@ class TCNWrapper(BaseModelWrapper):
             if len(w_np_filt) > 0:
                 p99 = np.percentile(w_np_filt, 99)
                 w_np_filt = np.clip(w_np_filt, 0.0, max(p99 * 10.0, 1.0))
-                if w_np_filt.mean() > 0:
-                    w_np_filt = w_np_filt / w_np_filt.mean()
+                if w_np_filt.mean() > 0: w_np_filt /= w_np_filt.mean()
             w_np[train_mask] = w_np_filt
-
         train_loader = self._build_dataloader(X_train, y_train_np, w_np, train_mask, self.batch_size, shuffle=True)
         gc.collect()
 
-        if self.optimizer_name.lower() == "adam":
-            optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        else:
-            optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.models = []
+        all_feature_importances = []
+        base_seed = self.random_state
 
-        best_state = copy.deepcopy(self.model.state_dict())
-        best_metric_val = float("-inf") if self.metric_direction == "maximize" else float("inf")
-        wait = 0
-        ema_val_metric = None
+        for s_idx in range(self.ensemble_size):
+            current_seed = base_seed + s_idx
+            if self.ensemble_size > 1: print(f"\n🚀 Training Ensemble Model {s_idx+1}/{self.ensemble_size} (seed={current_seed})...")
+            torch.manual_seed(current_seed); np.random.seed(current_seed)
+            if torch.cuda.is_available(): torch.cuda.manual_seed_all(current_seed)
+            self._build_model_from_shape((0, self.window_size_, self.input_dim_))
+            if s_idx == 0:
+                total_params = sum(p.numel() for p in self.model.parameters())
+                print(f"\n--- TCN Model Summary (Fold {model_idx}) ---")
+                print(f"Total Parameters: {total_params:,}")
+                print("-" * 40)
 
-        amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
-        amp_enabled = (self.device.type in ["cuda", "mps"])
-        
-        scaler = None
-        if amp_enabled:
-            if hasattr(torch.amp, "GradScaler"):
-                try:
-                    scaler = torch.amp.GradScaler(amp_device, enabled=True)
-                except TypeError:
-                    if amp_device == "cuda":
-                        scaler = torch.amp.GradScaler("cuda", enabled=True)
-            elif hasattr(torch.cuda.amp, "GradScaler") and amp_device == "cuda":
-                scaler = torch.cuda.amp.GradScaler(enabled=True)
+            if self.optimizer_name.lower() == "adam":
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+            else:
+                optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-        loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
+            best_state, best_metric_val, wait, ema_val_metric = None, float("-inf") if self.metric_direction == "maximize" else float("inf"), 0, None
+            amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
+            amp_enabled = (self.device.type in ["cuda", "mps"])
+            if self.device.type == "mps": amp_enabled = False
+            scaler = torch.amp.GradScaler(amp_device, enabled=True) if amp_enabled and amp_device == "cuda" else None
+            loss_name = self.params.get("objective", "mse") if self.task_type != "classification" else "bce"
 
-        # --- Resolve Early Stopping Metric ---
-        stopping_func = None
-        if self.early_stopping_metric == "ic":
-            from .pruning import calculate_spearman_ic
-            stopping_func = calculate_spearman_ic
-        elif self.early_stopping_metric != "loss":
-            try:
-                base_metric_func = get_method(self.early_stopping_metric)
-                # ファクトリ関数の場合、パラメータを渡して実体化する
-                # 判定基準: 引数に dates, y_true, y_pred のいずれも含まない場合
-                sig = inspect.signature(base_metric_func)
-                if not any(p in sig.parameters for p in ["dates", "y_true", "y_pred", "preds", "data"]):
-                    stopping_func = base_metric_func(**self.params)
-                else:
-                    stopping_func = base_metric_func
-            except Exception as e:
-                print(f"  ⚠️ Warning: Failed to resolve custom metric '{self.early_stopping_metric}'. Falling back to loss. Error: {e}")
-                stopping_func = None
+            from hydra.utils import get_method
+            import inspect
+            stopping_func = None
+            if self.early_stopping_metric == "ic":
+                from .pruning import calculate_spearman_ic
+                stopping_func = calculate_spearman_ic
+            elif self.early_stopping_metric != "loss":
+                try: stopping_func = get_method(self.early_stopping_metric)
+                except Exception: pass
 
-        for epoch in range(self.max_epochs):
-            if hasattr(train_loader.dataset, "on_epoch_end"):
-                train_loader.dataset.on_epoch_end()
-
-            self.model.train()
-            train_total = torch.tensor(0.0, device=self.device)
-            train_count = 0
-            
-            # プロファイリングの設定（初回エポックのみ実行してボトルネックを可視化）
-            enable_profiler = (epoch == 0)
-            prof = torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU],
-                schedule=torch.profiler.schedule(wait=1, warmup=2, active=5, repeat=1),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/profiler/tcn_fold{model_idx}"),
-                record_shapes=True,
-                with_stack=True
-            ) if enable_profiler else None
-
-            if prof is not None:
-                prof.start()
-
-            with tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.max_epochs}", leave=False) as pbar:
-                for x, y, sw in pbar:
-                    x = x.to(self.device, non_blocking=True)
-                    y = y.to(self.device)
-                    sw = sw.to(self.device)
-
-                    optimizer.zero_grad(set_to_none=True)
-
-                    if amp_enabled:
-                        # 金融データの広いダイナミックレンジを維持しつつ高速化するため、bfloat16 を明示的に指定
-                        # M5チップの性能を最大限に引き出す
-                        dtype = torch.bfloat16 if amp_device == "mps" else torch.float16
-                        with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
-                            logits = self.model(x)
-                            loss = self._compute_loss(logits, y, sw)
-                        
-                        if scaler is not None:
-                            scaler.scale(loss).backward()
-                            if self.grad_clip_norm is not None:
-                                scaler.unscale_(optimizer)
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            loss.backward()
-                            if self.grad_clip_norm is not None:
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                            optimizer.step()
-                    else:
-                        logits = self.model(x)
-                        loss = self._compute_loss(logits, y, sw)
-                        loss.backward()
-                        if self.grad_clip_norm is not None:
-                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                        optimizer.step()
-
-                    train_total += loss.detach() * x.shape[0]
-                    train_count += x.shape[0]
-                    # バッチ毎の .item() 同期（CPU busy-wait）を防ぐため tqdm の更新を省略
-                    
-                    if prof is not None:
-                        prof.step()
-                        
-            if prof is not None:
-                prof.stop()
-
-            train_loss = float(train_total.item()) / max(train_count, 1)
-            self.history["train_loss"].append(train_loss)
-
-            if valid_loader is not None:
-                self.model.eval()
-                valid_total = torch.tensor(0.0, device=self.device)
-                valid_count = 0
-                all_preds = []
-                all_targets = []
-                with torch.no_grad():
-                    for x, y, sw in valid_loader:
-                        x = x.to(self.device, non_blocking=(self.device.type == "cuda"))
-                        y = y.to(self.device, non_blocking=(self.device.type == "cuda"))
-                        
+            for epoch in range(self.max_epochs):
+                if hasattr(train_loader.dataset, "on_epoch_end"): train_loader.dataset.on_epoch_end()
+                self.model.train(); train_total, train_count = torch.tensor(0.0, device=self.device), 0
+                with tqdm(train_loader, desc=f"Model {s_idx+1} Epoch {epoch+1}/{self.max_epochs}", leave=False) as pbar:
+                    for x, y, sw in pbar:
+                        x, y, sw = x.to(self.device), y.to(self.device), sw.to(self.device)
+                        optimizer.zero_grad(set_to_none=True)
                         if amp_enabled:
+                            dtype = torch.bfloat16 if amp_device == "mps" else torch.float16
                             with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
-                                logits = self.model(x)
-                                loss = self._compute_loss(logits, y, sample_weight=None)
+                                logits = self.model(x); loss = self._compute_loss(logits, y, sw)
+                            if scaler: scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
+                            else: loss.backward(); optimizer.step()
                         else:
-                            logits = self.model(x.float())
-                            loss = self._compute_loss(logits, y, sample_weight=None)
-                            
-                        valid_total += loss.detach() * x.shape[0]
-                        valid_count += x.shape[0]
-                        
-                        if stopping_func is not None:
-                            if self.task_type == "classification":
-                                preds = torch.sigmoid(logits.view(-1))
-                            else:
-                                preds = logits.view(-1)
-                            all_preds.append(preds.float().cpu().numpy())
-                            all_targets.append(y.float().cpu().numpy())
-                            
-                valid_loss = float(valid_total.item()) / max(valid_count, 1)
-                
-                if stopping_func is not None:
-                    preds_np = np.concatenate(all_preds)
-                    targets_np = np.concatenate(all_targets)
-                    try:
-                        sig = inspect.signature(stopping_func)
-                        if "dates" in sig.parameters:
-                            val_metric = stopping_func(targets_np, preds_np, dates=valid_dates)
-                        else:
-                            val_metric = stopping_func(targets_np, preds_np)
-                    except Exception as e:
-                        print(f"  ⚠️ Warning: Failed to calculate metric. Error: {e}")
-                        val_metric = valid_loss
+                            logits = self.model(x); loss = self._compute_loss(logits, y, sw)
+                            loss.backward(); optimizer.step()
+                        train_total += loss.detach() * x.shape[0]; train_count += x.shape[0]
+                train_loss = float(train_total.item()) / max(train_count, 1)
+                if s_idx == 0: self.history["train_loss"].append(train_loss)
+
+                if valid_loader is not None:
+                    self.model.eval(); valid_total, valid_count, all_preds, all_targets = torch.tensor(0.0, device=self.device), 0, [], []
+                    with torch.no_grad():
+                        for x, y, _ in valid_loader:
+                            x, y = x.to(self.device), y.to(self.device)
+                            logits = self.model(x); loss = self._compute_loss(logits, y, None)
+                            valid_total += loss.detach() * x.shape[0]; valid_count += x.shape[0]
+                            if stopping_func is not None:
+                                preds = torch.sigmoid(logits.view(-1)) if self.task_type == "classification" else logits.view(-1)
+                                all_preds.append(preds.float().cpu().numpy()); all_targets.append(y.float().cpu().numpy())
+                    valid_loss = float(valid_total.item()) / max(valid_count, 1)
+                    if stopping_func is not None:
+                        preds_np, targets_np = np.concatenate(all_preds), np.concatenate(all_targets)
+                        try:
+                            sig = inspect.signature(stopping_func)
+                            val_metric = stopping_func(targets_np, preds_np, dates=valid_dates) if "dates" in sig.parameters else stopping_func(targets_np, preds_np)
+                        except Exception: val_metric = valid_loss
+                    else: val_metric = valid_loss
                 else:
-                    val_metric = valid_loss
-            else:
-                valid_loss = train_loss
-                val_metric = train_loss
+                    valid_loss = np.nan
+                    val_metric = np.nan
 
-            self.history["valid_loss"].append(valid_loss)
+                if s_idx == 0: self.history["valid_loss"].append(valid_loss)
+                if ema_val_metric is None or np.isnan(ema_val_metric):
+                    ema_val_metric = val_metric
+                elif not np.isnan(val_metric):
+                    ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
 
-            metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else ""
-            tqdm.write(
-                f"Epoch {epoch+1}/{self.max_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}" +
-                (f" | Valid {metric_name_log}: {val_metric:.6f}" if self.early_stopping_metric != "loss" else "")
-            )
+                # --- Logging ---
+                metric_name_log = self.early_stopping_metric.split('.')[-1] if self.early_stopping_metric != "loss" else ""
+                msg = f"Epoch {epoch+1}/{self.max_epochs} | Train {loss_name}: {train_loss:.6f} | Valid {loss_name}: {valid_loss:.6f}"
+                if metric_name_log and not np.isnan(val_metric):
+                    msg += f" | {metric_name_log}: {val_metric:.6f}"
+                if self.early_stopping_ema_alpha < 1.0 and not np.isnan(ema_val_metric):
+                    msg += f" | {metric_name_log}_smoothed: {ema_val_metric:.6f}"
+                tqdm.write(msg)
 
-            # MLflow記録用のキーに具体的なコスト関数名（objective）を適用
-            metrics_to_log = {f"train_{loss_name}": train_loss}
-            if valid_loader is not None:
-                metrics_to_log[f"valid_{loss_name}"] = valid_loss
-                if self.early_stopping_metric != "loss":
-                    metrics_to_log[f"valid_{metric_name_log}"] = val_metric
-            if epoch % 10 == 0 or epoch == self.max_epochs - 1:
-                log_epoch_metrics(model_idx, epoch, metrics_to_log)
+                if epoch % 10 == 0 or epoch == self.max_epochs - 1:
+                    metrics_to_log = {"train_loss": train_loss, "valid_loss": valid_loss}
+                    if metric_name_log and not np.isnan(val_metric):
+                        metrics_to_log[f"valid_{metric_name_log}"] = val_metric
+                    if self.early_stopping_ema_alpha < 1.0 and not np.isnan(ema_val_metric):
+                        metrics_to_log[f"valid_{metric_name_log}_smoothed"] = ema_val_metric
+                    log_epoch_metrics(model_idx, epoch, metrics_to_log)
 
-            if epoch_callback is not None and X_valid is not None:
-                valid_preds = self.predict(X_valid)
-                execute_epoch_pruning(epoch_callback, epoch, valid_preds, y_valid)
+                is_best = False
+                if not np.isnan(ema_val_metric):
+                    is_best = (ema_val_metric > best_metric_val) if self.metric_direction == "maximize" else (ema_val_metric < best_metric_val)
+                
+                if is_best or valid_loader is None:
+                    # valid_loaderがない(本番学習時)は常に最新をbestとする
+                    if not np.isnan(ema_val_metric):
+                        best_metric_val = ema_val_metric
+                    best_state, wait = copy.deepcopy(self.model.state_dict()), 0
+                    if s_idx == 0: self.best_epoch_ = epoch
+                else:
+                    wait += 1
+                    if wait >= self.patience: break
 
-            # Calculate EMA of validation metric to prevent stopping on noisy spikes
-            if ema_val_metric is None:
-                ema_val_metric = val_metric
-            else:
-                ema_val_metric = self.early_stopping_ema_alpha * val_metric + (1.0 - self.early_stopping_ema_alpha) * ema_val_metric
+            self.model.load_state_dict(best_state); self.model.eval(); self.models.append(copy.deepcopy(self.model))
+            if s_idx == 0: self._log_learning_curve(model_idx)
+            self._create_feature_importance_df(); all_feature_importances.append(self.feature_importances_)
+            del best_state, optimizer; gc.collect()
 
-            is_best = False
-            if self.metric_direction == "maximize":
-                if ema_val_metric > best_metric_val:
-                    is_best = True
-            else:
-                if ema_val_metric < best_metric_val:
-                    is_best = True
-                    
-            if is_best:
-                best_metric_val = ema_val_metric
-                best_state = copy.deepcopy(self.model.state_dict())
-                self.best_epoch_ = epoch
-                wait = 0
-            else:
-                wait += 1
-                if wait >= self.patience:
-                    tqdm.write(f"Early stopping triggered at epoch {epoch + 1}")
-                    break
-
-        self.model.load_state_dict(best_state)
-        self.model.eval()
-        self._log_learning_curve(model_idx)
-        self._create_feature_importance_df()
-
-        if self.device.type == "mps" and hasattr(torch, "mps"):
-            try:
-                torch.mps.empty_cache()
-            except Exception: pass
-
-        del train_loader, valid_loader, best_state, optimizer
-        if 'scaler' in locals(): del scaler
-        gc.collect()
+        self.feature_importances_ = np.mean(all_feature_importances, axis=0)
+        self.model = self.models[0]
+        del train_loader, valid_loader; gc.collect()
 
     def _log_learning_curve(self, model_idx):
         if not self.history["train_loss"]:
@@ -573,70 +449,45 @@ class TCNWrapper(BaseModelWrapper):
         self.feature_importances_ = importance
 
     def predict(self, X):
-        if self.model is None:
-            raise ValueError("Model has not been trained yet.")
-
+        if not self.models: raise ValueError("Model has not been trained yet.")
         is_zarr = isinstance(X, str) and X.endswith('.zarr')
         if not is_zarr:
             X = np.asarray(X, dtype=np.float32)
-            if X.ndim != 3:
-                raise ValueError(f"X must be 3D [N, T, F], but got {X.shape}")
-
-        dummy_y = np.zeros(zarr.open(X, mode='r').shape[0] if is_zarr else X.shape[0], dtype=np.float32)
+            if X.ndim != 3: raise ValueError(f"X must be 3D [N, T, F], but got {X.shape}")
+        n_samples = zarr.open(X, mode='r').shape[0] if is_zarr else X.shape[0]
+        dummy_y = np.zeros(n_samples, dtype=np.float32)
         loader = self._build_dataloader(X, dummy_y, None, None, self.batch_size, shuffle=False)
-
-        outputs = []
-        self.model.eval()
-
-        amp_device = "cuda" if self.device.type == "cuda" else "mps" if self.device.type == "mps" else "cpu"
-        amp_enabled = (self.device.type in ["cuda", "mps"])
-        dtype = torch.bfloat16 if amp_device == "mps" else torch.float16
-
-        with torch.no_grad():
-            for x, _, _ in tqdm(loader, desc="Predicting", leave=False):
-                x = x.to(self.device, non_blocking=(self.device.type == "cuda"))
-                
-                if amp_enabled:
-                    with torch.amp.autocast(device_type=amp_device, enabled=True, dtype=dtype):
-                        logits = self.model(x)
-                else:
-                    logits = self.model(x.float())
-
-                if self.task_type == "classification":
-                    preds = torch.sigmoid(logits.view(-1))
-                else:
-                    preds = logits.view(-1)
-                outputs.append(preds.float().detach().cpu().numpy())
-
-        return np.concatenate(outputs, axis=0).flatten()
+        all_ensemble_preds = []
+        for m_idx, model in enumerate(self.models):
+            model.eval(); outputs = []
+            with torch.no_grad():
+                for x, _, _ in tqdm(loader, desc=f"Predicting {m_idx+1}/{len(self.models)}", leave=False):
+                    x = x.to(self.device); logits = model(x)
+                    preds = torch.sigmoid(logits.view(-1)) if self.task_type == "classification" else logits.view(-1)
+                    outputs.append(preds.float().detach().cpu().numpy())
+            all_ensemble_preds.append(np.concatenate(outputs, axis=0).flatten())
+        return np.mean(all_ensemble_preds, axis=0)
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        if "model" in state and state["model"] is not None:
-            state["_model_state_dict"] = {k: v.cpu() for k, v in state["model"].state_dict().items()}
-            del state["model"]
+        if "models" in state and state["models"]:
+            state["_models_state_dicts"] = [{k: v.cpu() for k, v in m.state_dict().items()} for m in state["models"]]
+            del state["models"]
+        if "model" in state: del state["model"]
         return state
 
     def __setstate__(self, state):
-        model_state = state.pop("_model_state_dict", None)
+        models_states = state.pop("_models_state_dicts", [])
         self.__dict__.update(state)
-
-        if model_state is not None:
-            if self.input_dim_ is None:
-                raise ValueError("Cannot restore TCNWrapper because input_dim_ is missing.")
-            self.model = TCN(
-                input_dim=self.input_dim_,
-                output_dim=1,
-                num_channels=self.num_channels,
-                kernel_size=self.kernel_size,
-                dropout=self.dropout,
-                activation=self.activation,
-                use_weight_norm=self.use_weight_norm,
-                norm_type=self.norm_type,
-                pooling=self.pooling,
-                head_hidden_dim=self.head_hidden_dim,
-                head_dropout=self.head_dropout,
-            )
-            self.model.load_state_dict(model_state)
-            self.model.to(self.device)
-            self.model.eval()
+        if models_states:
+            self.models = []
+            for m_state in models_states:
+                m = TCN(
+                    input_dim=self.input_dim_, output_dim=1, num_channels=self.num_channels,
+                    kernel_size=self.kernel_size, dropout=self.dropout, activation=self.activation,
+                    use_weight_norm=self.use_weight_norm, norm_type=self.norm_type, pooling=self.pooling,
+                    head_hidden_dim=self.head_hidden_dim, head_dropout=self.head_dropout,
+                )
+                m.load_state_dict(m_state); m.to(self.device).eval()
+                self.models.append(m)
+            self.model = self.models[0]

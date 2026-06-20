@@ -1,8 +1,12 @@
-name: nbeats
-group: deep_timeseries
-data_category: timeseries
-preprocessor_target: src.preprocess.preprocess_nbeats.NBeatsPreprocessor
-model_target: src.models.nbeats_wrapper.NBeatsWrapper
-window_size:
-  tac: 60
+# config/model/nbeats.yaml
+name: "N-BEATS"
+_target_: "src.models.nbeats_wrapper.NBeatsWrapper"
+preprocessor_target: "src.preprocess.preprocess_nbeats.NBeatsPreprocessor"
+model_target: "src.models.nbeats_wrapper.NBeatsWrapper"
+data_category: "timeseries"
+ensemble_size: 1
+
+# default hparams (can be overridden by hparams/*.yaml)
+lookback_periods:
+  tac: 20
   str: 120

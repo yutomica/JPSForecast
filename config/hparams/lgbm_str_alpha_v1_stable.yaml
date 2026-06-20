@@ -12,8 +12,8 @@ is_unbalance: true
 use_time_decay: false
 time_decay_rate: 0.9999
 bagging_freq: 6
-patience: 500
-burn_in_rounds: 1000
+patience: 100
+burn_in_rounds: 100
 early_stopping_ema_alpha: 0.1
 verbose: -1
 fair_c: 10.0
