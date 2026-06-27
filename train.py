@@ -10,8 +10,6 @@ import hydra
 import mlflow
 import json
 import pandas as pd
-import joblib
-import yaml
 import tempfile
 import copy
 from pathlib import Path
@@ -27,7 +25,7 @@ from src.models.pipeline import FoldPipeline, EnsembleInferencePipeline
 from src.models.pruning import create_pruning_callback
 from src.evaluation.metrics import (
     evaluate_metrics, calculate_bin_stats,
-    calc_fold_metrics, calculate_extra_bin_metrics
+    is_extra_bin_metric_key,
 )
 from src.evaluation.objectives import (
     aggregate_fold_metrics, calc_objective_v2,
@@ -151,13 +149,9 @@ def train(cfg: DictConfig) -> float:
                 (train_val_meta['date'] < (test_start - embargo_td))
             ]
             train_idx = train_val_meta.index[(train_val_meta['date'] >= train_start) & (train_val_meta['date'] < (valid_start - embargo_td))]
-            
-            # Calculate positional indices for visualization
             tr_pos = np.where(np.isin(unique_dates, train_val_meta.loc[train_idx, 'date'].unique()))[0]
             val_pos = np.where(np.isin(unique_dates, train_val_meta.loc[valid_idx, 'date'].unique()))[0]
             te_pos = np.where(np.isin(unique_dates, train_val_meta.loc[test_idx, 'date'].unique()))[0] if not test_idx.empty else None
-            
-            # 1つの分割としてリスト化
             splits = [(train_idx, valid_idx, test_idx, tr_pos, val_pos, te_pos)]
         else:
             cv = instantiate(
@@ -193,7 +187,6 @@ def train(cfg: DictConfig) -> float:
         features_dir = master_dir / "features"
         if not features_dir.exists():
             raise FileNotFoundError(f"Features directory not found: {features_dir}")
-            
         print("  - Preparing shared memory map for raw features...")
         cols_hash = hashlib.md5(",".join(feature_cols).encode()).hexdigest()[:8]
         features_mmap_path = master_dir / f"features_array_{cols_hash}.npy"
@@ -211,7 +204,6 @@ def train(cfg: DictConfig) -> float:
                 lock_path.touch(exist_ok=False)
                 print(f"  - Building mmap cache: {features_mmap_path.name}")
                 chunk_files = sorted(features_dir.glob("features_chunk_*.parquet"))
-                
                 try:
                     shape = (len(meta_df), len(feature_cols))
                     mmap_arr = np.memmap(features_mmap_path, dtype='float32', mode='w+', shape=shape)
@@ -233,10 +225,8 @@ def train(cfg: DictConfig) -> float:
                 import time
                 while lock_path.exists():
                     time.sleep(2)
-
         print("  - Attaching to shared memory map...")
         features_array = np.memmap(features_mmap_path, dtype='float32', mode='r', shape=(len(meta_df), len(feature_cols)))
-            
         # train.py内での後続処理の互換性のため、列のインデックスマッピングを更新
         # 読み込んだ時点で配列の列は `feature_cols` と同一になるため
         col_indices = list(range(len(feature_cols)))
@@ -251,7 +241,6 @@ def train(cfg: DictConfig) -> float:
         if cfg.model.data_category == 'timeseries': prep_params['window_size'] = cfg.hparams.get("window_size", 20)
         preprocessor_class = get_class(cfg.model.preprocessor_target)
         base_preprocessor = preprocessor_class(**prep_params)
-        
         sample_data = features_array[:100000, col_indices]
         base_preprocessor.fit(pd.DataFrame(sample_data, columns=feature_cols))
         
@@ -319,7 +308,7 @@ def train(cfg: DictConfig) -> float:
             info = log_split_info(i, tr_pos, val_pos, pos_to_date, te_pos=te_pos)
             cv_summaries.append(info)
             
-            # --- 学習データのみ Date-interval サンプリングを適用 ---
+            # 学習データのみ Date-interval サンプリングを適用
             if cfg.get("preprocess", {}).get("sampling", {}).get("enabled", False):
                 print("  🔹 Applying date-interval sampling...")
                 count_before_sampling = len(train_idx)
@@ -329,7 +318,7 @@ def train(cfg: DictConfig) -> float:
                 train_idx = train_meta_processed.index
                 print(f"    - Samples reduced: {count_before_sampling:,} -> {len(train_idx):,}")
 
-            # --- 学習データのみターゲット層化サンプリングを適用 ---
+            # 学習データのみターゲット層化サンプリングを適用
             stratified_sampling_weights = None
             if cfg.get("preprocess", {}).get("target_stratified_sampling", {}).get("enabled", False):
                 sampling_cfg = cfg.preprocess.target_stratified_sampling
@@ -358,7 +347,7 @@ def train(cfg: DictConfig) -> float:
                     stratified_sampling_weights = train_meta_processed.loc[train_idx, 'sample_weight'].values
                     print(f"    - Weighting mode enabled. Sample count remains {len(train_idx):,}.")
 
-            # --- ウェイトの計算を関数化 ---
+            # ウェイトの計算を関数化
             def calc_weights(idx, is_train=True):
                 w = np.ones(len(idx))
                 w *= calculate_sample_weights(meta_df.loc[idx, 'log_market_cap'].values, cfg.domain.name)
@@ -401,7 +390,6 @@ def train(cfg: DictConfig) -> float:
                             mlflow.log_metric(f"fold{i}_positive_rate_10", float(pos_rate_10))
                         print(f"    - Class weight mode enabled.")
                 return w
-
             w_train = calc_weights(train_idx, is_train=True)
 
             # メモリ上の配列から必要な行のみを読み出し
@@ -411,7 +399,7 @@ def train(cfg: DictConfig) -> float:
             X_train = preprocessor.transform(features_array, row_indices=train_idx, col_indices=col_indices)
             X_valid = preprocessor.transform(features_array, row_indices=valid_idx, col_indices=col_indices)
             
-            # --- OOF特徴量のオンザフライ結合 ---
+            # OOF特徴量のオンザフライ結合
             X_train = combine_features_with_oof(X_train, meta_df, train_idx, oof_cols)
             X_valid = combine_features_with_oof(X_valid, meta_df, valid_idx, oof_cols)
 
@@ -467,28 +455,24 @@ def train(cfg: DictConfig) -> float:
                 'test':  model.predict(X_test) if X_test is not None else None
             }
             
-            # --- Production Mode: Step 2 本学習 ---
+            # Production Mode: Step 2 本学習
             if cfg.get("mode") == "production":
                 ensemble_size = cfg.model.get("ensemble_size", 1)
                 print(f"\n  🌟 [Production] Step 2: Training on Train+Valid data (Ensemble Size: {ensemble_size}) using best_iter={best_iter}...")
                 full_train_idx = train_idx.append(valid_idx)
-                
                 # Visualize production period
                 full_train_dates = train_val_meta.loc[full_train_idx, 'date'].unique()
                 tr_pos_prod = np.where(np.isin(unique_dates, full_train_dates))[0]
                 log_split_info(i, tr_pos_prod, np.array([]), pos_to_date, label="PROD")
                 w_full = calc_weights(full_train_idx, is_train=True)
-                
                 # Full data features
                 X_full = preprocessor.transform(features_array, row_indices=full_train_idx, col_indices=col_indices)
                 X_full = combine_features_with_oof(X_full, meta_df, full_train_idx, oof_cols)
                 y_full = meta_df.loc[full_train_idx, target_col].values
-                
                 # params update for full training
                 prod_params = copy.deepcopy(full_params)
                 # Productionの個別学習時は wrapper 内の ensemble_size は 1 に固定する（ここでループ制御するため）
                 prod_params["ensemble_size"] = 1
-                
                 if best_iter is not None:
                     # LGBM or NN max epochs
                     if cfg.model.name.lower() in ["lgbm", "lightgbm"]:
@@ -497,20 +481,16 @@ def train(cfg: DictConfig) -> float:
                     else:
                         prod_params['max_epochs'] = int(best_iter)
                         prod_params['patience'] = int(best_iter) + 1 # 無効化
-                
                 base_seed = cfg.get("seed", 42)
                 for s in range(ensemble_size):
                     if ensemble_size > 1:
                         print(f"    - Training ensemble model {s+1}/{ensemble_size} with seed {base_seed + s}...")
-                    
                     curr_params = copy.deepcopy(prod_params)
                     # 各モデルのシード値を変更
                     curr_params['seed'] = base_seed + s
                     curr_params['random_state'] = base_seed + s
-                    
                     model_prod = model_class(task_type=cfg.target.task_type, **curr_params)
                     model_prod.fit(X_full, y_full, X_valid=None, y_valid=None, sample_weight=w_full, model_idx=f"{i}_s{s}")
-                    
                     if s < ensemble_size - 1:
                         # 最後の1つ以外を先にパイプラインに追加
                         fold_pipelines.append(FoldPipeline(preprocessor, model_prod))
@@ -530,19 +510,7 @@ def train(cfg: DictConfig) -> float:
                 else:
                     preds_1d[phase] = p
 
-            # --- Fold別詳細メトリクス算出 (Step4 Objective用) ---
-            if preds_raw['valid'] is not None:
-                eval_df_fold = pd.DataFrame({
-                    'date': valid_dates,
-                    'pred': preds_1d['valid'],
-                    'y_true': y_valid,
-                    'y_ret': meta_df.loc[valid_idx, 'Future_Close'].values - 1.0
-                })
-                c_buffer_fold = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
-                f_metrics = calc_fold_metrics(eval_df_fold, cost_buffer=c_buffer_fold, y_pred=preds_raw['valid'])
-                fold_metrics_results.append(f_metrics)
-
-            # --- 特徴量スクリーニングロジック ---
+            # 特徴量スクリーニングロジック
             if cfg.get("mode") == "feature_screening":
                 print(f"  🔹 [Screening] Calculating SHAP for Fold {i}...")
                 abs_shap = calculate_shap(model, X_valid)
@@ -554,27 +522,35 @@ def train(cfg: DictConfig) -> float:
                 
             # メトリクス算出 (Train / Valid / Test)
             valid_score = None
+            c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
             for phase in ['train', 'valid', 'test']:
                 if preds_raw[phase] is not None:
                     idx = locals()[f'{phase}_idx']
                     y_true = locals()[f'y_{phase}']
-                    # 評価用ICの計算対象として生リターン（Future_Close）を取得
-                    y_ret = meta_df.loc[idx, 'Future_Close'].values - 1.0
-                    dates = meta_df.loc[idx, 'date'].values
-                    # cost_buffer の取得 (configから)
-                    c_buffer = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
-                    m = evaluate_metrics(y_true, preds_raw[phase], y_ret=y_ret, task_type=cfg.target.task_type, target_col=target_col, dates=dates, ndcg_k=cfg.get("ndcg_k", 10), cost_buffer=c_buffer)
+                    eval_df = pd.DataFrame({
+                        'date': meta_df.loc[idx, 'date'].values,
+                        'pred': preds_1d[phase],
+                        'y_true': y_true,
+                        'y_ret': meta_df.loc[idx, 'Future_Close'].values - 1.0,
+                    })
+                    for c in ['Future_High', 'Future_Low', 'Future_Close']:
+                        eval_df[c] = meta_df.loc[idx, c].values
 
-                    # --- 追加指標 (Bin/Top10) ---
+                    m = evaluate_metrics(
+                        eval_df,
+                        y_pred=preds_raw[phase],
+                        task_type=cfg.target.task_type,
+                        target_col=target_col,
+                        ndcg_k=cfg.get("ndcg_k", 10),
+                        cost_buffer=c_buffer,
+                        include_extra_bin_metrics=(phase == 'valid'),
+                    )
+
                     if phase == 'valid':
-                        eval_df_extra = pd.DataFrame({
-                            'date': dates,
-                            'score': preds_1d[phase],
+                        fold_metrics_results.append({
+                            k: v for k, v in m.items()
+                            if not is_extra_bin_metric_key(k)
                         })
-                        for c in ['Future_High', 'Future_Low', 'Future_Close']:
-                            eval_df_extra[c] = meta_df.loc[idx, c].values
-                        extra_m = calculate_extra_bin_metrics(eval_df_extra, score_col='score')
-                        m.update(extra_m)
 
                     # MLflowにフォールドごとの結果を記録
                     mlflow.log_metrics({f"fold{i}_{phase}_{k}": v for k, v in m.items()})
@@ -646,7 +622,7 @@ def train(cfg: DictConfig) -> float:
                 mlflow.log_artifact(output_filename)
                 print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
         
-        # MDA (Feature Sharpe) の集計と保存 ---
+        # --- MDA (Feature Sharpe) の集計と保存 ---
         if cfg.get("mode") == "feature_select" and all_fold_mda_values:
             mda_df = pd.DataFrame(all_fold_mda_values) # rows=folds, cols=features
             output_filename = f"feature_sharpe_{cfg.model.name}_{cfg.domain.name}_{cfg.target.name}.csv"
@@ -660,12 +636,10 @@ def train(cfg: DictConfig) -> float:
             test_res = full_res_df[full_res_df['phase'] == 'valid']
         else: 
             test_res = full_res_df[full_res_df['phase'] == 'test']
-            
         if cfg.get("mode") == "target_probe":
             max_fold = test_res['fold'].max()
             metrics = ['sample_count', 'target_mean', 'Future_High_mean', 'Future_Low_mean', 'Future_Close_mean']
             combined_df = pd.DataFrame()
-            
             for f in range(max_fold + 1):
                 fold_data = test_res[test_res['fold'] == f]
                 if not fold_data.empty:
@@ -704,7 +678,6 @@ def train(cfg: DictConfig) -> float:
                 'target': 'first',
                 'Future_Close': 'first'
             }).reset_index()
-            
             eval_df_pooled = pd.DataFrame({
                 'date': oof_df_clean['date'],
                 'pred': oof_df_clean['score'],
@@ -712,37 +685,9 @@ def train(cfg: DictConfig) -> float:
                 'y_ret': oof_df_clean['Future_Close'].values - 1.0
             })
             c_buffer_pooled = cfg.get("preprocess", {}).get("matrix_weight", {}).get("cost_buffer", 0.005)
-            pooled_metrics = calc_fold_metrics(eval_df_pooled, cost_buffer=c_buffer_pooled)
-            
+            pooled_metrics = evaluate_metrics(eval_df_pooled, cost_buffer=c_buffer_pooled)
             # MLflowにロギング
             mlflow.log_metrics({f"pooled_oof_{k}": v for k, v in pooled_metrics.items()})
-
-            # --- 日次RankICベースのICIRを直接計算 (互換性のため) ---
-            if opt_metric_name in ["daily_icir", "daily_icir_reb"]:
-                from scipy.stats import spearmanr
-                daily_ics = []
-                df_tmp = eval_df_pooled.copy()
-                unique_dates = np.sort(df_tmp['date'].unique())
-                if opt_metric_name == "daily_icir_reb":
-                    target_dates = set(unique_dates[::11])
-                else:
-                    target_dates = set(unique_dates)
-                for d, group in df_tmp.groupby('date'):
-                    if d not in target_dates:
-                        continue
-                    g_y_true = group['y_true'].values
-                    g_y_pred = group['pred'].values
-                    if len(g_y_true) < 2 or np.max(g_y_pred) == np.min(g_y_pred) or np.max(g_y_true) == np.min(g_y_true): 
-                        continue
-                    ic, _ = spearmanr(g_y_true, g_y_pred)
-                    if not np.isnan(ic):
-                        daily_ics.append(ic)
-                if daily_ics:
-                    ic_mean = np.mean(daily_ics)
-                    ic_std = np.std(daily_ics)
-                    icir = ic_mean / (ic_std + 1e-8)
-                    mlflow.log_metric(f"pooled_oof_{opt_metric_name}", icir)
-                    pooled_metrics[opt_metric_name] = icir
         else:
             pooled_metrics = {}
             

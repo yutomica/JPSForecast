@@ -1,7 +1,18 @@
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error, ndcg_score, average_precision_score, precision_recall_curve
+from sklearn.metrics import ndcg_score, average_precision_score, precision_recall_curve
 from scipy.stats import spearmanr
+
+EXTRA_BIN_META_COLS = ('Future_High', 'Future_Low', 'Future_Close')
+EXTRA_BIN_METRIC_PREFIXES = (
+    'top_bin_Future_',
+    'bot_bin_Future_',
+    'top10_Future_',
+    'bot10_Future_',
+)
+
+def is_extra_bin_metric_key(key):
+    return key.startswith(EXTRA_BIN_METRIC_PREFIXES)
 
 def _safe_spearmanr(a, b):
     if len(a) < 2 or np.max(a) == np.min(a) or np.max(b) == np.min(b):
@@ -22,9 +33,6 @@ def _resolve_cost(df_or_series, cost_col=0.005):
 
 def _scale_active_mean(x):
     return float(0.02 * np.clip(x / 0.01, -1.0, 1.0))
-
-def _scale_rankic_alpha(x):
-    return float(0.02 * np.clip(x / 0.05, -1.0, 1.0))
 
 def _safe_ap(y_true, y_score):
     """
@@ -105,21 +113,26 @@ def calc_tac_risk_class_metrics(y_class, proba):
         "recall_at_precision_80": recall_p80,
     }
 
+def _threshold_to_class_idx(threshold, max_idx=None):
+    idx = 1 if threshold == 0.05 else (2 if threshold == 0.07 else 3)
+    if threshold >= 0.15:
+        idx = 3
+    return min(idx, max_idx) if max_idx is not None else idx
+
 def _calc_multi_threshold_ap(y, yp, thresholds, task_type):
     is_proba = yp.ndim == 2
+    target_is_return = np.nanmin(y) < 0
     ap_scores = []
     for pt in thresholds:
-        if np.nanmin(y) < 0: # Raw returns
+        if target_is_return:
             binary_true = (y <= -pt).astype(int)
-        else: # Class IDs [0, 1, 2, 3]
-            idx = 1 if pt == 0.05 else (2 if pt == 0.07 else 3)
-            if pt >= 0.15: idx = 3 
+        else:
+            idx = _threshold_to_class_idx(pt)
             binary_true = (y >= idx).astype(int)
         if np.sum(binary_true) == 0 or len(np.unique(binary_true)) < 2:
             continue
         if is_proba:
-            idx = 1 if pt == 0.05 else (2 if pt == 0.07 else 3)
-            if pt >= 0.15: idx = min(3, yp.shape[1]-1)
+            idx = _threshold_to_class_idx(pt, max_idx=yp.shape[1] - 1)
             score = np.sum(yp[:, idx:], axis=1)
         else:
             score = -yp if task_type == 'regression' else yp
@@ -298,6 +311,31 @@ def _calc_additional_groupby_metrics(df, task_type='regression', ndcg_k=10):
     
     return results
 
+def calc_daily_rankic_icir(df, pred_col='pred', target_col='y_true', date_col='date', target_dates=None, min_names=2):
+    daily_ics = []
+    target_dates = set(target_dates) if target_dates is not None else None
+
+    for d, grp in df.groupby(date_col):
+        if target_dates is not None and d not in target_dates:
+            continue
+        if len(grp) < min_names:
+            continue
+        ic, _ = _safe_spearmanr(grp[target_col].values, grp[pred_col].values)
+        if not np.isnan(ic):
+            daily_ics.append(ic)
+
+    if not daily_ics:
+        return np.nan
+
+    ic_mean = np.mean(daily_ics)
+    ic_std = np.std(daily_ics)
+    return float(ic_mean / (ic_std + 1e-8))
+
+def _add_daily_icir_metrics(metrics, df_eval):
+    unique_dates = np.sort(df_eval['date'].unique())
+    metrics['daily_icir'] = calc_daily_rankic_icir(df_eval, target_dates=None)
+    metrics['daily_icir_reb'] = calc_daily_rankic_icir(df_eval, target_dates=unique_dates[::11])
+
 def calc_rank_ic_reb_multi_offset(
     df: pd.DataFrame,
     pred_col: str = "pred",
@@ -386,64 +424,43 @@ def calc_rank_ic_reb_multi_offset(
         
     return res
 
-def evaluate_metrics(y_true, y_pred=None, y_ret=None, task_type='regression', target_col=None, dates=None, ndcg_k=10, cost_buffer=0.005, df=None, reb_interval: int = 60, reb_offsets: list[int] | None = None, reb_min_names: int = 30):
-    """
-    統一された評価指標算出関数。
-    arrays (y_true, y_pred, y_ret, dates) または DataFrame (df/y_true) のいずれかを受け取る。
-    """
-    # 引数の正規化
+def _normalize_metric_inputs(y_true, y_pred=None, y_ret=None, dates=None, df=None):
+    """evaluate_metrics の入力を配列と評価用DataFrameに正規化する。"""
+    source_df = df
     if isinstance(y_true, pd.DataFrame):
-        df = y_true
-        y_true = df['y_true'].values
-        y_ret = df['y_ret'].values
-        dates = df['date'].values
+        source_df = y_true
+        y_true = source_df['y_true'].values
+        y_ret = source_df['y_ret'].values
+        dates = source_df['date'].values
         if y_pred is None:
-            y_pred = df['pred_1d'].values if 'pred_1d' in df.columns else df['pred'].values
-    
-    if y_ret is None or dates is None:
-        return {}
+            y_pred = source_df['pred_1d'].values if 'pred_1d' in source_df.columns else source_df['pred'].values
+
+    if y_ret is None or dates is None or y_pred is None:
+        return None
 
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     y_ret = np.asarray(y_ret)
     dates = np.asarray(dates)
-    
-    # NaNフィルタリング
+
     valid_mask = pd.notna(y_true) & pd.notna(y_ret) & pd.notna(dates)
     if y_pred.ndim == 2:
         valid_mask &= pd.notna(y_pred).all(axis=1)
     else:
         valid_mask &= pd.notna(y_pred)
-    
-    y_true, y_pred, y_ret, dates = y_true[valid_mask], y_pred[valid_mask], y_ret[valid_mask], dates[valid_mask]
-    if len(y_true) == 0:
-        return {}
 
-    # 1D予測値の作成
+    y_true = y_true[valid_mask]
+    y_pred = y_pred[valid_mask]
+    y_ret = y_ret[valid_mask]
+    dates = dates[valid_mask]
+    if len(y_true) == 0:
+        return None
+
     if y_pred.ndim == 2:
-        num_classes = y_pred.shape[1]
-        y_pred_1d = np.dot(y_pred, np.arange(num_classes))
+        y_pred_1d = np.dot(y_pred, np.arange(y_pred.shape[1]))
     else:
         y_pred_1d = y_pred
 
-    metrics = {}
-
-    # 1. Tac Risk Class Metrics
-    if task_type == 'multiclass' and (target_col is not None and 'tac_risk' in str(target_col)) and y_pred.ndim == 2:
-        metrics.update(calc_tac_risk_class_metrics(y_true, y_pred))
-
-    # 2. Drawdown / AP系
-    metrics['AP_severe'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.05, 0.07, 0.10], task_type)
-    metrics['AP_severe_STR'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.15, 0.20, 0.30], task_type)
-
-    pred_threshold = np.percentile(y_pred_1d, 20)
-    actual_severe = (y_ret <= -0.05)
-    pred_alert = (y_pred_1d <= pred_threshold) if task_type == 'regression' else (y_pred_1d >= np.percentile(y_pred_1d, 80))
-    tp = np.sum(actual_severe & pred_alert)
-    fn = np.sum(actual_severe & ~pred_alert)
-    metrics['severe_drawdown_recall'] = float(tp / (tp + fn)) if (tp + fn) > 0 else np.nan
-
-    # 3. 日次集計用 DataFrame
     df_eval = pd.DataFrame({
         'date': pd.to_datetime(dates),
         'pred': y_pred_1d,
@@ -452,19 +469,26 @@ def evaluate_metrics(y_true, y_pred=None, y_ret=None, task_type='regression', ta
     })
     df_eval['date'] = df_eval['date'].dt.date
 
-    # RankIC系
-    rankic_series = calc_daily_rankic_series(df_eval, 'pred', 'y_true', 'date')
+    if source_df is not None:
+        source_valid = source_df.loc[valid_mask] if len(source_df) == len(valid_mask) else source_df
+        for col in EXTRA_BIN_META_COLS:
+            if col in source_valid.columns:
+                df_eval[col] = source_valid[col].values
+
+    return y_true, y_pred, y_pred_1d, y_ret, df_eval
+
+def _add_rankic_metrics(metrics, rankic_series):
     metrics['RankIC'] = float(np.nanmean(rankic_series))
     metrics['mean_daily_rankic'] = metrics['RankIC']
     metrics['ic'] = metrics['RankIC']
     metrics['rank_ic'] = metrics['RankIC']
-    
+
     pos_raw, pos_scaled = calc_positive_day_ratio(rankic_series)
     metrics['positive_day_ratio_raw'] = pos_raw
     metrics['positive_day_ratio_scaled'] = pos_scaled
     metrics['positive_day_ratio'] = pos_scaled
 
-    # TopK Active Mean (10, 20, 30)
+def _add_topk_active_metrics(metrics, df_eval, cost_buffer):
     for k in [10, 20, 30]:
         k_metrics = calc_topk_active_mean(df_eval, k, pred_col='pred', ret_col='y_ret', cost_col=cost_buffer)
         for key, val in k_metrics.items():
@@ -485,12 +509,68 @@ def evaluate_metrics(y_true, y_pred=None, y_ret=None, task_type='regression', ta
     metrics['cost_adjusted_top30_active_utility_scaled'] = metrics['top30_utility_scaled']
     metrics['cost_adjusted_top30_active_utility'] = metrics['top30_utility_scaled']
 
-    # Spread / Alpha IC
+def _add_spread_alpha_metrics(metrics, df_eval, cost_buffer):
     metrics['top_quintile_spread_raw'], metrics['top_quintile_spread_scaled'] = calc_top_quintile_spread(df_eval, 'pred', 'y_ret')
     metrics['top_quintile_spread'] = metrics['top_quintile_spread_scaled']
-    
+
     metrics['top30_rankic_alpha_raw'], metrics['top30_rankic_alpha_scaled'] = calc_top30_rankic_alpha(df_eval, 'pred', 'y_ret', cost_col=cost_buffer)
     metrics['top30_rankic_alpha'] = metrics['top30_rankic_alpha_scaled']
+
+def _add_compatibility_aliases(metrics):
+    metrics['rank_ic_reb'] = metrics.get('RankIC_reb', np.nan)
+    metrics['top30_sr'] = metrics.get('Top30_SR', np.nan)
+    metrics['recall_gate30pct'] = metrics.get('Recall_Gate30pct', np.nan)
+
+def evaluate_metrics(
+    y_true,
+    y_pred=None,
+    y_ret=None,
+    task_type='regression',
+    target_col=None,
+    dates=None,
+    ndcg_k=10,
+    cost_buffer=0.005,
+    df=None,
+    reb_interval: int = 60,
+    reb_offsets: list[int] | None = None,
+    reb_min_names: int = 30,
+    include_extra_bin_metrics: bool = False,
+):
+    """
+    統一された評価指標算出関数。
+    arrays (y_true, y_pred, y_ret, dates) または DataFrame (df/y_true) のいずれかを受け取る。
+    """
+    normalized = _normalize_metric_inputs(y_true, y_pred=y_pred, y_ret=y_ret, dates=dates, df=df)
+    if normalized is None:
+        return {}
+    y_true, y_pred, y_pred_1d, y_ret, df_eval = normalized
+
+    metrics = {}
+
+    # 1. Tac Risk Class Metrics
+    if task_type == 'multiclass' and (target_col is not None and 'tac_risk' in str(target_col)) and y_pred.ndim == 2:
+        metrics.update(calc_tac_risk_class_metrics(y_true, y_pred))
+
+    # 2. Drawdown / AP系
+    metrics['AP_severe'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.05, 0.07, 0.10], task_type)
+    metrics['AP_severe_STR'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.15, 0.20, 0.30], task_type)
+
+    pred_threshold = np.percentile(y_pred_1d, 20)
+    actual_severe = (y_ret <= -0.05)
+    pred_alert = (y_pred_1d <= pred_threshold) if task_type == 'regression' else (y_pred_1d >= np.percentile(y_pred_1d, 80))
+    tp = np.sum(actual_severe & pred_alert)
+    fn = np.sum(actual_severe & ~pred_alert)
+    metrics['severe_drawdown_recall'] = float(tp / (tp + fn)) if (tp + fn) > 0 else np.nan
+
+    # RankIC系
+    rankic_series = calc_daily_rankic_series(df_eval, 'pred', 'y_true', 'date')
+    _add_rankic_metrics(metrics, rankic_series)
+
+    # TopK Active Mean (10, 20, 30)
+    _add_topk_active_metrics(metrics, df_eval, cost_buffer)
+
+    # Spread / Alpha IC
+    _add_spread_alpha_metrics(metrics, df_eval, cost_buffer)
 
     # 4. その他 group-by 指標 (NDCG, SR, Gate Recall, etc.)
     extra_metrics = _calc_additional_groupby_metrics(df_eval, task_type=task_type, ndcg_k=ndcg_k)
@@ -503,16 +583,15 @@ def evaluate_metrics(y_true, y_pred=None, y_ret=None, task_type='regression', ta
     )
     metrics.update(multi_offset_metrics)
     
+    if include_extra_bin_metrics:
+        metrics.update(calculate_extra_bin_metrics(df_eval, score_col='pred'))
+
     # 互換性エイリアス
-    metrics['rank_ic_reb'] = metrics.get('RankIC_reb', np.nan)
-    metrics['top30_sr'] = metrics.get('Top30_SR', np.nan)
-    metrics['recall_gate30pct'] = metrics.get('Recall_Gate30pct', np.nan)
+    _add_compatibility_aliases(metrics)
+    _add_daily_icir_metrics(metrics, df_eval)
 
     return metrics
 
-def calc_fold_metrics(df, cost_buffer=0.005, y_pred=None):
-    """calc_fold_metrics 互換用ラッパー (evaluate_metrics に統合済み)"""
-    return evaluate_metrics(y_true=df, y_pred=y_pred, cost_buffer=cost_buffer)
 
 def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression', metadata_cols=None, n_bins=20, date_col='date', global_bin=False):
     df_eval = df_eval.copy()
@@ -530,18 +609,19 @@ def calculate_bin_stats(df_eval, score_col, target_col, task_type='regression', 
     df_eval['bin_label'] = df_eval['bin_id'].apply(lambda x: f"Bin {int(x)+1:02d}" if pd.notna(x) else "NaN")
     # 2. 統計量の算出
     # 各Binに含まれるサンプル数
-    stats = df_eval.groupby('bin_label', observed=True).size().to_frame(name='sample_count')
+    grouped = df_eval.groupby('bin_label', observed=True)
+    stats = grouped.size().to_frame(name='sample_count')
     # Binラベルのソート順を保証 (Bin 01, Bin 02, ...)
     stats = stats.sort_index()
     # スコア平均
-    stats['score_mean'] = df_eval.groupby('bin_label', observed=True)[score_col].mean()
+    stats['score_mean'] = grouped[score_col].mean()
     # ターゲット平均
-    stats['target_mean'] = df_eval.groupby('bin_label', observed=True)[target_col].mean()
+    stats['target_mean'] = grouped[target_col].mean()
     # メタデータの統計量
     if metadata_cols:
         for col in metadata_cols:
             if col in df_eval.columns:
-                grp = df_eval.groupby('bin_label', observed=True)[col]
+                grp = grouped[col]
                 stats[f'{col}_mean'] = grp.mean()
                 stats[f'{col}_std'] = grp.std()
                 for q in [0.05, 0.1, 0.5, 0.9, 0.95]:
@@ -553,8 +633,7 @@ def calculate_extra_bin_metrics(df_eval, score_col, date_col='date'):
     Calculate top/bottom bin and top/bottom 10 samples metrics.
     Required columns in df_eval: [date_col, score_col, 'Future_High', 'Future_Low', 'Future_Close']
     """
-    meta_cols = ['Future_High', 'Future_Low', 'Future_Close']
-    available_meta = [c for c in meta_cols if c in df_eval.columns]
+    available_meta = [c for c in EXTRA_BIN_META_COLS if c in df_eval.columns]
     if not available_meta:
         return {}
 
@@ -565,8 +644,6 @@ def calculate_extra_bin_metrics(df_eval, score_col, date_col='date'):
 
     for d, grp in df_eval.groupby(date_col):
         n = len(grp)
-        if n == 0: continue
-        
         res = {'date': d}
         
         # Binning (q=20)
@@ -599,17 +676,8 @@ def calculate_extra_bin_metrics(df_eval, score_col, date_col='date'):
         return {}
         
     daily_df = pd.DataFrame(daily_results)
-    summary = {}
-    for col in daily_df.columns:
-        if col == 'date': continue
-        summary[col] = float(daily_df[col].mean())
-    return summary
-
-def calculate_equity_curve(df_eval, date_col, score_col, target_col, top_n=50):
-    """簡易バックテスト：予測上位N銘柄の累積リターン"""
-    daily_returns = df_eval.groupby(date_col).apply(
-        lambda x: x.nlargest(top_n, score_col)[target_col].mean(),
-        include_groups=False
-    )
-    equity_curve = (1 + daily_returns).cumprod()
-    return equity_curve
+    return {
+        col: float(daily_df[col].mean())
+        for col in daily_df.columns
+        if col != 'date'
+    }

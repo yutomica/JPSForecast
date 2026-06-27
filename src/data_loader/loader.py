@@ -10,6 +10,8 @@ class DataLoader:
     """MySQLdbを使用してデータを抽出するクラス"""
     def __init__(self):
         self.conn = None
+        self._listed_info_date_col = None
+        self._sector33_history_cache = None
         self._connect()
 
     def _connect(self):
@@ -25,21 +27,129 @@ class DataLoader:
             print(f"Error connecting to MySQL: {e}")
             raise
 
+    def _get_table_columns(self, table_name):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(f"DESCRIBE {table_name}")
+            cols = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            return cols
+        except Exception as e:
+            print(f"Error describing table {table_name}: {e}")
+            return []
+
+    def _listed_info_date_column(self):
+        if self._listed_info_date_col is not None:
+            return self._listed_info_date_col
+        cols = self._get_table_columns("org.listed_info")
+        candidates = [
+            "Date", "date", "InfoDate", "info_date", "EffectiveDate",
+            "effective_date", "PublishedDate", "published_date", "UpdatedDate",
+            "updated_date", "UpdateDate", "update_date",
+        ]
+        self._listed_info_date_col = next((c for c in candidates if c in cols), None)
+        return self._listed_info_date_col
+
     def get_all_symbols(self):
         query = """
-            WITH t1 AS (SELECT DISTINCT scode FROM jps.sp_d WHERE market != 'TOKYO PRO MARKET'),
-            t2 AS (SELECT DISTINCT LEFT(Code,4) as scode,Sector33Code as sector33_code FROM org.listed_info)
-            SELECT t1.scode,t2.sector33_code
-            FROM t1 LEFT JOIN t2 ON t1.scode=t2.scode
+            SELECT DISTINCT scode
+            FROM jps.sp_d
+            WHERE market != 'TOKYO PRO MARKET'
+            ORDER BY scode
         """
         try:
             df = pd.read_sql(query, self.conn)
-            df = df.dropna(subset=['sector33_code'])
-            df['sector33_code'] = df['sector33_code'].astype(str)
-            return df
+            df['scode'] = df['scode'].astype(str)
+            return df.drop_duplicates(subset=['scode']).reset_index(drop=True)
         except Exception as e:
             print(f"Error fetching symbols: {e}")
-            return []
+            return pd.DataFrame(columns=['scode'])
+
+    def fetch_sector33_history(self, start_date=None):
+        """
+        銘柄ごとの業種コード履歴を取得する。
+        org.listed_info に日付系カラムがある場合は point-in-time 結合用の履歴を返す。
+        日付系カラムがない場合は最新マスタ相当の1銘柄1行にフォールバックする。
+        """
+        if start_date is None:
+            start_date = START_DATE
+        if getattr(self, "_sector33_history_cache", None) is not None:
+            return self._sector33_history_cache.copy()
+
+        date_col = self._listed_info_date_column()
+        try:
+            if date_col:
+                query = f"""
+                    SELECT
+                        {date_col} AS effective_date,
+                        LEFT(Code, 4) AS scode,
+                        Sector33Code AS sector33_code
+                    FROM org.listed_info
+                    ORDER BY scode, effective_date
+                """
+                df = pd.read_sql(query, self.conn, parse_dates=['effective_date'])
+                df = df.dropna(subset=['scode', 'sector33_code', 'effective_date'])
+                df['scode'] = df['scode'].astype(str)
+                df['sector33_code'] = df['sector33_code'].astype(str)
+                self._sector33_history_cache = (
+                    df.sort_values(['scode', 'effective_date'])
+                    .drop_duplicates(subset=['scode', 'effective_date'], keep='last')
+                    .reset_index(drop=True)
+                )
+                return self._sector33_history_cache.copy()
+
+            print("Warning: org.listed_info has no date column. Falling back to latest sector33_code per scode.")
+            query = """
+                SELECT
+                    LEFT(Code, 4) AS scode,
+                    Sector33Code AS sector33_code
+                FROM org.listed_info
+                WHERE Sector33Code IS NOT NULL
+            """
+            df = pd.read_sql(query, self.conn)
+            df['scode'] = df['scode'].astype(str)
+            df['sector33_code'] = df['sector33_code'].astype(str)
+            self._sector33_history_cache = df.drop_duplicates(subset=['scode'], keep='last').reset_index(drop=True)
+            return self._sector33_history_cache.copy()
+        except Exception as e:
+            print(f"Error fetching sector33 history: {e}")
+            return pd.DataFrame(columns=['effective_date', 'scode', 'sector33_code'])
+
+    def _attach_sector33_code(self, price_df):
+        if price_df.empty or 'sector33_code' in price_df.columns:
+            return price_df
+
+        sector_history = self.fetch_sector33_history()
+        if sector_history.empty:
+            price_df = price_df.copy()
+            price_df['sector33_code'] = np.nan
+            return price_df
+
+        price_df = price_df.copy()
+        price_df['_row_order'] = np.arange(len(price_df))
+        price_df['date'] = pd.to_datetime(price_df['date'])
+        price_df['scode'] = price_df['scode'].astype(str)
+
+        if 'effective_date' in sector_history.columns:
+            left = price_df.sort_values(['date', 'scode'])
+            right = sector_history.sort_values(['effective_date', 'scode'])
+            merged = pd.merge_asof(
+                left,
+                right,
+                left_on='date',
+                right_on='effective_date',
+                by='scode',
+                direction='backward'
+            )
+            merged = merged.drop(columns=['effective_date'])
+        else:
+            merged = price_df.merge(
+                sector_history[['scode', 'sector33_code']].drop_duplicates('scode'),
+                on='scode',
+                how='left'
+            )
+
+        return merged.sort_values('_row_order').drop(columns=['_row_order']).reset_index(drop=True)
 
     def get_latest_symbols(self, date):
         query = f"""
@@ -82,7 +192,8 @@ class DataLoader:
             ORDER BY scode, date
         """
         try:
-            return pd.read_sql(query, self.conn, parse_dates=['date'])
+            df = pd.read_sql(query, self.conn, parse_dates=['date'])
+            return self._attach_sector33_code(df)
         except Exception as e:
             print(f"Error fetching batch data: {e}")
             return pd.DataFrame()

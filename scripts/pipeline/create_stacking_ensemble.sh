@@ -32,7 +32,7 @@ uv run python train.py \
     target=${target} \
     period=${domain}_standard \
     +mode=stacking_ensemble \
-    cv=anchored_walk_forward \
+    cv=fixed \
     ++mlflow.experiment_name="JPSForecast_Stacking_${target}" \
     ++mlflow.run_name="StackingEnsemble_${model}_${target}" 
 

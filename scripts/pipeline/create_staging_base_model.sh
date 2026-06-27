@@ -21,7 +21,7 @@ export NUMEXPR_NUM_THREADS=1
 export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
 export PYTHONPATH=$PYTHONPATH:.
 
-run_production() {
+run_staging_base() {
     local domain=$1
     local model=$2
     local role=$3 
@@ -34,13 +34,13 @@ run_production() {
     local hparams_fixed="${model}_${target}_${variant}"
     local features="features_${model}_${target}_fixed"
     local exp_name="JPSForecast_${target}"
-    local run_name=${MLFLOW_RUN_NAME:-"Step6_Production_${model}_${target}"}
+    local run_name=${MLFLOW_RUN_NAME:-"Staging_Base_${model}_${target}"}
     
     local timestamp=$(date +"%Y%m%d_%H%M%S")
-    local child_run_name="Prod_${model}_${timestamp}"
+    local child_run_name="${model}_${timestamp}"
 
     echo "============================================================"
-    echo "🚀 Creating PRODUCTION Model: $model ($domain) - $role"
+    echo "🚀 Creating Staging base Model: $model ($domain) - $role"
     echo "   Target   : $target"
     echo "   HParams  : $hparams_fixed (from Step 5)"
     echo "   Variant  : $variant"
@@ -62,32 +62,20 @@ run_production() {
         model=${model} \
         hparams=${hparams_fixed} \
         period=${domain}_standard \
-        cv=fixed \
-        +mode=production \
+        cv=anchored_walk_forward \
+        +mode=stacking_base \
         variant=${variant} \
         mlflow.experiment_name="${exp_name}" \
         ++mlflow.run_name="${run_name}" \
         ++mlflow.child_run_name="${child_run_name}" \
         "${extra_args[@]}"
 
-    echo "✅ Finished Production model creation for $target."
+    echo "✅ Finished Staging base model creation for $target."
     echo ""
 }
 
-run_production "tac" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
+# run_staging_base "tac" "lgbm" "alpha_gr" "v1_stable" 
 
-run_production "tac" "gandalf" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
+# run_staging_base "tac" "gandalf" "alpha_gr" "v1_stable" 
 
-run_production "tac" "tcn" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "str" "lgbm" "alpha" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "10d" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "20d" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
+run_staging_base "tac" "tcn" "alpha_gr" "v1_stable" 
