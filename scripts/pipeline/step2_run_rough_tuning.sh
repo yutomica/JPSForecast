@@ -91,12 +91,12 @@ run_sweep() {
 }
 
 # --- Execution ---
-# run_sweep "tac" "lgbm" "alpha_gr" "9" "0" 
+run_sweep "tac" "lgbm" "alpha_gr" "9" "0" 
 # run_sweep "str" "lgbm" "alpha" "9" "0" 
 # run_sweep "tac" "gandalf" "alpha_gr" "6" "1"
 
 # run_sweep "tac" "tcn" "alpha_gr" "3" "1"
 
 # run_sweep "10d" "lgbm" "alpha_gr" "9" "0" 
-run_sweep "20d" "lgbm" "alpha_gr" "9" "0" 
-run_sweep "40d" "lgbm" "alpha_gr" "9" "0" 
+# run_sweep "20d" "lgbm" "alpha_gr" "9" "0" 
+# run_sweep "40d" "lgbm" "alpha_gr" "9" "0" 

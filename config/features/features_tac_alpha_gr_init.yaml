@@ -1,177 +1,366 @@
 
 feature_cols:
-- MOM_Return12m_RAW
-- SPD_VWAPDev_CSZ
-- GOV_MarketSegment_SNZ
-- MOM_PricePos120_SNZ
-- MOM_Return12m_TSZ_20D
-- BET_SectorRelStrength60_RAW
-- SPD_VWAPDev_RAW
-- VOL_Volatility60_CSR
-- QLT_SalesGrowthYOY_TSR_252D
-- MOM_RCI52_TSR_252D
-- VOL_HV30_TSR_252D
-- VOL_Volatility60_CSZ
-- BET_Beta60_TSZ_20D
-- BET_SectorRelStrength60_TSR_252D
-- EVT_LogDaysSincePub_RAW
-- VOL_ATRRatio_CSZ
-- EVT_LogDaysSincePub_CSR
-- QLT_Accruals_TSR_252D
-- SPD_VWAPDev_CSR
-- QLT_SalesGrowthYOY_TSZ_20D
-- SPD_MarginRatio_RAW
-- BET_SectorRelStrength60_SNZ
-- MOM_Return6m_SNZ
-- LIQ_TurnoverRatio_CSR
-- BET_Beta60_RAW
-- BET_SectorMomentum5d_CSR
-- VOL_ATRRatio_CSR
-- MOM_Momentum12-1_RAW
-- MOM_Return6m_RAW
-- SPD_MarginBuyImpact_RAW
-- VOL_DownsideDev60_TSR_252D
-- VOL_VolumeMA25_SNZ
-- CON_ProgressRate_TSR_252D
-- MOM_Momentum12-1_TSR_252D
-- BET_SectorMomentum5d_CSZ
-- SPD_MarginRatio_CSR
-- MOM_PricePos120_RAW
-- BET_SectorRelStrength60_CSZ
-- VOL_VolumeMA25_TSR_252D
-- MOM_DistSMA75_RAW
-- MOM_MADev75_RAW
-- SPD_MarginRatio_CSZ
-- BET_RelSectorReturn5d_RAW
-- LIQ_VolUpDownRatio_TSZ_20D
-- MOM_PricePos120_CSZ
-- BET_Beta60_CSZ
-- VOL_RealizedSkew20_TSR_252D
-- BET_Beta60_CSR
-- QLT_OperatingProfitGrowthYOY_TSR_252D
-- CON_ProgressRate_CSR
-- SEA_DayOfMonth_RAW
-- MOM_NewHighFlag3_TSR_252D
-- LIQ_AmihudIlliq_CSZ
-- LIQ_VolSpikeCount20_TSR_252D
-- VOL_VolatilityParkinson_CSZ
-- MOM_MADev200_RAW
-- QLT_ROA_CSZ
-- CON_ProgressRate_SNZ
-- MOM_DistSMA25-75_TSZ_20D
-- QLT_ROA_RAW
-- VOL_ReturnKurtosis_TSZ_20D
-- MOM_DistHigh60_CSZ
-- MOM_RCI26_TSR_252D
-- MOM_RCI52_CSZ
-- BET_RS25_CSZ
-- VAL_LogPBR_TSR_252D
-- CON_ProgressRate_RAW
-- EVT_LogDaysSincePub_CSZ
-- MOM_GapRate_TSR_252D
-- VAL_LogPBR_CSZ
-- VAL_EarningsYield_CSR
-- SPD_MarginBuyImpact_CSZ
-- VAL_LogPBR_RAW
-- BET_Beta60_SNZ
-- MOM_RCI52_CSR
-- VOL_DownsideDev60_CSR
-- QLT_EquityRatio_TSR_252D
-- VOL_DownsideDev60_CSZ
-- BET_MarketHV20_RAW
-- MOM_RCI52_RAW
-- MOM_DistHigh250_RAW
-- QLT_OperatingProfitGrowthYOY_TSZ_20D
-- MOM_DistHigh60_CSR
-- MOM_Return20d_CSZ
-- VOL_Volatility60_RAW
-- LIQ_TurnoverRatio_RAW
-- MOM_DistSMA25-75_RAW
-- BET_SectorMomentum5d_SNZ
-- GOV_MarketSegment_CSR
-- VOL_HistVol20_TSR_252D
-- MOM_RCI52_SNZ
-- MOM_Return12m_TSR_252D
-- MOM_IchimokuDist_RAW
-- QLT_OPMargin_TSR_252D
-- QLT_ROA_TSR_252D
-- MOM_High52wDist_RAW
-- MOM_Return12m_CSR
-- BET_SectorRelStrength60_TSZ_20D
-- CON_RevisionRate_SNZ
-- VOL_HV30_CSZ
-- BET_SectorRelStrength60_CSR
-- SPD_OverseaFlowTrend_TSR_252D
-- LIQ_VolumeLog_RAW
-- EVT_IsMissingEPS_CSZ
-- BET_RelSectorReturn5d_CSZ
-- CON_RevisionRate_CSR
-- QLT_OperatingProfitGrowthYOY_CSR
-- LIQ_TurnoverRatio_CSZ
-- QLT_ROE_CSR
-- CON_RevisionRate_CSZ
-- SPD_OverseaFlowTrend_CSZ
-- VOL_HistVol20_CSR
-- SEA_TimeIdx_RAW
-- SPD_MarketIndividualBuy_RAW
-- VAL_EarningsYield_SNZ
-- MOM_MaxGain5_CSZ
-- VOL_VolatilityParkinson_CSR
-- MOM_Momentum12-1_TSZ_20D
-- VOL_ATRRatio_RAW
-- MOM_DistSMA25-75_TSR_252D
-- MOM_RCI26_SNZ
-- SPD_OverseaFlowTrend_RAW
-- MOM_Return12m_CSZ
-- QLT_ROA_CSR
-- SPD_FlowAccel_CSZ
-- GOV_MarketSegment_RAW
-- QLT_EPSGrowthYOY_RAW
-- MOM_High52wDist_SNZ
-- VOL_ATRSqueezeBB_TSR_252D
-- VOL_HVSlope_CSZ
-- SPD_MarketIndividualBuy_TSR_252D
-- QLT_ROE_CSZ
-- QLT_SalesGrowthYOY_RAW
-- MOM_ClosePosition_CSZ
-- VOL_HV30_CSR
-- QLT_ROE_RAW
-- BET_RS25_TSR_252D
-- SPD_FlowAccel_CSR
-- QLT_ROE_SNZ
-- QLT_Accruals_RAW
-- VAL_EarningsYield_RAW
-- BET_SectorMomentum5d_TSZ_20D
-- VOL_RealizedSkew20_RAW
-- CON_ProgressRate_TSZ_20D
-- EVT_IsMissingEPS_CSR
-- SPD_MarketForeignBuy_RAW
-- VOL_RealizedSkew20_TSZ_20D
-- MOM_Return6m_TSZ_20D
-- EVT_EPSActual_SNZ
-- SPD_OverseaFlowTrend_CSR
-- EVT_IsMissingEPS_SNZ
-- SEA_MonthInQuarter_RAW
-- BET_MarketTrendIdx_RAW
-- MOM_MACDHistNorm_RAW
-- VOL_HVSlope_CSR
-- SEA_IsQuarterEnd_RAW
-- VAL_LogPBR_CSR
-- VOL_RealizedSkew20_CSR
-- MOM_LinRegSlope10_SNZ
-- VOL_ATRRatio_SNZ
-- VOL_RealizedSkew20_CSZ
-- VOL_VolatilityParkinson_TSZ_20D
-- CON_RevisionRate_TSZ_20D
-- SPD_MarginBuyImpact_CSR
-- VAL_EarningsYield_CSZ
-- VOL_HV30_RAW
-- QLT_EPSGrowthYOY_CSR
-- MOM_DistHigh60_RAW
-- EVT_LogDaysSincePub_SNZ
-- SPD_MarginBuyImpact_TSR_252D
-- VOL_HistVol20_CSZ
-- VOL_ReturnVolatility_TSR_252D
-- SIZ_LogMarketCap_CSZ
-- VOL_VolatilityParkinson_RAW
-- SPD_MarginRatioDelta4w_TSR_252D
+ - LIQ_TurnoverRatio_CSZ
+ - SPD_DistVWAP5_TSR_252D
+ - SPD_VWAPDev_RAW
+ - SPD_VWAPDev_CSZ
+ - MOM_NewHighFlag3_CSZ
+ - EVT_EPSActual_CSR
+ - MOM_RCI26_RAW
+ - VOL_ATRRatio_CSZ
+ - VOL_VolatilityParkinson_SNZ
+ - VOL_HV30_CSR
+ - VOL_Volatility60_CSZ
+ - VOL_HV30_CSZ
+ - VOL_MAE5_TSR_252D
+ - BET_MarketHV20_RAW
+ - MOM_MADev200_SNZ
+ - BET_RelSectorReturn5d_RAW
+ - VAL_EarningsYield_CSR
+ - SPD_MarginBuyImpact_CSR
+ - VOL_BBWidth_TSR_252D
+ - QLT_OPMargin_TSZ_20D
+ - VOL_VolatilityParkinson_CSR
+ - MOM_Return3d_TSR_252D
+ - EVT_EPSActual_CSZ
+ - SPD_MarginRatio_CSZ
+ - MOM_RCI26Diff_TSR_252D
+ - SPD_OverseaFlowTrend_TSR_252D
+ - GOV_MarketSegment_SNZ
+ - MOM_DistSMA25-75_RAW
+ - SPD_OverseaFlowTrend_TSZ_20D
+ - CON_ProgressRate_SNZ
+ - VOL_Volatility60_CSR
+ - VOL_HV30_RAW
+ - SEA_DayOfMonth_RAW
+ - CON_ProgressRate_RAW
+ - GOV_MarketSegment_CSZ
+ - SPD_MarginRatio_CSR
+ - QLT_Accruals_TSZ_20D
+ - SPD_MarginRatio_RAW
+ - MOM_DistHigh250_RAW
+ - VOL_MAE10_TSR_252D
+ - SPD_FlowAccel_RAW
+ - MOM_High52wDist_RAW
+ - MOM_GapRate_SNZ
+ - VOL_HistVol20_RAW
+ - BET_Beta60_TSZ_20D
+ - CON_ProgressRate_CSZ
+ - MOM_DistHigh60_CSR
+ - EVT_IsMissingEPS_CSZ
+ - VAL_EarningsYield_RAW
+ - VOL_HistVol20_CSR
+ - MOM_MADev200_TSR_252D
+ - VOL_LargeMoveCount_CSR
+ - VOL_ATRRatio_CSR
+ - LIQ_VolSpikeCount20_CSR
+ - MOM_DistSMA5_CSZ
+ - VOL_VolatilityParkinson_CSZ
+ - SPD_FlowAccel_TSZ_20D
+ - MOM_Momentum12-1_RAW
+ - BET_MarketHV20_TSR_252D
+ - QLT_ROA_CSZ
+ - SPD_FlowAccel_TSR_252D
+ - VOL_LargeMoveCount_TSR_252D
+ - SPD_FlowAccel_CSZ
+ - VOL_LargeMoveCount_CSZ
+ - QLT_Accruals_RAW
+ - SPD_MarketIndividualBuy_TSZ_20D
+ - MOM_DistSMA5_RAW
+ - VAL_LogPBR_RAW
+ - VOL_HV30_TSZ_20D
+ - MOM_High52wDist_SNZ
+ - SPD_VWAPDev_CSR
+ - SIZ_LogMarketCap_CSR
+ - VOL_ATRRatio_SNZ
+ - QLT_OperatingProfitGrowthYOY_CSR
+ - SIZ_LogMarketCap_CSZ
+ - QLT_OperatingProfitGrowthYOY_CSZ
+ - MOM_Return12m_RAW
+ - SPD_MarginBuyImpact_RAW
+ - MOM_DistSMA75_RAW
+ - LIQ_TurnoverRatio_CSR
+ - QLT_OperatingProfitGrowthYOY_SNZ
+ - VOL_HistVol20_CSZ
+ - QLT_OperatingProfitGrowthYOY_TSR_252D
+ - QLT_ROA_RAW
+ - QLT_Accruals_TSR_252D
+ - MOM_Return6m_SNZ
+ - MOM_DistHigh60_CSZ
+ - SEA_MonthInQuarter_RAW
+ - MOM_GapRate_TSR_252D
+ - GOV_MarketSegment_RAW
+ - BET_RS25_TSR_252D
+ - BET_RS25_RAW
+ - VOL_HVSlope_RAW
+ - BET_RelSectorReturn5d_CSZ
+ - QLT_ROA_TSR_252D
+ - VOL_HVSlope_CSR
+ - SPD_MarketForeignBuy_RAW
+ - MOM_BullishRatio20_CSR
+ - VOL_HistVol20_SNZ
+ - LIQ_TurnoverRatio_RAW
+ - MOM_DistSMA75_TSR_252D
+ - BET_MarketTrendIdx_TSR_252D
+ - QLT_EquityRatio_CSR
+ - MOM_Momentum12-1_CSZ
+ - MOM_DistSMA75_CSR
+ - MOM_MADev75_TSR_252D
+ - MOM_Return12m_CSZ
+ - BET_RS25_CSR
+ - EVT_EPSActual_SNZ
+ - EVT_LogDaysSincePub_CSZ
+ - QLT_EquityRatio_RAW
+ - MOM_DistSMA5_TSR_252D
+ - VAL_LogPBR_TSR_252D
+ - VOL_MAE5_RAW
+ - MOM_MaxGain5_TSR_252D
+ - MOM_RCI52_TSR_252D
+ - QLT_EPSGrowthYOY_RAW
+ - QLT_OPMargin_CSZ
+ - MOM_DistSMA25_CSR
+ - VOL_VolumeMA25_SNZ
+ - VAL_LogPBR_CSR
+ - VOL_HV30_TSR_252D
+ - SPD_MarketForeignBuy_TSZ_20D
+ - MOM_MADev200_RAW
+ - VAL_LogPBR_CSZ
+ - VOL_DownsideDev60_CSZ
+ - MOM_MADev75_RAW
+ - SEA_IsQuarterEnd_RAW
+ - VOL_VolatilityParkinson_RAW
+ - VOL_HVSlope_CSZ
+ - BET_MarketHV20_TSZ_20D
+ - MOM_RCI26Diff_RAW
+ - BET_RS25_CSZ
+ - VOL_RealizedSkew20_CSZ
+ - GOV_MarketSegment_CSR
+ - MOM_PricePos120_SNZ
+ - QLT_ROE_TSZ_20D
+ - MOM_DistSMA25-75_CSZ
+ - MOM_IntradayStrength_TSR_252D
+ - SEA_TimeIdx_RAW
+ - VOL_ATRSqueezeBB_TSZ_20D
+ - BET_MarketTrendIdx_RAW
+ - QLT_ROA_CSR
+ - MOM_DistSMA5-25_RAW
+ - MOM_Momentum12-1_CSR
+ - BET_Beta60_CSR
+ - MOM_MADev75_SNZ
+ - VOL_DownsideDev60_CSR
+ - MOM_DistSMA25-75_SNZ
+ - BET_SectorMomentum5d_CSZ
+ - CON_RevisionRate_TSR_252D
+ - MOM_RCI52_RAW
+ - MOM_RCI52_CSZ
+ - VOL_VolumeMA25_TSZ_20D
+ - MOM_MADev75_CSR
+ - QLT_Accruals_SNZ
+ - MOM_Return3d_CSZ
+ - SPD_MarketForeignBuy_CSZ
+ - MOM_ADX14_CSR
+ - MOM_DistSMA75_CSZ
+ - BET_SectorMomentum5d_TSR_252D
+ - EVT_EPSActual_RAW
+ - MOM_DistHigh250_SNZ
+ - VOL_DownsideRun_CSR
+ - VOL_HVSlope_SNZ
+ - MOM_PricePos120_CSZ
+ - BET_SectorMomentum5d_TSZ_20D
+ - LIQ_VolSpikeCount20_TSR_252D
+ - CON_RevisionRate_CSR
+ - SPD_MarketIndividualBuy_CSZ
+ - SPD_OverseaFlowTrend_RAW
+ - MOM_Return6m_CSZ
+ - MOM_GapRate_RAW
+ - VOL_VolumeMA25_TSR_252D
+ - MOM_RCI26_CSZ
+ - VOL_ReturnKurtosis_SNZ
+ - MOM_Return12m_CSR
+ - QLT_OPMargin_TSR_252D
+ - VOL_Volatility60_TSR_252D
+ - MOM_RCI26_SNZ
+ - BET_SectorMomentum5d_CSR
+ - CON_RevisionRate_SNZ
+ - QLT_SalesGrowthYOY_CSZ
+ - VAL_EarningsYield_CSZ
+ - QLT_OperatingProfitGrowthYOY_RAW
+ - MOM_ADX14_SNZ
+ - QLT_ROE_CSR
+ - VOL_UlcerIndex14_CSZ
+ - MOM_DistSMA25-75_CSR
+ - EVT_IsMissingEPS_SNZ
+ - MOM_RCI26_TSZ_20D
+ - MOM_High52wDist_CSR
+ - VOL_LargeMoveCount_RAW
+ - SPD_MarketForeignBuy_TSR_252D
+ - QLT_ROE_RAW
+ - SPD_MarginBuyImpact_CSZ
+ - VOL_LargeMoveCount_TSZ_20D
+ - MOM_IchimokuDist_RAW
+ - MOM_Return5d_CSZ
+ - VOL_ATRRatio_TSZ_20D
+ - LIQ_VolSpikeCount20_CSZ
+ - MOM_Return10d_TSZ_20D
+ - VOL_BBWidth_CSR
+ - VOL_ReturnVolatility_TSR_252D
+ - VOL_HistVol20_TSR_252D
+ - SPD_MarketIndividualBuy_TSR_252D
+ - VOL_RealizedSkew20_SNZ
+ - BET_SectorRelStrength60_RAW
+ - MOM_IchimokuDist_CSR
+ - MOM_RSI9_RAW
+ - BET_MarketVolChange_CSZ
+ - CON_ProgressRate_TSR_252D
+ - SPD_OverseaFlowTrend_CSR
+ - VOL_DownsideRun_TSR_252D
+ - MOM_LowerShadowMA5_CSR
+ - MOM_Return1dLag1_RAW
+ - VOL_VolatilityParkinson_TSZ_20D
+ - BET_SectorMomentum5d_RAW
+ - VOL_RealizedSkew20_TSR_252D
+ - QLT_Accruals_CSZ
+ - LIQ_VolUpDownRatio_TSR_252D
+ - MOM_NewHighFlag3_TSR_252D
+ - CON_RevisionRate_CSZ
+ - VAL_LogPBR_SNZ
+ - QLT_SalesGrowthYOY_RAW
+ - VOL_HV30_SNZ
+ - LIQ_MFI14_RAW
+ - MOM_ADX14_RAW
+ - VOL_VolumeMA25_CSR
+ - BET_SectorRelStrength60_TSZ_20D
+ - MOM_RCI26Diff_TSZ_20D
+ - MOM_NewHighFlag3_CSR
+ - MOM_ClosePosition_CSZ
+ - MOM_RCI52_SNZ
+ - EVT_LogDaysSincePub_SNZ
+ - VOL_ATRSqueezeBB_RAW
+ - MOM_Return12m_TSR_252D
+ - MOM_RCI52_CSR
+ - CON_ProgressRate_TSZ_20D
+ - VOL_RealizedSkew20_CSR
+ - GOV_Sector33Code_RAW
+ - CON_RevisionRate_RAW
+ - SPD_MarketIndividualBuy_RAW
+ - MOM_Return20d_TSZ_20D
+ - VAL_EarningsYield_SNZ
+ - QLT_ROE_TSR_252D
+ - QLT_Accruals_CSR
+ - VOL_RealizedSkew20_RAW
+ - MOM_DistSMA25_CSZ
+ - LIQ_VolumeLog_CSZ
+ - MOM_MADev200_CSR
+ - MOM_NewHighFlag3_SNZ
+ - MOM_PricePos120_RAW
+ - MOM_BBPercentB_CSR
+ - MOM_High52wDist_TSR_252D
+ - BET_SectorRelStrength60_CSR
+ - SEA_Quarter_RAW
+ - QLT_SalesGrowthYOY_TSR_252D
+ - MOM_RCI26Diff_CSR
+ - VOL_Volatility60_RAW
+ - QLT_SalesGrowthYOY_CSR
+ - QLT_EPSGrowthYOY_CSR
+ - MOM_RSI9-14Diff_CSZ
+ - VOL_ATRSqueeze_RAW
+ - BET_SectorRelStrength60_TSR_252D
+ - VOL_VolumeMA25_CSZ
+ - MOM_Momentum12-1_SNZ
+ - QLT_EPSGrowthYOY_TSZ_20D
+ - VOL_DownsideRun_RAW
+ - MOM_ADX14_TSR_252D
+ - MOM_DistHigh250_CSZ
+ - MOM_BullishRatio20_TSR_252D
+ - MOM_ClosePosition_TSR_252D
+ - MOM_IchimokuDist_CSZ
+ - VOL_ReturnVolatility_RAW
+ - VOL_ReturnVolatility_SNZ
+ - BET_MarketTrendIdx_TSZ_20D
+ - VAL_EarningsYield_TSR_252D
+ - VOL_DownsideDev60_TSR_252D
+ - MOM_Return10d_SNZ
+ - SPD_MarginBuyImpact_TSR_252D
+ - BET_Beta60_CSZ
+ - LIQ_LogTradingCap_CSZ
+ - QLT_EPSGrowthYOY_CSZ
+ - VOL_VolatilityParkinson_TSR_252D
+ - MOM_RCI52_TSZ_20D
+ - VOL_DownsideDev60_TSZ_20D
+ - VOL_MAE10_SNZ
+ - EVT_LogDaysSincePub_RAW
+ - VOL_VolumeMA25_RAW
+ - EVT_LogDaysSincePub_CSR
+ - QLT_EPSGrowthYOY_TSR_252D
+ - QLT_OPMargin_RAW
+ - MOM_ADX14_TSZ_20D
+ - VOL_Volatility60_SNZ
+ - LIQ_AmihudIlliq_CSZ
+ - LIQ_MFI14_CSZ
+ - QLT_ROA_SNZ
+ - LIQ_VolUpDownRatio_CSZ
+ - MOM_DistHigh250_TSR_252D
+ - MOM_Momentum12-1_TSZ_20D
+ - CON_RevisionRate_TSZ_20D
+ - LIQ_MFI14_CSR
+ - MOM_Return12m_TSZ_20D
+ - CON_ProgressRate_CSR
+ - SIZ_LogMarketCap_RAW
+ - MOM_MADev25_RAW
+ - MOM_Return20d_CSZ
+ - MOM_DistSMA25-75_TSR_252D
+ - MOM_BBPercentB_TSR_252D
+ - VOL_VolRatioHV_RAW
+ - VOL_ATRSqueezeBB_CSR
+ - MOM_IchimokuDist_TSZ_20D
+ - VOL_ATRSqueeze_TSZ_20D
+ - MOM_BBPercentB_RAW
+ - MOM_RetIntraday_TSR_252D
+ - QLT_OPMargin_SNZ
+ - MOM_MADev75_TSZ_20D
+ - VOL_MAE10_CSZ
+ - QLT_EPSGrowthYOY_SNZ
+ - QLT_OPMargin_CSR
+ - BET_SectorRelStrength60_SNZ
+ - VOL_BBWidth_TSZ_20D
+ - MOM_DistSMA5_CSR
+ - MOM_MaxGain5_TSZ_20D
+ - MOM_RSI9_TSZ_20D
+ - SPD_MarginRatioDelta4w_RAW
+ - MOM_DistHigh250_CSR
+ - MOM_RetIntraday_RAW
+ - MOM_Momentum12-1_TSR_252D
+ - VOL_UlcerIndex14_RAW
+ - MOM_Return6m_RAW
+ - MOM_MADev200_CSZ
+ - QLT_OperatingProfitGrowthYOY_TSZ_20D
+ - BET_Beta60_RAW
+ - SPD_MarginRatioDelta4w_CSZ
+ - VOL_ReturnVolatility_CSZ
+ - VOL_DownsideDev60_RAW
+ - MOM_MADev25_SNZ
+ - MOM_MADev75_CSZ
+ - QLT_EquityRatio_SNZ
+ - QLT_SalesGrowthYOY_TSZ_20D
+ - VOL_DownsideDev60_SNZ
+ - SPD_DistVWAP5_CSZ
+ - VOL_ATRRatio_RAW
+ - VOL_MAE5_CSZ
+ - MOM_Return20d_RAW
+ - VOL_ATRSqueezeBB_CSZ
+ - LIQ_VolumeLog_RAW
+ - VOL_RangeRatioLong_CSR
+ - MOM_DistSMA75_TSZ_20D
+ - VOL_ReturnVolatility_CSR
+ - MOM_Return12m_SNZ
+ - MOM_PricePos120_TSR_252D
+ - QLT_ROE_CSZ
+ - VOL_HVSlope_TSR_252D
+ - MOM_MACDHistNorm_CSZ
+ - SPD_MarginRatioDelta4w_TSR_252D
+ - BET_MarketReturn_RAW
+ - MOM_High52wDist_CSZ
+ - MOM_Return3d_CSR
+ - MOM_IchimokuDist_TSR_252D
+ - MOM_BBPercentB_CSZ
+ - MOM_RCI9Diff_CSZ

@@ -5,5 +5,5 @@ defaults:
 
 preprocess:
   matrix_weight:
-    enabled: true
+    enabled: false
     cost_buffer: 0.005
