@@ -9,9 +9,9 @@ hydra:
       _target_: src.utils.samplers.HydraBruteForceSampler
     storage: "sqlite:///optuna.db"
     direction: maximize
-    n_trials: 27
+    n_trials: 2
     params:
-      ++hparams.num_leaves: choice(3, 7, 15)
-      ++hparams.max_depth: choice(2, 3, 4)
-      ++hparams.min_child_samples: choice(200, 500, 1000)
+      ++hparams.num_leaves: choice(15)
+      ++hparams.max_depth: choice(4)
+      ++hparams.min_child_samples: choice(1500,2000)
       ++hparams.learning_rate: 0.01
