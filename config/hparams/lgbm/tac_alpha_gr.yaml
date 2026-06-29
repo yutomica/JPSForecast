@@ -2,3 +2,6 @@
 defaults:
   - base
 
+objective: ${target.objective}
+early_stopping_metric: ${target.early_stopping_metric}
+metric_direction: ${target.metric_direction}

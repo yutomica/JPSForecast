@@ -2,11 +2,11 @@
 defaults:
   - _self_
   - domain: tac
-  - target: tac_alpha
+  - target: tac_alpha_gr
   - data: sample
   - features: all
   - model: lgbm
-  - hparams: null
+  - hparams: target_probe
   - period: tac_standard
   - cv: fixed
   - sweep: null
