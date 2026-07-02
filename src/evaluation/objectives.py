@@ -81,8 +81,8 @@ def aggregate_fold_metrics(fold_metrics_list):
     
     return aggregated
 
-def calc_objective_v2(aggregated_metrics):
-    """objective_v2 の計算"""
+def calc_objective_tac(aggregated_metrics):
+    """objective_tac の計算"""
     m = aggregated_metrics
     required = [
         'mean_daily_rankic_mean',
@@ -178,8 +178,8 @@ def calculate_final_optimization_score(
     std_score = np.nanstd(valid_metrics)
     min_score = np.nanmin(valid_metrics)
 
-    obj_v2 = 0.0
-    penalty_v2 = 0.0
+    obj_tac = 0.0
+    penalty_tac = 0.0
     aggregated_f_metrics = {}
     if fold_metrics_results:
         aggregated_f_metrics = aggregate_fold_metrics(fold_metrics_results)
@@ -187,9 +187,9 @@ def calculate_final_optimization_score(
         for log_key, (metric_key, default) in OBJECTIVE_ALIAS_KEYS.items():
             log_metrics[log_key] = aggregated_f_metrics.get(metric_key, default)
 
-        obj_v2, penalty_v2 = calc_objective_v2(aggregated_f_metrics)
-        log_metrics["objective_v2"] = obj_v2
-        log_metrics["objective_penalty_total"] = penalty_v2
+        obj_tac, penalty_tac = calc_objective_tac(aggregated_f_metrics)
+        log_metrics["objective_tac"] = obj_tac
+        log_metrics["objective_penalty_total"] = penalty_tac
         for log_key, (metric_key, default) in OBJECTIVE_COMPONENT_KEYS.items():
             log_metrics[log_key] = aggregated_f_metrics.get(metric_key, default)
 
@@ -205,9 +205,9 @@ def calculate_final_optimization_score(
     valid_top30_active = aggregated_f_metrics.get("top30_active_mean_raw_mean", 0.0)
     log_metrics["train_valid_top30_active_mean_gap"] = train_top30_active - valid_top30_active
 
-    if opt_metric_name == "objective_v2":
-        final_opt_score = obj_v2
-        messages.append(f"  🔹 Objective V2: {final_opt_score:.6f} (Penalty: {penalty_v2:.4f})")
+    if opt_metric_name == "objective_tac":
+        final_opt_score = obj_tac
+        messages.append(f"  🔹 Objective TAC: {final_opt_score:.6f} (Penalty: {penalty_tac:.4f})")
     elif opt_metric_name == "tac_risk_class_guarded_ap":
         final_opt_score = calc_tac_risk_objective(fold_metrics_results)
         messages.append(f"  🔹 TAC Risk Guarded AP Objective: {final_opt_score:.6f}")

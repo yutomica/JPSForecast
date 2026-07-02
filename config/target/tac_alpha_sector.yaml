@@ -15,5 +15,5 @@ objective: "regression"
 # eval_metric: "RankIC"
 
 # # 最適化指標
-# optimization_metric: "objective_v2"
+# optimization_metric: "objective_tac"
 # optimization_direction: "maximize"
