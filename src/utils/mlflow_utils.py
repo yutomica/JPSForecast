@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import tempfile
@@ -203,69 +202,6 @@ def check_and_promote_model(client: MlflowClient, experiment_id: str, parent_run
             print(f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) with variant '{variant}' and transitioned to Staging.")
         except Exception as e:
             print(f"⚠️ Failed to register model to registry (Ensure model is logged as PyFunc if required): {e}")
-
-
-def _resolve_registry_target(cfg: DictConfig, current_mode: str) -> tuple[str, str]:
-    """実行モードに応じた登録モデル名と昇格先stageを返す。"""
-    if current_mode == "stacking_base":
-        return f"Base_{cfg.model.name}_{cfg.target.name}_OOF", "None"
-    if current_mode == "stacking_ensemble":
-        return f"Stacked_{cfg.target.name}_Final", "Production"
-    if current_mode == "production":
-        if cfg.get("stacking", {}).get("enabled", False):
-            return f"Stacked_{cfg.target.name}_Final", "Production"
-        return f"Base_{cfg.model.name}_{cfg.target.name}_INF", "Production"
-    return f"{cfg.model.name}_{cfg.target.name}", "Staging"
-
-
-def _set_model_version_tags(client: MlflowClient, cfg: DictConfig, current_mode: str, registered_model_name: str, version: str):
-    variant = cfg.get("variant", "default")
-    client.set_model_version_tag(registered_model_name, version, "variant", variant)
-
-    if current_mode == "stacking_base":
-        client.set_model_version_tag(registered_model_name, version, "nature", "base_oof_generator")
-    elif current_mode == "production" and not cfg.get("stacking", {}).get("enabled", False):
-        client.set_model_version_tag(registered_model_name, version, "nature", "inference_base")
-    elif current_mode in ["production", "stacking_ensemble"] and cfg.get("stacking", {}).get("enabled", False):
-        client.set_model_version_tag(registered_model_name, version, "nature", "stacking_meta")
-        target_models = cfg.get("stacking", {}).get("target_models", [])
-        client.set_model_version_tag(registered_model_name, version, "dependencies", json.dumps(target_models))
-
-    feature_choice = HydraConfig.get().runtime.choices.get("features", "unknown")
-    client.set_model_version_tag(registered_model_name, version, "feature_config", feature_choice)
-    return variant
-
-
-def register_and_promote_model_for_mode(client: MlflowClient, cfg: DictConfig):
-    """fix/production/stacking系モードでモデルをregistryへ登録し、必要に応じてstage遷移する。"""
-    current_mode = cfg.get("mode")
-    if current_mode not in ["fix", "production", "stacking_base", "stacking_ensemble"]:
-        return
-
-    registered_model_name, target_stage = _resolve_registry_target(cfg, current_mode)
-    print(
-        f"\n🌟 Mode '{current_mode}' detected. Registering model as "
-        f"'{registered_model_name}' and promoting to {target_stage}."
-    )
-    model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
-    try:
-        mv = mlflow.register_model(model_uri, registered_model_name)
-        # Variant管理のため archive_existing_versions=False に変更
-        if target_stage != "None":
-            client.transition_model_version_stage(
-                name=registered_model_name,
-                version=mv.version,
-                stage=target_stage,
-                archive_existing_versions=False,
-            )
-
-        variant = _set_model_version_tags(client, cfg, current_mode, registered_model_name, mv.version)
-        print(
-            f"✅ Model registered as '{registered_model_name}' (Version {mv.version}) "
-            f"with variant '{variant}' and transitioned to {target_stage}."
-        )
-    except Exception as e:
-        print(f"⚠️ Failed to register model to registry: {e}")
 
 def bundle_and_upload_artifacts(path_to_gdrive: str, domain_name: str):
     """MLflowの成果物ディレクトリ全体をZIP圧縮し、Google Driveへ移動する"""

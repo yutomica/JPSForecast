@@ -410,6 +410,8 @@ class GANDALFWrapper(BaseModelWrapper):
             return "AsymMSE"
         if obj == "quantile":
             return "Quantile"
+        if obj in ["huber", "smooth_l1"]:
+            return "Huber"
         return obj.upper()
 
     def _train_one_epoch(self, train_loader, optimizer, gradient_clip_val: float, epoch: int, max_epochs: int) -> float:
@@ -495,6 +497,9 @@ class GANDALFWrapper(BaseModelWrapper):
             alpha = float(self.params.get("alpha", 0.5))
             diff = y - out
             return torch.maximum(alpha * diff, (alpha - 1.0) * diff)
+        elif objective in ["huber", "smooth_l1"]:
+            beta = float(self.params.get("huber_alpha", self.params.get("huber_beta", self.params.get("alpha", self.params.get("+alpha", 1.0)))))
+            return F.smooth_l1_loss(out, y.float(), reduction="none", beta=beta)
         else:
             return F.mse_loss(out, y.float(), reduction="none")
 

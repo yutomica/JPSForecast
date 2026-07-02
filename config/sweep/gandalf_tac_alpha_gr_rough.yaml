@@ -1,5 +1,9 @@
 # @package _global_
-# Step 2: TAC Risk (LGBM) ラフチューニング
+# Step 2: TAC Alpha GR (GANDALF) - Phase B Core Architecture
+# 12 trial: 2 stages x 2 initial sparsities x 3 head architectures.
+# Phase Aで選定した learning_rate / weight_decay を下記の固定値へ反映してから実行すること。
+# 現在は Phase A の第一推奨値 (learning_rate=1e-4, weight_decay=5e-4) を記載。
+
 defaults:
   - override /hydra/sweeper: optuna
 
@@ -9,8 +13,42 @@ hydra:
       _target_: src.utils.samplers.HydraBruteForceSampler
     storage: "sqlite:///optuna.db"
     direction: maximize
-    n_trials: 27
+    n_trials: 12
     params:
-      ++hparams.gflu_stages: choice(2, 3, 4)
-      ++hparams.gflu_feature_init_sparsity: choice(0.2, 0.4, 0.6)
-      ++hparams.head_hidden_dims: choice([64], [128, 64], [128, 64, 32])
+      # ---- Fixed: selected from Phase A (replace if Phase A selects a different pair) ----
+      ++hparams.learning_rate: choice(0.0001)
+      ++hparams.weight_decay: choice(0.001)
+
+      # ---- Search: architecture ----
+      ++hparams.gflu_stages: choice(2, 3)
+      ++hparams.gflu_feature_init_sparsity: choice(0.2, 0.4)
+      ++hparams.head_hidden_dims: choice([64, 32], [128, 64], [128, 64, 32])
+
+      # ---- Fixed: training control ----
+      ++hparams.batch_size: choice(4096)
+      ++hparams.max_epochs: choice(150)
+      ++hparams.patience: choice(30)
+      ++hparams.early_stopping_ema_alpha: choice(0.1)
+      ++hparams.gradient_clip_val: choice(1.0)
+      ++hparams.lr_decay_factor: choice(0.5)
+      ++hparams.lr_patience: choice(5)
+      ++hparams.min_lr: choice(0.000001)
+
+      # ---- Fixed: regularization ----
+      ++hparams.gflu_dropout: choice(0.1)
+      ++hparams.learnable_sparsity: choice(true)
+      ++hparams.head_dropout: choice(0.2)
+
+      # ---- Fixed: reproducibility/runtime ----
+      ++hparams.random_state: choice(42)
+      ++hparams.num_workers: choice(0)
+      ++hparams.use_time_decay: choice(false)
+      ++hparams.time_decay_rate: choice(0.9999)
+      ++hparams.num_threads: choice(1)
+      ++hparams.device_name: choice(auto)
+
+# NOTE:
+# - 4-stage / sparsity=0.6 はCore gridに含めない。
+#   Coreで 3-stage / 0.4 / [128,64,32] が上位だった場合のみ、
+#   Phase B confirmation の2 trialを追加する。
+# - EarlyStopping終了後、MDAやfold評価の前にbest checkpointを復元すること。

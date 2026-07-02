@@ -73,13 +73,19 @@ class FeatureEngineer:
     def cs_zscore(self, cat, col, p=0.01, store: dict = None):
         """日別全銘柄Zスコア"""
         # Winsorization
+        def _safe_zscore(x):
+            std = x.std()
+            if pd.isna(std) or std <= 1e-8:
+                return pd.Series(0.0, index=x.index, dtype='float32').where(x.notna(), np.nan)
+            return ((x - x.mean()) / std).astype('float32')
+
         with np.errstate(invalid='ignore'):
             lower = self.df.groupby('date')[col].transform(lambda x: x.quantile(p))
             upper = self.df.groupby('date')[col].transform(lambda x: x.quantile(1-p))
             self.df[col] = self.df[col].clip(lower, upper)
             new_col = col.split('_')[1]
             new_col = self._generate_name(cat, new_col, "CSZ")
-            res = self.df.groupby('date')[col].transform(lambda x: (x - x.mean()) / (x.std() + 1e-8))
+            res = self.df.groupby('date')[col].transform(_safe_zscore)
         res = res.astype('float32')
         if store is not None:
             store[new_col] = res
@@ -91,9 +97,15 @@ class FeatureEngineer:
         """セクター別Zスコア (Sector Neutral)"""
         new_col = col.split('_')[1]
         new_col = self._generate_name(cat, new_col, "SNZ")
+        def _safe_zscore(x):
+            std = x.std()
+            if pd.isna(std) or std <= 1e-8:
+                return pd.Series(0.0, index=x.index, dtype='float32').where(x.notna(), np.nan)
+            return ((x - x.mean()) / std).astype('float32')
+
         with np.errstate(invalid='ignore'):
             res = self.df.groupby(['date', 'sector33_code'])[col].transform(
-                lambda x: (x - x.mean()) / (x.std() + 1e-8)
+                _safe_zscore
             )
         res = res.astype('float32')
         if store is not None:
@@ -113,9 +125,12 @@ class FeatureEngineer:
             self.df[col] = self.df[col].clip(lower, upper)
             new_col = col.split('_')[1]
             new_col = self._generate_name(cat, new_col, "TSZ", f"{z_window}D")
-            res = self.df.groupby('scode')[col].transform(
-                lambda x: (x - x.rolling(window=z_window, min_periods=1).mean()) / (x.rolling(window=z_window, min_periods=1).std() + 1e-8)
-            )
+            def _safe_rolling_zscore(x):
+                rolling_mean = x.rolling(window=z_window, min_periods=1).mean()
+                rolling_std = x.rolling(window=z_window, min_periods=1).std()
+                res = (x - rolling_mean) / rolling_std.where(rolling_std > 1e-8)
+                return res.where(rolling_std > 1e-8, 0.0).where(x.notna(), np.nan)
+            res = self.df.groupby('scode')[col].transform(_safe_rolling_zscore)
         res = res.astype('float32')
         if store is not None:
             store[new_col] = res
@@ -254,7 +269,10 @@ class FeatureEngineer:
             lower = s.quantile(p)
             upper = s.quantile(1 - p)
             s_clipped = s.clip(lower, upper)
-            return ((s_clipped - s_clipped.mean()) / (s_clipped.std() + 1e-8)).astype('float32')
+            std = s_clipped.std()
+            if pd.isna(std) or std <= 1e-8:
+                return pd.Series(0.0, index=s.index, dtype='float32').where(s.notna(), np.nan)
+            return ((s_clipped - s_clipped.mean()) / std).astype('float32')
         if cols_for_cs_zscore:
             print(f" - Applying cs_zscore to {len(cols_for_cs_zscore)} columns...")
             with np.errstate(invalid='ignore'):
@@ -265,9 +283,14 @@ class FeatureEngineer:
         # 3-3. sn_zscore (セクター内Z-Score)
         if cols_for_sn_zscore:
             print(f" - Applying sn_zscore to {len(cols_for_sn_zscore)} columns...")
+            def safe_sector_zscore(x):
+                std = x.std()
+                if pd.isna(std) or std <= 1e-8:
+                    return pd.Series(0.0, index=x.index, dtype='float32').where(x.notna(), np.nan)
+                return ((x - x.mean()) / std).astype('float32')
             with np.errstate(invalid='ignore'):
                 sn_zscored_df = self.df.groupby(['date', 'sector33_code'])[cols_for_sn_zscore].transform(
-                    lambda x: (x - x.mean()) / (x.std() + 1e-8)
+                    safe_sector_zscore
                 )
             sn_zscored_df = sn_zscored_df.astype('float32')
             for col in sn_zscored_df.columns:
@@ -348,7 +371,7 @@ class FeatureEngineer:
         max_120 = roll_120.max().reset_index(level=0, drop=True)
         min_120 = roll_120.min().reset_index(level=0, drop=True)
         col_name = self._generate_name("MOM", "PricePos120", "RAW")
-        self.df[col_name] = (self.df['close'] - min_120) / (max_120 - min_120)
+        self.df[col_name] = (self.df['close'] - min_120) / (max_120 - min_120).replace(0, np.nan)
         self.new_cols.append(col_name)
 
         high_52 = grouped_high.rolling(52).max().reset_index(level=0, drop=True)
@@ -395,22 +418,23 @@ class FeatureEngineer:
         self.new_cols.append(col_name)
 
         range_len = self.df['high'] - self.df['low']
+        safe_range_len = range_len.replace(0, np.nan)
         body_size = np.abs(self.df['close'] - self.df['open'])
         upper_shadow = self.df['high'] - self.df[['close', 'open']].max(axis=1)
         lower_shadow = self.df[['close', 'open']].min(axis=1) - self.df['low']
         with np.errstate(divide='ignore', invalid='ignore'):
             col_name = self._generate_name("MOM", "BodyRatio", "RAW")
-            self.df[col_name] = body_size / range_len
+            self.df[col_name] = body_size / safe_range_len
             self.new_cols.append(col_name)
             col_name = self._generate_name("MOM", "UpperShadowRatio", "RAW")
-            self.df[col_name] = upper_shadow / range_len
+            self.df[col_name] = upper_shadow / safe_range_len
             self.new_cols.append(col_name)
             col_name = self._generate_name("MOM", "LowerShadowRatio", "RAW")
-            lower_shadow_ratio = lower_shadow / range_len
+            lower_shadow_ratio = lower_shadow / safe_range_len
             self.df[col_name] = lower_shadow_ratio
             self.new_cols.append(col_name)
             col_name = self._generate_name("MOM", "IntradayStrength", "RAW")
-            self.df[col_name] = (self.df['close'] - self.df['open']) / range_len
+            self.df[col_name] = (self.df['close'] - self.df['open']) / safe_range_len
             self.new_cols.append(col_name)
             col_name = self._generate_name("MOM", "LowerShadowMA5", "RAW")
             self.df[col_name] = lower_shadow_ratio.groupby(self.df['scode']).rolling(5).mean().reset_index(level=0, drop=True)
@@ -429,7 +453,9 @@ class FeatureEngineer:
         self.new_cols.append(col_name)
 
         col_name = self._generate_name("MOM", "ClosePosition", "RAW")
-        self.df[col_name] = (self.df['close'] - grouped_low.rolling(20).min().reset_index(level=0, drop=True)) / (grouped_high.rolling(20).max().reset_index(level=0, drop=True) - grouped_low.rolling(20).min().reset_index(level=0, drop=True))
+        high_20 = grouped_high.rolling(20).max().reset_index(level=0, drop=True)
+        low_20 = grouped_low.rolling(20).min().reset_index(level=0, drop=True)
+        self.df[col_name] = (self.df['close'] - low_20) / (high_20 - low_20).replace(0, np.nan)
         self.new_cols.append(col_name)
 
         prev_close = grouped_close.shift(1)
@@ -687,7 +713,7 @@ class FeatureEngineer:
         self.df[col_name] = self.df['equity'] / (self.df['total_assets'].abs() + epsilon)
         self.new_cols.append(col_name)
         col_name = self._generate_name("QLT", "OPMargin", "RAW")
-        self.df[col_name] = self.df['operating_profit'] / (self.df['sales'].abs() + epsilon)
+        self.df[col_name] = self.df['operating_profit'] / self.df['sales'].abs().where(self.df['sales'].abs() >= 1.0, np.nan)
         self.new_cols.append(col_name)
         col_name = self._generate_name("QLT", "ROA", "RAW")
         self.df[col_name] = self.df['net_income'] / (self.df['total_assets'].abs() + epsilon)
@@ -1044,4 +1070,4 @@ class FeatureEngineer:
 
 
     def get_df(self):
-        return self.df 
+        return self.df

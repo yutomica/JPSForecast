@@ -6,6 +6,7 @@ prediction_horizon: 40       # 何日先を予測するか（5日後など）
 
 # コスト関数
 objective: "huber"
+huber_alpha: 1.0
 
 # 監視指標
 early_stopping_metric: "src.models.custom_metrics.mean_daily_spearman_ic"

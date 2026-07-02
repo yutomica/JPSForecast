@@ -1,5 +1,4 @@
 import os
-import logging
 
 def setup_environment():
     """
@@ -43,20 +42,3 @@ def setup_environment():
         numcodecs.blosc.use_threads = False
     except ImportError:
         pass
-
-    # MLflow周辺の冗長なログ・警告を抑制する。
-    logging.getLogger("alembic").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
-
-    mlflow_models_logger = logging.getLogger("mlflow.models.model")
-    mlflow_pyfunc_logger = logging.getLogger("mlflow.pyfunc")
-    logging_state = {
-        "mlflow_models_logger": mlflow_models_logger,
-        "mlflow_pyfunc_logger": mlflow_pyfunc_logger,
-        "prev_models_level": mlflow_models_logger.level,
-        "prev_pyfunc_level": mlflow_pyfunc_logger.level,
-    }
-    mlflow_models_logger.setLevel(logging.ERROR)
-    mlflow_pyfunc_logger.setLevel(logging.ERROR)
-
-    return logging_state

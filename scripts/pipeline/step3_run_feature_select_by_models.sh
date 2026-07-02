@@ -57,10 +57,10 @@ run_feature_select() {
 }
 
 # --- Execution ---
-run_feature_select "tac" "lgbm" "alpha_gr" "0"
+# run_feature_select "tac" "lgbm" "alpha_gr" "0"
 # run_feature_select "str" "lgbm" "alpha"  "0" \
 #     ++hparams.num_boost_round=1000 
-# run_feature_select "tac" "gandalf" "alpha_gr"  "1"
+run_feature_select "tac" "gandalf" "alpha_gr"  "1"
 
 # run_feature_select "tac" "tcn" "alpha_gr" "1"
 # run_feature_select "10d" "lgbm" "alpha_gr" "0"

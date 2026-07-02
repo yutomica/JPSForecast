@@ -52,6 +52,7 @@ def main(mode = "full"):
     if chunk_files:
         pf = pq.ParquetFile(chunk_files[0])
         sample_df = pf.read_row_group(0).to_pandas().head(1)
+        sample_df['sector33_code'] = sample_df['sector33_code'].astype(str)
         engineer = FeatureEngineer(sample_df)
         pipe = (
             engineer
