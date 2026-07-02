@@ -24,7 +24,10 @@ run_final_sweep() {
     local role=$3 # 'alpha' or 'risk'
     local n_jobs=$4
     local use_gpu=$5
-    shift 5
+    local opt_metric=$6
+    local opt_direction=$7
+    local opt_label=$8
+    shift 8
     local extra_args=("$@")
 
     local target="${domain}_${role}"
@@ -33,7 +36,15 @@ run_final_sweep() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     local exp_name="JPSForecast_${target}"
 
-    local study_name=${OPTUNA_STUDY_NAME:-"final_sweep_${model}_${target}_${timestamp}"}
+    if [ -z "${opt_metric}" ] || [ -z "${opt_direction}" ]; then
+        echo "ERROR: run_final_sweep requires opt_metric and opt_direction." >&2
+        return 1
+    fi
+    if [ -z "${opt_label}" ]; then
+        opt_label=$(echo "${opt_metric}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g')
+    fi
+
+    local study_name=${OPTUNA_STUDY_NAME:-"final_sweep_${model}_${target}_${opt_label}_${timestamp}"}
 
     # 再開時のオフセット取得
     local trial_offset=$(uv run python -m src.utils.config_utils --action get_trial_count --storage "sqlite:///optuna.db" --study-name "${study_name}" --state COMPLETE)
@@ -70,6 +81,7 @@ run_final_sweep() {
 
     echo "============================================================"
     echo "Starting Final Sweep: $model ($domain) - $role"
+    echo "Optimization Metric: ${opt_metric} (${opt_direction})"
     echo "Study Name: $study_name"
     echo "============================================================"
     
@@ -81,10 +93,13 @@ run_final_sweep() {
     TRIAL_OFFSET=$trial_offset MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py -m \
         hydra/launcher=$( [ "${n_jobs}" -gt 1 ] && echo "joblib" || echo "basic" ) \
         $([ "${n_jobs}" -gt 1 ] && echo "hydra.sweeper.n_jobs=${n_jobs} hydra.launcher.n_jobs=${n_jobs}") \
+        hydra.sweeper.direction=${opt_direction} \
         hydra.sweeper.n_trials=${remaining_trials} \
         ++hparams.num_threads=1 \
         domain=${domain} \
         target=${target} \
+        ++target.optimization_metric="${opt_metric}" \
+        ++target.optimization_direction="${opt_direction}" \
         ${data_arg} \
         features=${features} \
         model=${model} \
@@ -93,7 +108,7 @@ run_final_sweep() {
         mlflow.experiment_name="${exp_name}" \
         sweep=${sweep} \
         +mode=final_sweep \
-        ++mlflow.run_name="Step4_Final_Sweep_${model}_${target}" \
+        ++mlflow.run_name="Step4_Final_Sweep_${model}_${target}_${opt_label}" \
         experiment=${model}_${target} \
         "${optuna_args[@]}" \
         $gpu_args \
@@ -105,10 +120,10 @@ run_final_sweep() {
 }
 
 # --- Execution ---
-# run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0"
-# run_final_sweep "str" "lgbm" "alpha"  "8" "0"
-# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0"
-run_final_sweep "tac" "tcn" "alpha_gr" "3" "0"
+# run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"
+# run_final_sweep "str" "lgbm" "alpha"  "8" "0" "rank_ic_reb_60d_multi_offset_icir_mean" "maximize" "reb_icir"
+# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0" "objective_v2" "maximize" "objv2"
+run_final_sweep "tac" "tcn" "alpha_gr" "3" "0" "RankIC" "maximize" "rankic"
 
-# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0"
-# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0"
+# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"
+# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"

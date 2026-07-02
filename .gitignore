@@ -20,3 +20,4 @@ optuna.db
 .venv/
 log/
 *.xlsx
+*.csv

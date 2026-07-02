@@ -44,7 +44,7 @@ run_feature_select() {
         features=${features} \
         model=${model} \
         period=${domain}_standard \
-        cv=purged_kfold \
+        cv=anchored_walk_forward \
         experiment=${model}_${target} \
         mlflow.experiment_name="${exp_name}" \
         ++mlflow.run_name="Step3_Feature_Selection_${model}_${target}" \
