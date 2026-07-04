@@ -15,5 +15,5 @@ prediction_horizon: 5       # 何日先を予測するか（5日後など）
 # eval_metric: "RankIC"
 
 # # 最適化指標
-# optimization_metric: "objective_v2"
+# optimization_metric: "objective_tac"
 # optimization_direction: "maximize"

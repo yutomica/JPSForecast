@@ -512,9 +512,35 @@ def _add_topk_active_metrics(metrics, df_eval, cost_buffer):
 def _add_spread_alpha_metrics(metrics, df_eval, cost_buffer):
     metrics['top_quintile_spread_raw'], metrics['top_quintile_spread_scaled'] = calc_top_quintile_spread(df_eval, 'pred', 'y_ret')
     metrics['top_quintile_spread'] = metrics['top_quintile_spread_scaled']
-
     metrics['top30_rankic_alpha_raw'], metrics['top30_rankic_alpha_scaled'] = calc_top30_rankic_alpha(df_eval, 'pred', 'y_ret', cost_col=cost_buffer)
     metrics['top30_rankic_alpha'] = metrics['top30_rankic_alpha_scaled']
+
+def _add_tac_risk_class_metrics_if_needed(metrics, y_true, y_pred, task_type, target_col):
+    if task_type == 'multiclass' and (target_col is not None and 'tac_risk' in str(target_col)) and y_pred.ndim == 2:
+        metrics.update(calc_tac_risk_class_metrics(y_true, y_pred))
+
+def _add_drawdown_alert_metrics(metrics, y_ret, y_pred, y_pred_1d, task_type):
+    metrics['AP_severe'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.05, 0.07, 0.10], task_type)
+    metrics['AP_severe_STR'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.15, 0.20, 0.30], task_type)
+    pred_threshold = np.percentile(y_pred_1d, 20)
+    actual_severe = (y_ret <= -0.05)
+    pred_alert = (y_pred_1d <= pred_threshold) if task_type == 'regression' else (y_pred_1d >= np.percentile(y_pred_1d, 80))
+    tp = np.sum(actual_severe & pred_alert)
+    fn = np.sum(actual_severe & ~pred_alert)
+    metrics['severe_drawdown_recall'] = float(tp / (tp + fn)) if (tp + fn) > 0 else np.nan
+
+def _add_groupby_metrics(metrics, df_eval, task_type, ndcg_k):
+    metrics.update(_calc_additional_groupby_metrics(df_eval, task_type=task_type, ndcg_k=ndcg_k))
+
+def _add_multi_offset_rebalance_metrics(metrics, df_eval, reb_interval, reb_offsets, reb_min_names):
+    metrics.update(calc_rank_ic_reb_multi_offset(
+        df_eval, pred_col='pred', target_col='y_true', date_col='date',
+        interval=reb_interval, offsets=reb_offsets, min_names=reb_min_names
+    ))
+
+def _add_extra_bin_metrics_if_needed(metrics, df_eval, include_extra_bin_metrics):
+    if include_extra_bin_metrics:
+        metrics.update(calculate_extra_bin_metrics(df_eval, score_col='pred'))
 
 def _add_compatibility_aliases(metrics):
     metrics['rank_ic_reb'] = metrics.get('RankIC_reb', np.nan)
@@ -547,20 +573,11 @@ def evaluate_metrics(
 
     metrics = {}
 
-    # 1. Tac Risk Class Metrics
-    if task_type == 'multiclass' and (target_col is not None and 'tac_risk' in str(target_col)) and y_pred.ndim == 2:
-        metrics.update(calc_tac_risk_class_metrics(y_true, y_pred))
+    # Tac Risk Class Metrics
+    _add_tac_risk_class_metrics_if_needed(metrics, y_true, y_pred, task_type, target_col)
 
-    # 2. Drawdown / AP系
-    metrics['AP_severe'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.05, 0.07, 0.10], task_type)
-    metrics['AP_severe_STR'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.15, 0.20, 0.30], task_type)
-
-    pred_threshold = np.percentile(y_pred_1d, 20)
-    actual_severe = (y_ret <= -0.05)
-    pred_alert = (y_pred_1d <= pred_threshold) if task_type == 'regression' else (y_pred_1d >= np.percentile(y_pred_1d, 80))
-    tp = np.sum(actual_severe & pred_alert)
-    fn = np.sum(actual_severe & ~pred_alert)
-    metrics['severe_drawdown_recall'] = float(tp / (tp + fn)) if (tp + fn) > 0 else np.nan
+    # Drawdown / AP系
+    _add_drawdown_alert_metrics(metrics, y_ret, y_pred, y_pred_1d, task_type)
 
     # RankIC系
     rankic_series = calc_daily_rankic_series(df_eval, 'pred', 'y_true', 'date')
@@ -572,22 +589,18 @@ def evaluate_metrics(
     # Spread / Alpha IC
     _add_spread_alpha_metrics(metrics, df_eval, cost_buffer)
 
-    # 4. その他 group-by 指標 (NDCG, SR, Gate Recall, etc.)
-    extra_metrics = _calc_additional_groupby_metrics(df_eval, task_type=task_type, ndcg_k=ndcg_k)
-    metrics.update(extra_metrics)
+    # group-by 指標 (NDCG, SR, Gate Recall, etc.)
+    _add_groupby_metrics(metrics, df_eval, task_type, ndcg_k)
     
-    # 5. Multi-offset Rebalance RankIC
-    multi_offset_metrics = calc_rank_ic_reb_multi_offset(
-        df_eval, pred_col='pred', target_col='y_true', date_col='date',
-        interval=reb_interval, offsets=reb_offsets, min_names=reb_min_names
-    )
-    metrics.update(multi_offset_metrics)
+    # Multi-offset Rebalance RankIC
+    _add_multi_offset_rebalance_metrics(metrics, df_eval, reb_interval, reb_offsets, reb_min_names)
     
-    if include_extra_bin_metrics:
-        metrics.update(calculate_extra_bin_metrics(df_eval, score_col='pred'))
+    _add_extra_bin_metrics_if_needed(metrics, df_eval, include_extra_bin_metrics)
 
     # 互換性エイリアス
     _add_compatibility_aliases(metrics)
+
+    # Daily ICIR Metrics
     _add_daily_icir_metrics(metrics, df_eval)
 
     return metrics
