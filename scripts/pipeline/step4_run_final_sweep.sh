@@ -1,9 +1,107 @@
 #!/bin/bash
 # step4_run_final_sweep.sh
+#
+# Thin launcher for scripts/pipeline/auto_step4_hpo.py.
+# Define run_final_sweep calls in the execution section at the bottom.
 
 set -e
 
-# 環境変数設定
+# Shell-level options.
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN=1
+    shift
+fi
+
+run_final_sweep() {
+    local domain=$1
+    local model=$2
+    local role=$3
+    local n_jobs=$4
+    local use_gpu=$5
+    shift 5
+
+    local target="${domain}_${role}"
+    local features="features_${model}_${target}_fixed"
+    local sweep="${model}_${target}_final"
+    local command_mode="${STEP4_MODE}"
+    local data_config="${DATA_CONFIG}"
+    local objectives=()
+    local extra_args=()
+
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--" ]; then
+            shift
+            extra_args=("$@")
+            break
+        fi
+        objectives+=("$1")
+        shift
+    done
+
+    if [ "${#objectives[@]}" -eq 0 ]; then
+        echo "ERROR: run_final_sweep requires at least one objective spec: metric:direction:label" >&2
+        return 1
+    fi
+
+    if [ "${command_mode}" != "optimize" ] && [ "${command_mode}" != "refine" ]; then
+        echo "ERROR: STEP4_MODE must be 'optimize' or 'refine': ${command_mode}" >&2
+        return 1
+    fi
+
+    local cmd=(
+        "${PYTHON_RUNNER[@]}" scripts/pipeline/auto_step4_hpo.py "${command_mode}"
+        --domain "${domain}"
+        --model "${model}"
+        --role "${role}"
+        --tracking-uri "${TRACKING_URI}"
+        --storage "${OPTUNA_STORAGE}"
+        --features "${features}"
+        --data "${data_config}"
+        --n-jobs "${n_jobs}"
+    )
+
+    if [ "${command_mode}" = "optimize" ]; then
+        cmd+=(--sweep "${sweep}")
+    fi
+
+    for objective in "${objectives[@]}"; do
+        cmd+=(--objective "${objective}")
+    done
+
+    if [ "${use_gpu}" -eq 1 ]; then
+        cmd+=(--use-gpu)
+    fi
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        cmd+=(--dry-run)
+    fi
+    if [ -n "${TOTAL_TRIALS}" ]; then
+        cmd+=(--total-trials "${TOTAL_TRIALS}")
+    fi
+
+    for arg in "${extra_args[@]}"; do
+        cmd+=(--extra-arg "${arg}")
+    done
+
+    echo "============================================================"
+    echo "Starting Final Sweep via auto_step4_hpo.py"
+    echo "Target: ${target}"
+    echo "Model: ${model}"
+    echo "Sweep: ${sweep}"
+    echo "Features: ${features}"
+    echo "Mode: ${command_mode}"
+    echo "Objectives: ${objectives[*]}"
+    echo "n_jobs: ${n_jobs}"
+    echo "============================================================"
+
+    "${cmd[@]}"
+
+    echo "Finished Final Sweep for ${model} (${domain}) - ${role}."
+    echo ""
+}
+
+# --- Execution ---
+# Runtime environment for stable parallel HPO execution.
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -11,119 +109,32 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export LOKY_MAX_CPU_COUNT=1
 
-export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
-export PYTHONPATH=$PYTHONPATH:.
+# Step4 execution settings.
+PYTHON_RUNNER=(uv run python)
+TRACKING_URI="sqlite:///mlflow.db"
+OPTUNA_STORAGE="sqlite:///optuna.db"
+STEP4_MODE="optimize"  # "optimize" or "refine"
+DATA_CONFIG="master"
+TOTAL_TRIALS=36
 
-# ドライランモード
-DRY_RUN=0
-if [ "$1" = "--dry-run" ]; then DRY_RUN=1; shift; fi
+# Objective spec format: metric:direction:label
+run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0" \
+    "objective_tac_gr_guarded:maximize:guarded" \
+    "objective_tac:maximize:tac" \
+    "RankIC:maximize:rankic"
 
-run_final_sweep() {
-    local domain=$1
-    local model=$2
-    local role=$3 # 'alpha' or 'risk'
-    local n_jobs=$4
-    local use_gpu=$5
-    local opt_metric=$6
-    local opt_direction=$7
-    local opt_label=$8
-    shift 8
-    local extra_args=("$@")
-
-    local target="${domain}_${role}"
-    local features="features_${model}_${target}_fixed"
-    local sweep="${model}_${target}_final"
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
-    local exp_name="JPSForecast_${target}"
-
-    if [ -z "${opt_metric}" ] || [ -z "${opt_direction}" ]; then
-        echo "ERROR: run_final_sweep requires opt_metric and opt_direction." >&2
-        return 1
-    fi
-    if [ -z "${opt_label}" ]; then
-        opt_label=$(echo "${opt_metric}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g')
-    fi
-
-    local study_name=${OPTUNA_STUDY_NAME:-"final_sweep_${model}_${target}_${opt_label}_${timestamp}"}
-
-    # 再開時のオフセット取得
-    local trial_offset=$(uv run python -m src.utils.config_utils --action get_trial_count --storage "sqlite:///optuna.db" --study-name "${study_name}" --state COMPLETE)
-    echo "Completed Trials (Offset): ${trial_offset}"
-
-    # 設定ファイルから n_trials を取得
-    local config_n_trials=$(grep "n_trials:" "config/sweep/${sweep}.yaml" | awk '{print $2}' | head -n 1)
-    config_n_trials=$(echo "${config_n_trials}" | sed 's/[^0-9]//g')
-    local total_n_trials=${OPTUNA_N_TRIALS:-${config_n_trials:-100}}
-    local remaining_trials=$((total_n_trials - trial_offset))
-
-    if [ "${remaining_trials}" -le 0 ]; then
-        echo "All trials for ${study_name} are already completed. Skipping."
-        return
-    fi
-
-    local gpu_args=""
-    if [ "$use_gpu" -eq 1 ]; then
-        if [ "$model" = "lgbm" ]; then
-            gpu_args="++hparams.device_type=gpu"
-        else
-            gpu_args="++hparams.device_name=auto"
-        fi
-    fi
-
-    local data_arg="data=master"
-    local dry_run_args=()
-    if [ "$DRY_RUN" -eq 1 ]; then
-        data_arg="data=sample"
-        remaining_trials=2
-        dry_run_args+=("++hparams.max_epochs=2")
-        echo "⚠️ Running in DRY RUN mode."
-    fi
-
-    echo "============================================================"
-    echo "Starting Final Sweep: $model ($domain) - $role"
-    echo "Optimization Metric: ${opt_metric} (${opt_direction})"
-    echo "Study Name: $study_name"
-    echo "============================================================"
-    
-    local parent_run_id=$(uv run python -m src.utils.mlflow_utils --action resolve_parent --tracking-uri "${MLFLOW_TRACKING_URI}" --experiment-name "${exp_name}" --study-name "${study_name}")
-
-    local optuna_args=("hydra.sweeper.storage=sqlite:///optuna.db" "hydra.sweeper.study_name=${study_name}")
-
-    # hparams の指定を削除。Experiment 側の defaults で解決する。
-    TRIAL_OFFSET=$trial_offset MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py -m \
-        hydra/launcher=$( [ "${n_jobs}" -gt 1 ] && echo "joblib" || echo "basic" ) \
-        $([ "${n_jobs}" -gt 1 ] && echo "hydra.sweeper.n_jobs=${n_jobs} hydra.launcher.n_jobs=${n_jobs}") \
-        hydra.sweeper.direction=${opt_direction} \
-        hydra.sweeper.n_trials=${remaining_trials} \
-        ++hparams.num_threads=1 \
-        domain=${domain} \
-        target=${target} \
-        ++target.optimization_metric="${opt_metric}" \
-        ++target.optimization_direction="${opt_direction}" \
-        ${data_arg} \
-        features=${features} \
-        model=${model} \
-        period=${domain}_standard \
-        cv=anchored_walk_forward \
-        mlflow.experiment_name="${exp_name}" \
-        sweep=${sweep} \
-        +mode=final_sweep \
-        ++mlflow.run_name="Step4_Final_Sweep_${model}_${target}_${opt_label}" \
-        experiment=${model}_${target} \
-        "${optuna_args[@]}" \
-        $gpu_args \
-        "${extra_args[@]}" \
-        "${dry_run_args[@]}"
-
-    echo "Finished Final Sweep for $model ($domain) - $role."
-    echo ""
-}
-
-# --- Execution ---
-# run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"
-# run_final_sweep "str" "lgbm" "alpha"  "8" "0" "rank_ic_reb_60d_multi_offset_icir_mean" "maximize" "reb_icir"
-# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0" "objective_v2" "maximize" "objv2"
-run_final_sweep "tac" "tcn" "alpha_gr" "3" "0" "RankIC" "maximize" "rankic"
-
-# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"
-# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0" "RankIC" "maximize" "rankic"
+# Examples:
+# run_final_sweep "str" "lgbm" "alpha" "8" "0" \
+#     "rank_ic_reb_60d_multi_offset_icir_mean:maximize:reb_icir"
+#
+# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0" \
+#     "objective_tac_gr_guarded:maximize:guarded"
+#
+# run_final_sweep "tac" "tcn" "alpha_gr" "3" "0" \
+#     "RankIC:maximize:rankic"
+#
+# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0" \
+#     "RankIC:maximize:rankic"
+#
+# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0" \
+#     "RankIC:maximize:rankic"

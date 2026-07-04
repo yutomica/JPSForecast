@@ -136,6 +136,76 @@ def calc_objective_tac(aggregated_metrics):
     return float(score + penalty), float(penalty)
 
 
+def calc_objective_tac_gr_guarded(aggregated_metrics, train_valid_rankic_gap=0.0):
+    """
+    tac_alpha_gr 用のガード付き目的関数。
+
+    gauss-rank 系ターゲットのため RankIC を主軸にしつつ、TopK の
+    コスト控除後 active return が悪い trial を強めに減点する。
+    """
+    m = aggregated_metrics
+    required = [
+        "mean_daily_rankic_mean",
+        "mean_daily_rankic_std",
+        "worst_fold_rankic",
+        "top_quintile_spread_scaled_mean",
+        "top30_gross_active_mean_scaled_mean",
+        "top20_gross_active_mean_scaled_mean",
+        "positive_day_ratio_scaled_mean",
+        "top30_rankic_alpha_scaled_mean",
+    ]
+    for key in required:
+        if key not in m or pd.isna(m[key]):
+            return -999.0, {}
+
+    top30_net_raw = m.get("top30_net_active_mean_raw_mean", m.get("top30_active_mean_raw_mean", np.nan))
+    top20_net_raw = m.get("top20_net_active_mean_raw_mean", m.get("top20_active_mean_raw_mean", np.nan))
+    if pd.isna(top30_net_raw) or pd.isna(top20_net_raw):
+        return -999.0, {}
+
+    mean_rankic = m["mean_daily_rankic_mean"]
+    rankic_std = m["mean_daily_rankic_std"]
+    rankic_stability = mean_rankic - 0.5 * rankic_std
+    worst_fold_rankic = m["worst_fold_rankic"]
+    spread = m["top_quintile_spread_scaled_mean"]
+    top30_gross = m["top30_gross_active_mean_scaled_mean"]
+    top20_gross = m["top20_gross_active_mean_scaled_mean"]
+    positive_day_ratio = m["positive_day_ratio_scaled_mean"]
+    top30_alpha = m["top30_rankic_alpha_scaled_mean"]
+
+    base_score = (
+        0.35 * rankic_stability
+        + 0.20 * worst_fold_rankic
+        + 0.15 * spread
+        + 0.10 * top30_gross
+        + 0.10 * top20_gross
+        + 0.05 * positive_day_ratio
+        + 0.05 * top30_alpha
+    )
+
+    top30_net_penalty = 0.02 * np.clip(-top30_net_raw / 0.005, 0.0, 1.0)
+    top20_net_penalty = 0.01 * np.clip(-top20_net_raw / 0.005, 0.0, 1.0)
+    overfit_penalty = 0.01 * np.clip((train_valid_rankic_gap - 0.08) / 0.05, 0.0, 1.0)
+    rankic_guard_penalty = 0.0
+    if mean_rankic <= 0:
+        rankic_guard_penalty += 0.05
+    if worst_fold_rankic < 0:
+        rankic_guard_penalty += 0.03
+
+    total_penalty = top30_net_penalty + top20_net_penalty + overfit_penalty + rankic_guard_penalty
+    score = base_score - total_penalty
+    components = {
+        "objective_tac_gr_guarded_base_score": float(base_score),
+        "objective_tac_gr_guarded_rankic_stability": float(rankic_stability),
+        "objective_tac_gr_guarded_top30_net_penalty": float(top30_net_penalty),
+        "objective_tac_gr_guarded_top20_net_penalty": float(top20_net_penalty),
+        "objective_tac_gr_guarded_overfit_penalty": float(overfit_penalty),
+        "objective_tac_gr_guarded_rankic_guard_penalty": float(rankic_guard_penalty),
+        "objective_tac_gr_guarded_penalty_total": float(total_penalty),
+    }
+    return float(score), components
+
+
 def calc_composite_tac_objective(pooled_metrics, worst_fold_rankic):
     """Step4 Final Sweep互換のTAC統合指標を計算する。"""
     components = {
@@ -180,6 +250,8 @@ def calculate_final_optimization_score(
 
     obj_tac = 0.0
     penalty_tac = 0.0
+    obj_tac_gr_guarded = 0.0
+    guarded_components = {}
     aggregated_f_metrics = {}
     if fold_metrics_results:
         aggregated_f_metrics = aggregate_fold_metrics(fold_metrics_results)
@@ -196,6 +268,13 @@ def calculate_final_optimization_score(
     train_mean_ic = np.nanmean(train_metrics) if train_metrics else 0.0
     valid_mean_ic = aggregated_f_metrics.get("mean_daily_rankic_mean", 0.0)
     log_metrics["train_valid_rankic_gap"] = train_mean_ic - valid_mean_ic
+    if fold_metrics_results:
+        obj_tac_gr_guarded, guarded_components = calc_objective_tac_gr_guarded(
+            aggregated_f_metrics,
+            train_valid_rankic_gap=log_metrics["train_valid_rankic_gap"],
+        )
+        log_metrics["objective_tac_gr_guarded"] = obj_tac_gr_guarded
+        log_metrics.update(guarded_components)
 
     train_top30_active = (
         np.nanmean([m.get("top30_active_mean_raw", 0.0) for m in fold_metrics_results])
@@ -208,6 +287,10 @@ def calculate_final_optimization_score(
     if opt_metric_name == "objective_tac":
         final_opt_score = obj_tac
         messages.append(f"  🔹 Objective TAC: {final_opt_score:.6f} (Penalty: {penalty_tac:.4f})")
+    elif opt_metric_name == "objective_tac_gr_guarded":
+        final_opt_score = obj_tac_gr_guarded
+        penalty_total = guarded_components.get("objective_tac_gr_guarded_penalty_total", np.nan)
+        messages.append(f"  🔹 Objective TAC GR Guarded: {final_opt_score:.6f} (Penalty: {penalty_total:.4f})")
     elif opt_metric_name == "tac_risk_class_guarded_ap":
         final_opt_score = calc_tac_risk_objective(fold_metrics_results)
         messages.append(f"  🔹 TAC Risk Guarded AP Objective: {final_opt_score:.6f}")
