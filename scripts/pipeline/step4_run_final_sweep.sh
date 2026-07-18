@@ -17,15 +17,17 @@ run_final_sweep() {
     local domain=$1
     local model=$2
     local role=$3
-    local n_jobs=$4
-    local use_gpu=$5
-    shift 5
+    local command_mode=$4
+    local total_trials=$5
+    local n_jobs=$6
+    local use_gpu=$7
+    shift 7
 
     local target="${domain}_${role}"
     local features="features_${model}_${target}_fixed"
     local sweep="${model}_${target}_final"
-    local command_mode="${STEP4_MODE}"
     local data_config="${DATA_CONFIG}"
+    local run_label="${command_mode}"
     local objectives=()
     local extra_args=()
 
@@ -45,7 +47,16 @@ run_final_sweep() {
     fi
 
     if [ "${command_mode}" != "optimize" ] && [ "${command_mode}" != "refine" ]; then
-        echo "ERROR: STEP4_MODE must be 'optimize' or 'refine': ${command_mode}" >&2
+        echo "ERROR: step4_mode must be 'optimize' or 'refine': ${command_mode}" >&2
+        return 1
+    fi
+
+    if [[ ! "${total_trials}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: total_trials must be a positive integer: ${total_trials}" >&2
+        return 1
+    fi
+    if [ "${total_trials}" -le 0 ]; then
+        echo "ERROR: total_trials must be greater than zero: ${total_trials}" >&2
         return 1
     fi
 
@@ -59,6 +70,7 @@ run_final_sweep() {
         --features "${features}"
         --data "${data_config}"
         --n-jobs "${n_jobs}"
+        --run-label "${run_label}"
     )
 
     if [ "${command_mode}" = "optimize" ]; then
@@ -75,9 +87,7 @@ run_final_sweep() {
     if [ "${DRY_RUN}" -eq 1 ]; then
         cmd+=(--dry-run)
     fi
-    if [ -n "${TOTAL_TRIALS}" ]; then
-        cmd+=(--total-trials "${TOTAL_TRIALS}")
-    fi
+    cmd+=(--total-trials "${total_trials}")
 
     for arg in "${extra_args[@]}"; do
         cmd+=(--extra-arg "${arg}")
@@ -90,6 +100,8 @@ run_final_sweep() {
     echo "Sweep: ${sweep}"
     echo "Features: ${features}"
     echo "Mode: ${command_mode}"
+    echo "Run label: ${run_label}"
+    echo "Total trials: ${total_trials}"
     echo "Objectives: ${objectives[*]}"
     echo "n_jobs: ${n_jobs}"
     echo "============================================================"
@@ -113,28 +125,56 @@ export LOKY_MAX_CPU_COUNT=1
 PYTHON_RUNNER=(uv run python)
 TRACKING_URI="sqlite:///mlflow.db"
 OPTUNA_STORAGE="sqlite:///optuna.db"
-STEP4_MODE="optimize"  # "optimize" or "refine"
 DATA_CONFIG="master"
-TOTAL_TRIALS=36
 
+# run_final_sweep domain model role step4_mode total_trials n_jobs use_gpu objectives...
+# step4_mode: "optimize" for the initial HPO, "refine" for the single follow-up HPO.
 # Objective spec format: metric:direction:label
-run_final_sweep "tac" "lgbm" "alpha_gr" "9" "0" \
-    "objective_tac_gr_guarded:maximize:guarded" \
-    "objective_tac:maximize:tac" \
-    "RankIC:maximize:rankic"
+# run_final_sweep "tac" "lgbm" "alpha_gr" "optimize" "36" "9" "0" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
+#     "RankIC:maximize:rankic"
 
-# Examples:
-# run_final_sweep "str" "lgbm" "alpha" "8" "0" \
-#     "rank_ic_reb_60d_multi_offset_icir_mean:maximize:reb_icir"
-#
-# run_final_sweep "tac" "gandalf" "alpha_gr" "6" "0" \
-#     "objective_tac_gr_guarded:maximize:guarded"
-#
-# run_final_sweep "tac" "tcn" "alpha_gr" "3" "0" \
+# run_final_sweep "tac" "lgbm" "alpha_gr" "refine" "72" "9" "0" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
 #     "RankIC:maximize:rankic"
-#
-# run_final_sweep "10d" "lgbm" "alpha_gr" "9" "0" \
+
+# run_final_sweep "tac" "gandalf" "alpha_gr" "optimize" "36" "6" "1" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
 #     "RankIC:maximize:rankic"
-#
-# run_final_sweep "20d" "lgbm" "alpha_gr" "9" "0" \
+
+# run_final_sweep "tac" "gandalf" "alpha_gr" "refine" "36" "6" "1" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
 #     "RankIC:maximize:rankic"
+
+# run_final_sweep "tac" "tcn" "alpha_gr" "optimize" "36" "2" "1" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
+#     "RankIC:maximize:rankic"
+
+# run_final_sweep "tac" "tcn" "alpha_gr" "refine" "36" "2" "1" \
+#     "objective_tac_gr_guarded:maximize:guarded" \
+#     "objective_tac:maximize:tac" \
+#     "RankIC:maximize:rankic"
+
+# run_final_sweep "10d" "lgbm" "alpha_gr" "optimize" "36" "9" "0" \
+#     "objective_10_gr_guarded:maximize:10gr" \
+#     "RankIC:maximize:rankic"
+
+# run_final_sweep "10d" "lgbm" "alpha_gr" "refine" "36" "9" "0" \
+#     "objective_10_gr_guarded:maximize:10gr" \
+#     "RankIC:maximize:rankic"
+
+# run_final_sweep "tac" "lgbm" "tb_7_4" "optimize" "48" "3" "0" \
+#     "objective_tac_tb_hit_guarded:maximize:tb_hit"
+
+run_final_sweep "tac" "lgbm" "tb_7_4" "refine" "36" "3" "0" \
+    "objective_tac_tb_hit_guarded:maximize:tb_hit"
+
+# After reviewing the optimize run, execute the refine pass if the first search
+# has not clearly saturated the search space.
+# run_final_sweep "tac" "lgbm" "tb_7_4" "refine" "48" "3" "0" \
+#     "objective_tac_tb_hit_guarded:maximize:tb_hit"

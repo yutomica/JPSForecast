@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 
 import mlflow
 import yaml
+from mlflow.entities import ViewType
 from mlflow.tracking import MlflowClient
 
 from src.utils.mlflow_utils import get_or_create_parent_run
@@ -131,6 +133,35 @@ def build_grid_paths(sweep_config_path: str | Path, max_paths: int | None = None
     with open(sweep_config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
+    explicit_paths = ((cfg.get("step2_grid") or {}).get("paths") or [])
+    if explicit_paths:
+        paths = []
+        for idx, raw_path in enumerate(explicit_paths):
+            if not isinstance(raw_path, dict):
+                raise ValueError(
+                    f"step2_grid.paths[{idx}] must be a mapping of Hydra override keys to values."
+                )
+            path_params = {
+                _canonical_key(str(key)): value
+                for key, value in raw_path.items()
+            }
+            overrides = [
+                f"{key}={_to_hydra_literal(value)}"
+                for key, value in raw_path.items()
+            ]
+            paths.append(
+                GridPath(
+                    path_index=idx,
+                    params=path_params,
+                    overrides=overrides,
+                    signature=_signature(path_params),
+                )
+            )
+
+        if max_paths is not None:
+            return paths[:max_paths]
+        return paths
+
     params = (((cfg.get("hydra") or {}).get("sweeper") or {}).get("params") or {})
     if not params:
         return []
@@ -211,6 +242,7 @@ def get_completed_signatures(
     experiment_name: str,
     parent_run_id: str,
     grid_keys: list[str],
+    include_deleted: bool = False,
 ) -> set[str]:
     mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient()
@@ -222,6 +254,7 @@ def get_completed_signatures(
         experiment_ids=[experiment.experiment_id],
         filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
         max_results=50000,
+        run_view_type=ViewType.ALL if include_deleted else ViewType.ACTIVE_ONLY,
     )
 
     completed = set()
@@ -238,17 +271,114 @@ def get_completed_signatures(
     return completed
 
 
+def _model_suffix_from_base_args(base_args: list[str], explicit_suffix: str | None = None) -> str:
+    if explicit_suffix:
+        raw_suffix = explicit_suffix
+    else:
+        raw_model = "model"
+        for arg in base_args:
+            if arg.startswith("model="):
+                raw_model = arg.split("=", 1)[1]
+        raw_suffix = raw_model
+
+    suffix = re.sub(r"[^A-Za-z0-9]+", "_", raw_suffix).strip("_").upper()
+    return suffix or "MODEL"
+
+
+def _parse_trial_number(run_name: str | None, model_suffix: str) -> int | None:
+    if not run_name:
+        return None
+    match = re.fullmatch(rf"Trial_(\d+)_{re.escape(model_suffix)}", run_name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def get_existing_trial_numbers(
+    tracking_uri: str,
+    experiment_name: str,
+    parent_run_id: str,
+    model_suffix: str,
+    include_deleted: bool = False,
+) -> tuple[set[int], set[int]]:
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        return set(), set()
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
+        max_results=50000,
+        run_view_type=ViewType.ALL if include_deleted else ViewType.ACTIVE_ONLY,
+    )
+
+    finished_numbers = set()
+    non_finished_numbers = set()
+    for run in runs:
+        run_name = run.data.tags.get("mlflow.runName")
+        number = _parse_trial_number(run_name, model_suffix)
+        if number is not None:
+            if run.info.status == "FINISHED":
+                finished_numbers.add(number)
+            else:
+                non_finished_numbers.add(number)
+    return finished_numbers, non_finished_numbers
+
+
+def assign_trial_child_run_names(
+    tracking_uri: str,
+    experiment_name: str,
+    parent_run_id: str,
+    model_suffix: str,
+    n_runs: int,
+    include_deleted: bool = False,
+    completed_in_grid: int = 0,
+) -> list[str]:
+    used_numbers, non_finished_numbers = get_existing_trial_numbers(
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        parent_run_id=parent_run_id,
+        model_suffix=model_suffix,
+        include_deleted=include_deleted,
+    )
+    if non_finished_numbers:
+        numbers = ", ".join(str(number) for number in sorted(non_finished_numbers))
+        raise RuntimeError(
+            "Non-FINISHED child runs using Trial_* names already exist under "
+            f"parent_run_id={parent_run_id}: {numbers}. "
+            "Delete or resolve those runs before resuming to keep Trial numbers consecutive."
+        )
+    if not used_numbers and completed_in_grid > 0:
+        used_numbers = set(range(completed_in_grid))
+
+    names = []
+    candidate = 0
+    while len(names) < n_runs:
+        if candidate not in used_numbers:
+            names.append(f"Trial_{candidate}_{model_suffix}")
+            used_numbers.add(candidate)
+        candidate += 1
+    return names
+
+
 def build_missing_plan(
     tracking_uri: str,
     experiment_name: str,
     parent_run_name: str,
     sweep_config_path: str | Path,
     max_paths: int | None,
+    parent_run_id: str | None = None,
+    include_deleted: bool = False,
 ) -> tuple[str, list[GridPath], set[str], list[GridPath]]:
+    effective_include_deleted = include_deleted or parent_run_id is not None
     parent_run_id = get_or_create_parent_run(
         tracking_uri=tracking_uri,
         experiment_name=experiment_name,
         parent_run_name=parent_run_name,
+        parent_run_id=parent_run_id,
+        include_deleted=effective_include_deleted,
     )
     grid_paths = build_grid_paths(sweep_config_path, max_paths=max_paths)
     grid_keys = sorted({key for path in grid_paths for key in path.params})
@@ -257,6 +387,7 @@ def build_missing_plan(
         experiment_name=experiment_name,
         parent_run_id=parent_run_id,
         grid_keys=grid_keys,
+        include_deleted=effective_include_deleted,
     )
     missing = [path for path in grid_paths if path.signature not in completed]
     return parent_run_id, grid_paths, completed, missing
@@ -268,18 +399,16 @@ def _run_single_path(
     path: GridPath,
     parent_run_id: str,
     parent_run_name: str,
-    run_label: str,
+    child_run_name: str,
     env: dict[str, str],
 ) -> int:
-    child_run_name = (
-        f"{parent_run_name}_missing_{path.path_index:03d}_"
-        f"{path.signature}_{run_label}"
-    )
     command = [
         sys.executable,
         train_script,
         *base_args,
+        f"++mlflow.parent_run_id={parent_run_id}",
         f"++mlflow.child_run_name={child_run_name}",
+        f"++mlflow.tags.resolved_parent_run_id={parent_run_id}",
         f"++mlflow.tags.step2_grid_signature={path.signature}",
         f"++mlflow.tags.step2_grid_path_index={path.path_index}",
         f"++mlflow.tags.step2_parent_run_name={parent_run_name}",
@@ -309,6 +438,8 @@ def run_missing_paths(args: argparse.Namespace) -> int:
         parent_run_name=args.parent_run_name,
         sweep_config_path=args.sweep_config,
         max_paths=args.max_paths,
+        parent_run_id=args.parent_run_id,
+        include_deleted=args.include_deleted_runs,
     )
 
     completed_in_grid = len([path for path in grid_paths if path.signature in completed])
@@ -322,11 +453,37 @@ def run_missing_paths(args: argparse.Namespace) -> int:
         print("All Step2 grid paths are already completed in MLflow. Skipping.")
         return 0
 
+    run_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.child_run_name_style == "trial":
+        model_suffix = _model_suffix_from_base_args(
+            args.base_arg,
+            explicit_suffix=args.child_run_model_suffix,
+        )
+        child_run_names = assign_trial_child_run_names(
+            tracking_uri=args.tracking_uri,
+            experiment_name=args.experiment_name,
+            parent_run_id=parent_run_id,
+            model_suffix=model_suffix,
+            n_runs=len(missing),
+            include_deleted=args.include_deleted_runs or args.parent_run_id is not None,
+            completed_in_grid=completed_in_grid,
+        )
+    else:
+        child_run_names = [
+            (
+                f"{args.parent_run_name}_missing_{path.path_index:03d}_"
+                f"{path.signature}_{run_label}"
+            )
+            for path in missing
+        ]
+    run_jobs = list(zip(missing, child_run_names))
+
     if args.dry_run:
-        for path in missing:
+        for path, child_run_name in run_jobs:
             print(
                 f"DRY RUN missing path index={path.path_index} "
-                f"signature={path.signature} overrides={' '.join(path.overrides)}"
+                f"signature={path.signature} child_run={child_run_name} "
+                f"overrides={' '.join(path.overrides)}"
             )
         return 0
 
@@ -335,16 +492,15 @@ def run_missing_paths(args: argparse.Namespace) -> int:
     env["PYTHONPATH"] = f"{os.getcwd()}:{env.get('PYTHONPATH', '')}"
 
     max_workers = max(1, int(args.n_jobs))
-    run_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     if max_workers == 1:
-        for path in missing:
+        for path, child_run_name in run_jobs:
             code = _run_single_path(
                 args.train_script,
                 args.base_arg,
                 path,
                 parent_run_id,
                 args.parent_run_name,
-                run_label,
+                child_run_name,
                 env,
             )
             if code != 0:
@@ -361,10 +517,10 @@ def run_missing_paths(args: argparse.Namespace) -> int:
                 path,
                 parent_run_id,
                 args.parent_run_name,
-                run_label,
+                child_run_name,
                 env,
             ): path
-            for path in missing
+            for path, child_run_name in run_jobs
         }
         for future in concurrent.futures.as_completed(future_to_path):
             path = future_to_path[future]
@@ -388,11 +544,19 @@ def main() -> int:
     parser.add_argument("--tracking-uri", required=True)
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--parent-run-name", required=True)
+    parser.add_argument("--parent-run-id", default=None)
+    parser.add_argument("--include-deleted-runs", action="store_true")
     parser.add_argument("--sweep-config", required=True)
     parser.add_argument("--max-paths", type=int, default=None)
     parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--train-script", default="train.py")
     parser.add_argument("--base-arg", action="append", default=[])
+    parser.add_argument(
+        "--child-run-name-style",
+        choices=["missing", "trial"],
+        default="missing",
+    )
+    parser.add_argument("--child-run-model-suffix", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     return run_missing_paths(args)

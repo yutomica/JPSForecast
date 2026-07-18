@@ -832,7 +832,9 @@ class FeatureEngineer:
         self.df[col_name] = self.df['sector_return']
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "SectorRel", "RAW")
-        self.df[col_name] = self.df['close'] / self.df['sector_return']
+        stock_return = grouped_close.pct_change()
+        sector_return = self.df['sector_return'].where(self.df['sector_return'] != 0, np.nan)
+        self.df[col_name] = stock_return / sector_return
         self.new_cols.append(col_name)
         col_name = self._generate_name("BET", "RelSectorReturn1d", "RAW")
         self.df[col_name] = log_return - self.df['sector_return']

@@ -89,6 +89,13 @@ def fit_base_preprocessor(cfg, features_array, col_indices, feature_cols, cat_co
     }
     if cfg.model.data_category == "timeseries":
         prep_params["window_size"] = cfg.hparams.get("window_size", 20)
+        for key in (
+            "sequence_cache_enabled",
+            "sequence_cache_dir",
+            "sequence_cache_wait_seconds",
+        ):
+            if key in cfg.hparams:
+                prep_params[key] = cfg.hparams.get(key)
 
     preprocessor_class = get_class(cfg.model.preprocessor_target)
     base_preprocessor = preprocessor_class(**prep_params)

@@ -1,0 +1,21 @@
+selection:
+  model: tcn
+  domain: tac
+  role: alpha_gr
+  target: tac_alpha_gr
+  selected_at: '20260711_142838'
+  selection_score: 0.4000331149234968
+  selection_score_name: tac_alpha
+  fixed_cv_config: config/cv/fixed.yaml
+  mlflow_run_id: d7d914616fdf49d18d7c3145e7acd291
+  mlflow_parent_run_id: 083a993321d4474eae0b29963f7e8587
+  source_study: final_sweep_tcn_tac_alpha_gr_guarded_optimize_20260708_233218
+  source_trial: 20
+  source_objective: guarded
+  optuna_value: 2.5183533569040004
+  params:
+    +hparams.grad_clip_norm: 1.2949551991327954
+    +hparams.huber_beta: 1.8817558449443554
+    hparams.dropout: 0.20773212117740622
+    hparams.learning_rate: 0.0012644738218789827
+    hparams.weight_decay: 1.6792717679374767e-06

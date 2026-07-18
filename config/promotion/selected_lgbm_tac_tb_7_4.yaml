@@ -1,0 +1,24 @@
+selection:
+  model: lgbm
+  domain: tac
+  role: tb_7_4
+  target: tac_tb_7_4
+  selected_at: '20260715_204134'
+  selection_score: 0.3472058793493915
+  selection_score_name: tac_tb_hit
+  fixed_cv_config: config/cv/fixed.yaml
+  mlflow_run_id: 10af78dd00d7447ba88c03c315482fc0
+  mlflow_parent_run_id: d76f6461bea443808dd8989058cac909
+  source_study: final_sweep_lgbm_tac_tb_7_4_tb_hit_refine_20260713_203851
+  source_trial: 28
+  source_objective: tb_hit
+  optuna_value: 34.83529092933533
+  params:
+    +hparams.min_split_gain: 0.11848088884115643
+    +hparams.scale_pos_weight: 1.0688186381977722
+    hparams.bagging_fraction: 0.8052405657371731
+    hparams.feature_fraction: 0.35439440127947014
+    hparams.is_unbalance: false
+    hparams.lambda_l1: 0.12642168750536778
+    hparams.lambda_l2: 1.198933773499379
+    hparams.learning_rate: 0.006733014377152748

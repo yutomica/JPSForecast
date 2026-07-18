@@ -16,7 +16,6 @@ import random
 import pyarrow.parquet as pq
 from pathlib import Path
 from src.features.engineer import FeatureEngineer
-from src.data_loader.loader import DataLoader
 from src.data_loader.filter import FinancialUniverseEngine
 import logging
 
@@ -31,7 +30,6 @@ SAMPLE_OUTPUT_DIR = PROJECT_DIR / 'data/sample' # サンプル出力先
 
 
 def main(mode = "full"):
-    loader = DataLoader()
     filter = FinancialUniverseEngine()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     chunk_files = sorted(glob.glob(f"{INPUT_DIR}/date_chunks/*.parquet"))
@@ -161,7 +159,19 @@ def main(mode = "full"):
             if n_tac > 0 or n_str > 0:
                 print(f"  [Filter Stats] TAC: {n_tac}, STR: {n_str} / {len(df)} rows")
             # --- 特徴量とメタデータの書き込み ---
-            future_cols = ['Future_High_Tac','Future_Low_Tac','Future_Close_Tac','Future_High_Str','Future_Low_Str','Future_Close_Str']
+            future_cols = [
+                'Future_High_Tac', 'Future_Low_Tac', 'Future_Close_Tac',
+                'Future_High_10d', 'Future_Low_10d', 'Future_Close_10d',
+                'Future_High_20d', 'Future_Low_20d', 'Future_Close_20d',
+                'Future_High_40d', 'Future_Low_40d', 'Future_Close_40d',
+                'Future_High_Str', 'Future_Low_Str', 'Future_Close_Str',
+            ]
+            missing_future_cols = [col for col in future_cols if col not in df.columns]
+            if missing_future_cols:
+                raise KeyError(
+                    "Future horizon columns are missing from standardized data: "
+                    f"{missing_future_cols}"
+                )
             for col in future_cols:
                 df[col] = df[col]/df['Entry_Price']
 

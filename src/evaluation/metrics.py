@@ -1,6 +1,13 @@
 import numpy as np
 import pandas as pd
-from sklearn.metrics import ndcg_score, average_precision_score, precision_recall_curve
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    log_loss,
+    ndcg_score,
+    precision_recall_curve,
+    roc_auc_score,
+)
 from scipy.stats import spearmanr
 
 EXTRA_BIN_META_COLS = ('Future_High', 'Future_Low', 'Future_Close')
@@ -49,6 +56,131 @@ def _safe_ap(y_true, y_score):
     if y_true.sum() == 0:
         return np.nan
     return float(average_precision_score(y_true, y_score))
+
+def _safe_auc(y_true, y_score):
+    y_true = np.asarray(y_true).astype(int)
+    y_score = np.asarray(y_score).astype(float)
+    mask = np.isfinite(y_score)
+    y_true = y_true[mask]
+    y_score = y_score[mask]
+    if len(y_true) == 0 or len(np.unique(y_true)) < 2:
+        return np.nan
+    return float(roc_auc_score(y_true, y_score))
+
+def _as_binary_score(y_pred):
+    """Return a 1D score where larger means higher probability of class 1."""
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_pred.ndim == 2:
+        if y_pred.shape[1] >= 2:
+            return y_pred[:, 1]
+        return y_pred[:, 0]
+    return y_pred
+
+def _as_probability(score):
+    score = np.asarray(score, dtype=float)
+    if len(score) == 0:
+        return score
+    finite = score[np.isfinite(score)]
+    if len(finite) and np.nanmin(finite) >= 0.0 and np.nanmax(finite) <= 1.0:
+        return np.clip(score, 1e-15, 1.0 - 1e-15)
+    return 1.0 / (1.0 + np.exp(-np.clip(score, -50.0, 50.0)))
+
+def _is_tac_tb_binary_target(task_type, target_col, y_true):
+    target_name = str(target_col or "").lower()
+    if "target_tac_tb" not in target_name and "tac_tb" not in target_name:
+        return False
+    if str(task_type).lower() not in {"binary", "classification"}:
+        return False
+    y = pd.Series(y_true).dropna().unique()
+    if len(y) == 0:
+        return False
+    return set(np.asarray(y, dtype=float)).issubset({0.0, 1.0})
+
+def calc_tac_tb_binary_metrics(df, y_pred=None, top_ks=(10, 20, 30), ndcg_ks=(10, 20, 30), date_col='date'):
+    """
+    Metrics for TAC triple-barrier binary targets.
+
+    y_true=1 means the take-profit barrier was hit before the stop-loss barrier.
+    These metrics evaluate event concentration in the top-ranked names, not
+    subsequent close-to-close return.
+    """
+    if df.empty:
+        return {}
+
+    work = df[[date_col, 'pred', 'y_true']].copy()
+    if y_pred is not None:
+        work['score'] = _as_binary_score(y_pred)
+    else:
+        work['score'] = work['pred'].to_numpy(dtype=float)
+
+    work['y_true'] = work['y_true'].astype(float)
+    work = work[np.isfinite(work['score']) & work['y_true'].isin([0.0, 1.0])]
+    if work.empty:
+        return {}
+
+    y = work['y_true'].astype(int).to_numpy()
+    score = work['score'].to_numpy(dtype=float)
+    proba = _as_probability(score)
+    event_rate = float(np.mean(y))
+
+    metrics = {
+        'tb_event_rate': event_rate,
+        'tb_ap': _safe_ap(y, score),
+        'tb_auc': _safe_auc(y, score),
+        'tb_recall_at_precision_20': _recall_at_precision(y, score, min_precision=0.20),
+        'tb_recall_at_precision_30': _recall_at_precision(y, score, min_precision=0.30),
+    }
+    if len(np.unique(y)) >= 2:
+        metrics['tb_logloss'] = float(log_loss(y, proba, labels=[0, 1]))
+        metrics['tb_brier'] = float(brier_score_loss(y, proba))
+    else:
+        metrics['tb_logloss'] = np.nan
+        metrics['tb_brier'] = np.nan
+
+    daily_rows = []
+    for d, grp in work.groupby(date_col):
+        grp = grp.dropna(subset=['score', 'y_true'])
+        n = len(grp)
+        if n == 0:
+            continue
+        positives = float(grp['y_true'].sum())
+        base_rate = positives / n
+        row = {'date': d, 'base_rate': base_rate, 'positives': positives}
+
+        for k in top_ks:
+            if n < k:
+                continue
+            topk = grp.nlargest(k, 'score')
+            hit_rate = float(topk['y_true'].mean())
+            row[f'top{k}_hit_rate'] = hit_rate
+            row[f'top{k}_expected_hits'] = float(topk['y_true'].sum())
+            row[f'top{k}_lift'] = hit_rate / base_rate if base_rate > 0 else np.nan
+            row[f'top{k}_capture'] = float(topk['y_true'].sum() / positives) if positives > 0 else np.nan
+
+        for k in ndcg_ks:
+            if n < k or positives <= 0:
+                continue
+            try:
+                row[f'ndcg_{k}'] = float(ndcg_score([grp['y_true'].to_numpy()], [grp['score'].to_numpy()], k=k))
+            except ValueError:
+                row[f'ndcg_{k}'] = np.nan
+
+        daily_rows.append(row)
+
+    daily = pd.DataFrame(daily_rows)
+    if daily.empty:
+        return metrics
+
+    for k in top_ks:
+        for suffix in ['hit_rate', 'expected_hits', 'lift', 'capture']:
+            col = f'top{k}_{suffix}'
+            metrics[f'tb_{col}'] = float(daily[col].mean()) if col in daily else np.nan
+    for k in ndcg_ks:
+        col = f'ndcg_{k}'
+        metrics[f'tb_{col}'] = float(daily[col].mean()) if col in daily else np.nan
+
+    metrics['tb_positive_day_ratio'] = float((daily['positives'] > 0).mean()) if 'positives' in daily else np.nan
+    return metrics
 
 def _recall_at_precision(y_true, y_score, min_precision=0.80):
     """
@@ -519,6 +651,10 @@ def _add_tac_risk_class_metrics_if_needed(metrics, y_true, y_pred, task_type, ta
     if task_type == 'multiclass' and (target_col is not None and 'tac_risk' in str(target_col)) and y_pred.ndim == 2:
         metrics.update(calc_tac_risk_class_metrics(y_true, y_pred))
 
+def _add_tac_tb_binary_metrics_if_needed(metrics, df_eval, y_true, y_pred, task_type, target_col):
+    if _is_tac_tb_binary_target(task_type, target_col, y_true):
+        metrics.update(calc_tac_tb_binary_metrics(df_eval, y_pred=y_pred))
+
 def _add_drawdown_alert_metrics(metrics, y_ret, y_pred, y_pred_1d, task_type):
     metrics['AP_severe'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.05, 0.07, 0.10], task_type)
     metrics['AP_severe_STR'] = _calc_multi_threshold_ap(y_ret, y_pred, [0.15, 0.20, 0.30], task_type)
@@ -575,6 +711,9 @@ def evaluate_metrics(
 
     # Tac Risk Class Metrics
     _add_tac_risk_class_metrics_if_needed(metrics, y_true, y_pred, task_type, target_col)
+
+    # TAC triple-barrier hit metrics
+    _add_tac_tb_binary_metrics_if_needed(metrics, df_eval, y_true, y_pred, task_type, target_col)
 
     # Drawdown / AP系
     _add_drawdown_alert_metrics(metrics, y_ret, y_pred, y_pred_1d, task_type)

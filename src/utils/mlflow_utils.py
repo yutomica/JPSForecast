@@ -5,6 +5,7 @@ import tempfile
 import pandas as pd
 import contextlib
 import mlflow
+from mlflow.entities import ViewType
 from mlflow.tracking import MlflowClient
 from urllib.parse import urlparse
 from datetime import datetime
@@ -19,7 +20,38 @@ def _sanitize_tracking_uri(uri: str) -> str:
         return f"{uri}{separator}timeout=60"
     return uri
 
-def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name: str = None, parent_run_name: str = None) -> str:
+def _parent_run_score(
+    client: MlflowClient,
+    experiment_id: str,
+    run,
+    include_deleted: bool = False,
+) -> tuple[int, int, int]:
+    """同名の親runが複数ある場合に、resume対象として有利な順序を決める。"""
+    children = client.search_runs(
+        experiment_ids=[experiment_id],
+        filter_string=f"tags.mlflow.parentRunId = '{run.info.run_id}'",
+        max_results=50000,
+        run_view_type=ViewType.ALL if include_deleted else ViewType.ACTIVE_ONLY,
+    )
+    finished_children = sum(child.info.status == "FINISHED" for child in children)
+    status_rank = {
+        "RUNNING": 3,
+        "FINISHED": 2,
+        "FAILED": 1,
+        "KILLED": 1,
+    }.get(run.info.status, 0)
+    start_time = int(run.info.start_time or 0)
+    return finished_children, status_rank, start_time
+
+
+def get_or_create_parent_run(
+    tracking_uri: str,
+    experiment_name: str,
+    study_name: str = None,
+    parent_run_name: str = None,
+    parent_run_id: str = None,
+    include_deleted: bool = False,
+) -> str:
     """親ランのIDを取得または作成する。study_name または parent_run_name が指定された場合は再開・紐付けを試みる。"""
     tracking_uri = _sanitize_tracking_uri(tracking_uri)
     mlflow.set_tracking_uri(tracking_uri)
@@ -31,25 +63,51 @@ def get_or_create_parent_run(tracking_uri: str, experiment_name: str, study_name
     
     mlflow.set_experiment(experiment_name)
     exp = client.get_experiment_by_name(experiment_name)
+
+    if parent_run_id:
+        run = client.get_run(parent_run_id)
+        if str(run.info.experiment_id) != str(exp.experiment_id):
+            raise ValueError(
+                f"Parent run {parent_run_id} belongs to experiment "
+                f"{run.info.experiment_id}, not {exp.experiment_id}."
+            )
+        return str(parent_run_id)
     
     # 既存のランを検索 (Study Name優先、次に Parent Run Name)
     if study_name:
         runs = client.search_runs(
             experiment_ids=[exp.experiment_id],
             filter_string=f"tags.optuna_study_name = '{study_name}'",
-            max_results=1
+            max_results=50000,
+            run_view_type=ViewType.ALL if include_deleted else ViewType.ACTIVE_ONLY,
         )
         if runs:
-            return str(runs[0].info.run_id)
+            selected = max(
+                runs,
+                key=lambda run: _parent_run_score(client, exp.experiment_id, run, include_deleted),
+            )
+            return str(selected.info.run_id)
     
     if parent_run_name:
         runs = client.search_runs(
             experiment_ids=[exp.experiment_id],
             filter_string=f"tags.'mlflow.runName' = '{parent_run_name}'",
-            max_results=1
+            max_results=50000,
+            run_view_type=ViewType.ALL if include_deleted else ViewType.ACTIVE_ONLY,
         )
         if runs:
-            return str(runs[0].info.run_id)
+            selected = max(
+                runs,
+                key=lambda run: _parent_run_score(client, exp.experiment_id, run, include_deleted),
+            )
+            if len(runs) > 1:
+                score = _parent_run_score(client, exp.experiment_id, selected, include_deleted)
+                print(
+                    f"Resolved duplicate parent run name '{parent_run_name}' "
+                    f"to {selected.info.run_id} "
+                    f"(finished_children={score[0]}, status={selected.info.status})."
+                )
+            return str(selected.info.run_id)
             
     # 新規作成
     default_name = f"Sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -68,10 +126,19 @@ if __name__ == "__main__":
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--study-name", default=None)
     parser.add_argument("--parent-run-name", default=None)
+    parser.add_argument("--parent-run-id", default=None)
+    parser.add_argument("--include-deleted-runs", action="store_true")
     args = parser.parse_args()
     
     if args.action == "resolve_parent":
-        print(get_or_create_parent_run(args.tracking_uri, args.experiment_name, args.study_name, args.parent_run_name))
+        print(get_or_create_parent_run(
+            args.tracking_uri,
+            args.experiment_name,
+            args.study_name,
+            args.parent_run_name,
+            args.parent_run_id,
+            args.include_deleted_runs,
+        ))
 
 def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, contextlib.ExitStack]:
     """MLflowの初期設定、実験の復元、Runコンテキスト（親・子）の開始を行う"""
@@ -118,7 +185,7 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
     experiment = client.get_experiment_by_name(cfg.mlflow.experiment_name)
     experiment_id = str(experiment.experiment_id)
 
-    parent_run_id = os.environ.get("MLFLOW_PARENT_RUN_ID")
+    parent_run_id = cfg.mlflow.get("parent_run_id") or os.environ.get("MLFLOW_PARENT_RUN_ID")
     model_name = cfg.model.get("name", "unknown")
     target_col = cfg.target.get("name", "unknown")
     mode = cfg.get("mode", "train")
@@ -138,9 +205,21 @@ def setup_mlflow_run(cfg: DictConfig) -> tuple[MlflowClient, str, str | None, co
 
     stack = contextlib.ExitStack()
     if parent_run_id:
+        parent_run = client.get_run(parent_run_id)
+        if str(parent_run.info.experiment_id) != str(experiment_id):
+            raise ValueError(
+                f"MLflow parent_run_id={parent_run_id} belongs to experiment "
+                f"{parent_run.info.experiment_id}, not {experiment_id}."
+            )
+        if parent_run.info.lifecycle_stage == "deleted":
+            print(f"Restoring deleted parent run: {parent_run_id}")
+            client.restore_run(parent_run_id)
         client.set_tag(parent_run_id, "mlflow.runName", base_run_name)
         stack.enter_context(mlflow.start_run(run_id=parent_run_id))
-        stack.enter_context(mlflow.start_run(run_name=trial_run_name, nested=True))
+        child = stack.enter_context(mlflow.start_run(run_name=trial_run_name, nested=True))
+        mlflow.set_tag("resolved_parent_run_id", parent_run_id)
+        print(f"  🔹 MLflow parent run id: {parent_run_id}")
+        print(f"  🔹 MLflow child run id: {child.info.run_id}")
     else:
         stack.enter_context(mlflow.start_run(run_name=base_run_name))
 

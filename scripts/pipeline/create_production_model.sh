@@ -1,93 +1,75 @@
 #!/bin/bash
-# step6_create_production_model.sh
-# 
-# 承認済み・固定済みのハイパーパラメータと特徴量セットを用い、
-# 全期間（Train+Valid）を使用してプロダクションモデルを本学習します。
-# 学習後のモデルは MLflow の 'Production' ステージに登録されます。
+# create_production_model.sh
 #
-# シード値を変更した複数モデル学習（アンサンブル）をサポートしており、
-# model.ensemble_size 引数でアンサンブル数を指定可能です。
+# Step 6: Production model training.
+# Reads the selected-candidate manifests written by Step5, retrains each
+# selected candidate on Train+Valid with mode=production, then lets train.py
+# register the resulting inference model to MLflow Production.
 
-set -e
+set -euo pipefail
 
-# 環境変数設定
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN=1
+    shift
+fi
+
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+export LOKY_MAX_CPU_COUNT=1
 
-# MLflow設定
 export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
-export PYTHONPATH=$PYTHONPATH:.
+export PYTHONPATH="${PYTHONPATH:-}:."
 
-run_production() {
+PYTHON_RUNNER=(uv run python)
+DATA_CONFIG="master"
+ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-5}"
+
+run_selected_production() {
     local domain=$1
     local model=$2
-    local role=$3 
-    local variant=${4:-"default"}
-    shift 4
-    local extra_args=("$@")
+    local role=$3
+    shift 3
 
     local target="${domain}_${role}"
-    # Step 5 で作成された固定ハイパーパラメータファイルを参照
-    local hparams_fixed="${model}_${target}_${variant}"
-    local features="features_${model}_${target}_fixed"
-    local exp_name="JPSForecast_${target}"
-    local run_name=${MLFLOW_RUN_NAME:-"Step6_Production_${model}_${target}"}
-    
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
-    local child_run_name="Prod_${model}_${timestamp}"
+    local selected_manifest="config/promotion/selected_${model}_${target}.yaml"
+    local cmd=(
+        "${PYTHON_RUNNER[@]}" scripts/pipeline/train_selected_production.py
+        --selected "${selected_manifest}"
+        --tracking-uri "${MLFLOW_TRACKING_URI}"
+        --data "${DATA_CONFIG}"
+        --ensemble-size "${ENSEMBLE_SIZE}"
+    )
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        cmd+=(--dry-run)
+    fi
+
+    for arg in "$@"; do
+        cmd+=(--extra-arg "${arg}")
+    done
 
     echo "============================================================"
-    echo "🚀 Creating PRODUCTION Model: $model ($domain) - $role"
-    echo "   Target   : $target"
-    echo "   HParams  : $hparams_fixed (from Step 5)"
-    echo "   Variant  : $variant"
-    echo "   Experiment: $exp_name"
-    echo "   Run Name : $run_name"
-    echo "   Child Run: $child_run_name"
+    echo "Creating PRODUCTION model from Step5 selection"
+    echo "Target: ${target}"
+    echo "Model: ${model}"
+    echo "Selected manifest: ${selected_manifest}"
+    echo "Ensemble size: ${ENSEMBLE_SIZE}"
     echo "============================================================"
 
-    # 親ランのIDを解決または作成
-    local parent_run_id=$(uv run python -m src.utils.mlflow_utils --action resolve_parent --tracking-uri "${MLFLOW_TRACKING_URI}" --experiment-name "${exp_name}" --parent-run-name "${run_name}")
+    "${cmd[@]}"
 
-    # mode=production を指定
-    # train.py 内で Step 1 (最適Epoch探索) -> Step 2 (全データ本学習) が実行される
-    MLFLOW_PARENT_RUN_ID=$parent_run_id uv run python train.py \
-        domain=${domain} \
-        target=${target} \
-        data=master \
-        features=${features} \
-        model=${model} \
-        hparams=${hparams_fixed} \
-        period=${domain}_standard \
-        cv=fixed \
-        +mode=production \
-        variant=${variant} \
-        mlflow.experiment_name="${exp_name}" \
-        ++mlflow.run_name="${run_name}" \
-        ++mlflow.child_run_name="${child_run_name}" \
-        "${extra_args[@]}"
-
-    echo "✅ Finished Production model creation for $target."
+    echo "Finished Production model creation for ${model} (${domain}) - ${role}."
     echo ""
 }
 
-run_production "tac" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
+# run_selected_production "tac" "lgbm" "alpha_gr"
+# run_selected_production "tac" "gandalf" "alpha_gr"
+# run_selected_production "tac" "tcn" "alpha_gr"
+run_selected_production "10d" "lgbm" "alpha_gr"
 
-run_production "tac" "gandalf" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "tac" "tcn" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "str" "lgbm" "alpha" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "10d" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
-
-run_production "20d" "lgbm" "alpha_gr" "v1_stable" \
-    model.ensemble_size=5
+# Add more targets here after Step5 writes the corresponding
+# config/promotion/selected_${model}_${target}.yaml manifest.

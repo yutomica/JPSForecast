@@ -21,3 +21,4 @@ optuna.db
 log/
 *.xlsx
 *.csv
+reports/

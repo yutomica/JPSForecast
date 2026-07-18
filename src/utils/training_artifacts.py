@@ -10,6 +10,12 @@ from src.evaluation.metrics import calculate_bin_stats
 from src.models.pipeline import EnsembleInferencePipeline
 
 
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _restore_mlflow_logger_levels(env_logging_state):
     env_logging_state["mlflow_models_logger"].setLevel(env_logging_state["prev_models_level"])
     env_logging_state["mlflow_pyfunc_logger"].setLevel(env_logging_state["prev_pyfunc_level"])
@@ -82,9 +88,16 @@ def save_training_artifacts(
     env_logging_state,
 ):
     """学習後にMLflowへ保存する主要成果物をまとめて記録する。"""
+    artifact_cfg = cfg.get("artifacts", {})
+    log_model = _as_bool(artifact_cfg.get("log_model", True))
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         _save_cv_summary(tmp_dir, cv_summaries)
-        _save_inference_pipeline(tmp_dir, fold_pipelines, col_indices, oof_cols, env_logging_state)
+        if log_model:
+            _save_inference_pipeline(tmp_dir, fold_pipelines, col_indices, oof_cols, env_logging_state)
+        else:
+            print("  🔹 Skipping MLflow model artifact logging (artifacts.log_model=false).")
+            _restore_mlflow_logger_levels(env_logging_state)
         _save_bin_analysis(tmp_dir, cfg, bin_stats, test_res)
 
     _save_hydra_config(cfg)

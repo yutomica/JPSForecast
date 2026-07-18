@@ -1,0 +1,5 @@
+[agents]
+# 再帰的なsubagent増殖を防ぎ、root agentへ判断を集約する。
+max_depth = 1
+
+# max_threadsは固定しない。runtime資源、HPO並列数、taskの重さに応じて設定する。

@@ -1,5 +1,9 @@
 import os
+import hashlib
 import joblib
+import json
+import shutil
+import time
 import uuid
 import tempfile
 import numpy as np
@@ -40,6 +44,9 @@ class TCNPreprocessor(BasePreprocessor):
         pad_mode="zero",        # "zero" | "edge"
         boundary_col=None,
         clip_value=10.0,
+        sequence_cache_enabled=False,
+        sequence_cache_dir=None,
+        sequence_cache_wait_seconds=600,
     ):
         super().__init__(save_dir)
         self.feature_cols = feature_cols if feature_cols else []
@@ -50,6 +57,12 @@ class TCNPreprocessor(BasePreprocessor):
         self.pad_mode = pad_mode
         self.boundary_col = boundary_col
         self.clip_value = clip_value
+        self.sequence_cache_enabled = self._as_bool(sequence_cache_enabled)
+        self.sequence_cache_dir = sequence_cache_dir or os.path.join(
+            tempfile.gettempdir(),
+            "jps_tcn_sequence_cache",
+        )
+        self.sequence_cache_wait_seconds = int(sequence_cache_wait_seconds)
 
         self.num_cols = []
         self.cat_maps = {}
@@ -57,6 +70,12 @@ class TCNPreprocessor(BasePreprocessor):
         self.scaler = None
         self.boundary_col_idx_ = None
         self.is_fitted = False
+
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     def _build_scaler(self):
         if self.scaler_type == "robust":
@@ -156,39 +175,89 @@ class TCNPreprocessor(BasePreprocessor):
 
         return X.to_numpy(dtype=np.float32, copy=False)
 
-    def transform(self, data, row_indices=None, col_indices=None):
-        if not self.is_fitted:
-            raise ValueError("Preprocessor must be fitted before transform().")
-            
-        if isinstance(data, (str, os.PathLike)):
-            import pyarrow.dataset as ds
-            dataset = ds.dataset(data, format="parquet")
-            table = dataset.to_table(columns=self.feature_cols)
-            data_arr = table.to_pandas().to_numpy(dtype=np.float32)
-            col_indices = None
-        else:
-            data_arr = data
+    @staticmethod
+    def _hash_array(value) -> str | None:
+        if value is None:
+            return None
+        arr = np.asarray(value)
+        h = hashlib.sha1()
+        h.update(str(arr.shape).encode("utf-8"))
+        h.update(str(arr.dtype).encode("utf-8"))
+        h.update(np.ascontiguousarray(arr).view(np.uint8))
+        return h.hexdigest()
 
-        # --- 推論パス (row_indices is None): 変更なし ---
-        # メモリに収まる小さなDataFrameが渡されることを想定
-        if row_indices is None:
-            df = self._to_dataframe(data_arr, row_indices=None, col_indices=col_indices)
-            arr_2d = self._transform_2d(df)
-            n, f = arr_2d.shape
-            if n < self.window_size:
-                pad = np.zeros((self.window_size - n, f), dtype=np.float32)
-                arr_2d = np.vstack([pad, arr_2d])
-                n = arr_2d.shape[0]
-            idx = np.arange(self.window_size - 1, n)
-            return self._build_sequence_from_2d(arr_2d, idx)
+    def _data_fingerprint(self, data_arr) -> dict:
+        filename = getattr(data_arr, "filename", None)
+        if filename:
+            try:
+                stat = os.stat(filename)
+                return {
+                    "kind": "memmap",
+                    "filename": os.path.abspath(filename),
+                    "mtime_ns": stat.st_mtime_ns,
+                    "size": stat.st_size,
+                    "shape": tuple(data_arr.shape),
+                    "dtype": str(data_arr.dtype),
+                }
+            except OSError:
+                pass
 
-        # --- 学習パス (row_indices is not None): チャンク処理でメモリ効率化 ---
-        row_indices = np.asarray(row_indices, dtype=np.int64)
-        if row_indices.ndim != 1:
-            raise ValueError("row_indices must be 1-dimensional.")
+        return {
+            "kind": type(data_arr).__name__,
+            "object_id": id(data_arr),
+            "shape": tuple(getattr(data_arr, "shape", ())),
+            "dtype": str(getattr(data_arr, "dtype", "")),
+        }
 
-        # Zarr を用いたオンディスクキャッシュ (3D化された時系列ウィンドウ)
-        zarr_dir = os.path.join(tempfile.gettempdir(), f"tcn_cache_{uuid.uuid4().hex}.zarr")
+    def _preprocessor_fingerprint(self) -> dict:
+        scaler_payload = {}
+        if self.scaler is not None:
+            for attr in ("center_", "scale_", "mean_", "var_"):
+                if hasattr(self.scaler, attr):
+                    scaler_payload[attr] = self._hash_array(getattr(self.scaler, attr))
+
+        return {
+            "version": "tcn_sequence_cache_v1",
+            "feature_cols": self.feature_cols,
+            "cat_cols": self.cat_cols,
+            "num_cols": self.num_cols,
+            "cat_maps": self.cat_maps,
+            "window_size": self.window_size,
+            "numeric_impute_strategy": self.numeric_impute_strategy,
+            "scaler_type": self.scaler_type,
+            "pad_mode": self.pad_mode,
+            "boundary_col": self.boundary_col,
+            "boundary_col_idx": self.boundary_col_idx_,
+            "clip_value": self.clip_value,
+            "imputer_statistics": self._hash_array(
+                getattr(self.imputer, "statistics_", None)
+            ),
+            "scaler": scaler_payload,
+        }
+
+    def _sequence_cache_key(self, data_arr, row_indices, col_indices) -> str:
+        h = hashlib.sha1()
+        payload = {
+            "data": self._data_fingerprint(data_arr),
+            "preprocessor": self._preprocessor_fingerprint(),
+            "col_indices": None if col_indices is None else [int(i) for i in col_indices],
+            "n_rows": int(len(row_indices)),
+        }
+        h.update(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
+        h.update(np.ascontiguousarray(row_indices).view(np.uint8))
+        return h.hexdigest()
+
+    def _is_cache_ready(self, zarr_dir, expected_shape) -> bool:
+        complete_path = f"{zarr_dir}.complete"
+        if not os.path.exists(zarr_dir) or not os.path.exists(complete_path):
+            return False
+        try:
+            z = zarr.open(zarr_dir, mode="r")
+            return tuple(z.shape) == tuple(expected_shape)
+        except Exception:
+            return False
+
+    def _build_sequence_zarr(self, zarr_dir, data_arr, row_indices, col_indices):
         z = zarr.open(
             zarr_dir,
             mode='w',
@@ -198,10 +267,10 @@ class TCNPreprocessor(BasePreprocessor):
         )
 
         chunk_size = 10000
+        history_offsets = np.arange(self.window_size - 1, -1, -1, dtype=np.int64)
         for i in range(0, len(row_indices), chunk_size):
             chunk_row_indices = row_indices[i:i + chunk_size]
 
-            history_offsets = np.arange(self.window_size - 1, -1, -1, dtype=np.int64)
             idx_mat = chunk_row_indices[:, None] - history_offsets[None, :]
             valid_mask = idx_mat >= 0
             clipped_idx_mat = np.clip(idx_mat, 0, None)
@@ -242,6 +311,88 @@ class TCNPreprocessor(BasePreprocessor):
 
             z[i:i+chunk_size] = seq
 
+    def _get_or_build_sequence_cache(self, data_arr, row_indices, col_indices):
+        os.makedirs(self.sequence_cache_dir, exist_ok=True)
+        key = self._sequence_cache_key(data_arr, row_indices, col_indices)
+        zarr_dir = os.path.join(self.sequence_cache_dir, f"{key}.zarr")
+        expected_shape = (len(row_indices), self.window_size, len(self.feature_cols))
+
+        if self._is_cache_ready(zarr_dir, expected_shape):
+            print(f"TCN sequence cache hit: {os.path.basename(zarr_dir)}")
+            return zarr_dir
+
+        lock_dir = f"{zarr_dir}.lock"
+        start = time.time()
+        while True:
+            try:
+                os.mkdir(lock_dir)
+                break
+            except FileExistsError:
+                if self._is_cache_ready(zarr_dir, expected_shape):
+                    print(f"TCN sequence cache hit: {os.path.basename(zarr_dir)}")
+                    return zarr_dir
+                if time.time() - start > self.sequence_cache_wait_seconds:
+                    raise TimeoutError(f"Timed out waiting for TCN sequence cache lock: {lock_dir}")
+                time.sleep(2)
+
+        tmp_dir = f"{zarr_dir}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+        try:
+            if self._is_cache_ready(zarr_dir, expected_shape):
+                return zarr_dir
+            if os.path.exists(zarr_dir):
+                shutil.rmtree(zarr_dir, ignore_errors=True)
+            print(f"TCN sequence cache miss: building {os.path.basename(zarr_dir)}")
+            self._build_sequence_zarr(tmp_dir, data_arr, row_indices, col_indices)
+            os.replace(tmp_dir, zarr_dir)
+            with open(f"{zarr_dir}.complete", "w", encoding="utf-8") as f:
+                json.dump({"key": key, "shape": expected_shape}, f)
+            return zarr_dir
+        finally:
+            if os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            try:
+                os.rmdir(lock_dir)
+            except OSError:
+                pass
+
+    def transform(self, data, row_indices=None, col_indices=None):
+        if not self.is_fitted:
+            raise ValueError("Preprocessor must be fitted before transform().")
+            
+        if isinstance(data, (str, os.PathLike)):
+            import pyarrow.dataset as ds
+            dataset = ds.dataset(data, format="parquet")
+            table = dataset.to_table(columns=self.feature_cols)
+            data_arr = table.to_pandas().to_numpy(dtype=np.float32)
+            col_indices = None
+        else:
+            data_arr = data
+
+        # --- 推論パス (row_indices is None): 変更なし ---
+        # メモリに収まる小さなDataFrameが渡されることを想定
+        if row_indices is None:
+            df = self._to_dataframe(data_arr, row_indices=None, col_indices=col_indices)
+            arr_2d = self._transform_2d(df)
+            n, f = arr_2d.shape
+            if n < self.window_size:
+                pad = np.zeros((self.window_size - n, f), dtype=np.float32)
+                arr_2d = np.vstack([pad, arr_2d])
+                n = arr_2d.shape[0]
+            idx = np.arange(self.window_size - 1, n)
+            return self._build_sequence_from_2d(arr_2d, idx)
+
+        # --- 学習パス (row_indices is not None): チャンク処理でメモリ効率化 ---
+        row_indices = np.asarray(row_indices, dtype=np.int64)
+        if row_indices.ndim != 1:
+            raise ValueError("row_indices must be 1-dimensional.")
+
+        if self.sequence_cache_enabled:
+            return self._get_or_build_sequence_cache(data_arr, row_indices, col_indices)
+
+        # Zarr を用いたオンディスクキャッシュ (3D化された時系列ウィンドウ)
+        zarr_dir = os.path.join(tempfile.gettempdir(), f"tcn_cache_{uuid.uuid4().hex}.zarr")
+        self._build_sequence_zarr(zarr_dir, data_arr, row_indices, col_indices)
+
         return zarr_dir
 
     def _build_sequence_from_2d(self, arr_2d: np.ndarray, row_indices: np.ndarray) -> np.ndarray:
@@ -271,6 +422,9 @@ class TCNPreprocessor(BasePreprocessor):
             "imputer": self.imputer,
             "scaler": self.scaler,
             "boundary_col_idx_": self.boundary_col_idx_,
+            "sequence_cache_enabled": self.sequence_cache_enabled,
+            "sequence_cache_dir": self.sequence_cache_dir,
+            "sequence_cache_wait_seconds": self.sequence_cache_wait_seconds,
         }
 
         path = os.path.join(self.save_dir, filename)
@@ -296,5 +450,11 @@ class TCNPreprocessor(BasePreprocessor):
         self.imputer = state["imputer"]
         self.scaler = state["scaler"]
         self.boundary_col_idx_ = state["boundary_col_idx_"]
+        self.sequence_cache_enabled = state.get("sequence_cache_enabled", False)
+        self.sequence_cache_dir = state.get(
+            "sequence_cache_dir",
+            os.path.join(tempfile.gettempdir(), "jps_tcn_sequence_cache"),
+        )
+        self.sequence_cache_wait_seconds = state.get("sequence_cache_wait_seconds", 600)
         self.is_fitted = True
         print(f"TCNPreprocessor loaded from {load_path}")

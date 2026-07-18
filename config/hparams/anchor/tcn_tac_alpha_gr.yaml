@@ -1,4 +1,4 @@
-num_channel: 32
-n_layers: 3
+num_channel: 64
+n_layers: 2
 kernel_size: 3
 window_size: 20

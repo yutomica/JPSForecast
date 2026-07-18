@@ -1,0 +1,41 @@
+# Fixed feature set selected from Step3 MDA for LGBM TAC tb_7_4.
+# Selection rule: robust MDA > 1e-5 with fold-stability checks, plus
+# economically relevant breakout/liquidity features with sufficient mean MDA.
+feature_cols:
+- VOL_Volatility60_RAW
+- EVT_LogDaysSincePub_RAW
+- LIQ_TurnoverRatio_RAW
+- VOL_ReturnVolatility_RAW
+- MOM_Return12m_CSZ
+- VOL_DownsideDev60_TSR_252D
+- MOM_DistHigh250_RAW
+- QLT_SalesGrowthYOY_TSZ_20D
+- SPD_VWAPDev_RAW
+- VOL_ReturnVolatility_TSR_252D
+- VAL_LogPBR_TSR_252D
+- SPD_MarginBuyImpact_CSZ
+- VOL_HistVol20_CSZ
+- CON_ProgressRate_TSZ_20D
+- QLT_OperatingProfitGrowthYOY_TSZ_20D
+- VOL_HistVol20_TSR_252D
+- VOL_RealizedSkew20_TSR_252D
+- VAL_LogPBR_CSR
+- SPD_VWAPDev_CSZ
+- LIQ_VolSpikeCount20_TSR_252D
+- SPD_MarginBuyImpact_RAW
+- QLT_ROA_SNZ
+- QLT_EquityRatio_RAW
+- CON_ProgressRate_CSR
+- LIQ_AbnormalVolume_RAW
+- MOM_NewHighFlag3_CSR
+- GOV_Sector33Code_RAW
+- SEA_DayOfMonth_RAW
+- SEA_DayOfWeek_RAW
+- SEA_MonthInQuarter_RAW
+- SEA_Quarter_RAW
+cat_cols:
+- GOV_Sector33Code_RAW
+- SEA_DayOfMonth_RAW
+- SEA_DayOfWeek_RAW
+- SEA_MonthInQuarter_RAW
+- SEA_Quarter_RAW

@@ -1,0 +1,65 @@
+# @package _global_
+# Step 2: TAC Triple-Barrier 7/4 (LGBM) rough tuning.
+#
+# target_tac_tb_7_4 is a noisy, path-dependent binary event:
+# TP +7% is reached before SL -4% within the TAC horizon.  Keep the anchor
+# trees shallow and require enough observations per leaf so the model learns
+# broad cross-sectional regimes rather than a few episodic breakout names.
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    sampler:
+      _target_: src.utils.samplers.HydraBruteForceSampler
+    storage: "sqlite:///optuna.db"
+    direction: maximize
+    n_trials: 10
+    params: {}
+
+# Step2's mlflow_grid_resume runner uses this explicit grid instead of the
+# Cartesian hydra.sweeper.params above.  A Cartesian product creates many
+# equivalent LightGBM constraints; for example num_leaves=3 makes max_depth=3/4
+# effectively redundant on this data.
+step2_grid:
+  paths:
+    - ++hparams.num_leaves: 3
+      ++hparams.max_depth: 2
+      ++hparams.min_child_samples: 1000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 3
+      ++hparams.min_child_samples: 1000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 15
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 1000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 1000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 3
+      ++hparams.min_child_samples: 3000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 15
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 3000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 3000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 3
+      ++hparams.min_child_samples: 6000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 15
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 6000
+      ++hparams.learning_rate: 0.01
+    - ++hparams.num_leaves: 7
+      ++hparams.max_depth: 4
+      ++hparams.min_child_samples: 6000
+      ++hparams.learning_rate: 0.01

@@ -10,6 +10,7 @@ the same search space for fair comparison.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import math
 import os
@@ -44,8 +45,20 @@ DEFAULT_OBJECTIVES = (
 
 METRIC_KEYS = (
     "optimization_score",
+    "objective_10_gr_guarded",
+    "objective_10d_gr_guarded",
     "objective_tac",
+    "objective_tac_tb_hit_guarded",
     "objective_tac_gr_guarded",
+    "valid_tb_ap_mean",
+    "valid_tb_auc_mean",
+    "valid_tb_logloss_mean",
+    "valid_tb_top10_hit_rate_mean",
+    "valid_tb_top20_hit_rate_mean",
+    "valid_tb_top30_hit_rate_mean",
+    "valid_tb_top30_lift_mean",
+    "valid_tb_top30_capture_mean",
+    "valid_tb_ndcg_30_mean",
     "valid_mean_daily_rankic_mean",
     "valid_mean_daily_rankic_std",
     "valid_worst_fold_rankic",
@@ -78,6 +91,49 @@ class ParamSpec:
     high: float | None = None
     log: bool = False
     tunable: bool = False
+
+
+@dataclass(frozen=True)
+class ParamBounds:
+    low: float | None = None
+    high: float | None = None
+
+
+COMMON_PARAM_BOUNDS: dict[str, ParamBounds] = {
+    "hparams.learning_rate": ParamBounds(1e-8, 1.0),
+    "hparams.weight_decay": ParamBounds(1e-12, 1e-1),
+    "hparams.alpha": ParamBounds(0.01, 10.0),
+    "hparams.dropout": ParamBounds(0.0, 0.95),
+    "hparams.*dropout*": ParamBounds(0.0, 0.95),
+}
+
+
+MODEL_PARAM_BOUNDS: dict[str, dict[str, ParamBounds]] = {
+    "lgbm": {
+        "hparams.learning_rate": ParamBounds(1e-4, 0.2),
+        "hparams.feature_fraction": ParamBounds(0.05, 1.0),
+        "hparams.bagging_fraction": ParamBounds(0.05, 1.0),
+        "hparams.lambda_l1": ParamBounds(0.0, 100.0),
+        "hparams.lambda_l2": ParamBounds(1e-8, 100.0),
+        "hparams.min_split_gain": ParamBounds(0.0, 5.0),
+        "hparams.alpha": ParamBounds(0.05, 5.0),
+    },
+    "gandalf": {
+        "hparams.learning_rate": ParamBounds(1e-6, 2e-2),
+        "hparams.weight_decay": ParamBounds(1e-12, 1e-2),
+        "hparams.gflu_feature_init_sparsity": ParamBounds(0.0, 0.95),
+        "hparams.head_dropout": ParamBounds(0.0, 0.8),
+        "hparams.gflu_dropout": ParamBounds(0.0, 0.8),
+        "hparams.alpha": ParamBounds(0.05, 5.0),
+    },
+    "tcn": {
+        "hparams.learning_rate": ParamBounds(1e-6, 2e-2),
+        "hparams.weight_decay": ParamBounds(1e-12, 1e-2),
+        "hparams.dropout": ParamBounds(0.0, 0.8),
+        "hparams.*dropout*": ParamBounds(0.0, 0.8),
+        "hparams.alpha": ParamBounds(0.05, 5.0),
+    },
+}
 
 
 def safe_label(value: str) -> str:
@@ -128,6 +184,30 @@ def study_prefix(model: str, domain: str, role: str, objective_label: str | None
     return base
 
 
+def build_run_label(args: argparse.Namespace) -> str:
+    return safe_label(args.run_label) if getattr(args, "run_label", None) else "manual"
+
+
+def build_study_name(
+    args: argparse.Namespace,
+    target: str,
+    objective: ObjectiveSpec,
+    timestamp: str,
+) -> str:
+    run_label = build_run_label(args)
+    return f"final_sweep_{args.model}_{target}_{objective.label}_{run_label}_{timestamp}"
+
+
+def build_parent_run_name(
+    args: argparse.Namespace,
+    target: str,
+    objective: ObjectiveSpec,
+    timestamp: str,
+) -> str:
+    run_label = build_run_label(args)
+    return f"Step4_{args.model}_{target}_{objective.label}_{run_label}_{timestamp}"
+
+
 def resolve_storage(storage: str) -> str:
     return storage
 
@@ -137,8 +217,12 @@ def latest_study_name(storage: str, prefix: str) -> str:
     matches = [s for s in summaries if s.study_name.startswith(prefix)]
     if not matches:
         raise ValueError(f"No Optuna studies found with prefix: {prefix}")
-    latest = max(matches, key=lambda s: (s.datetime_start or datetime.min, s.study_name))
-    return latest.study_name
+    candidates = sorted(matches, key=lambda s: (s.datetime_start or datetime.min, s.study_name), reverse=True)
+    for candidate in candidates:
+        study = optuna.load_study(study_name=candidate.study_name, storage=storage)
+        if any(t.state.name == "COMPLETE" and t.value is not None for t in study.trials):
+            return candidate.study_name
+    raise ValueError(f"No completed Optuna studies found with prefix: {prefix}")
 
 
 def study_to_frame(study: optuna.Study) -> pd.DataFrame:
@@ -252,7 +336,73 @@ def numeric_position(value: float, low: float, high: float, log: bool) -> float:
     return (value - low) / (high - low)
 
 
-def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame) -> tuple[str, str]:
+def canonical_param_key(key: str) -> str:
+    return key[1:] if key.startswith("+") else key
+
+
+def lookup_param_bounds(model: str | None, key: str) -> ParamBounds:
+    normalized_model = safe_label(model or "")
+    normalized_key = canonical_param_key(key)
+    candidates: list[dict[str, ParamBounds]] = []
+    if normalized_model in MODEL_PARAM_BOUNDS:
+        candidates.append(MODEL_PARAM_BOUNDS[normalized_model])
+    candidates.append(COMMON_PARAM_BOUNDS)
+
+    for rules in candidates:
+        if normalized_key in rules:
+            return rules[normalized_key]
+        for pattern, bounds in rules.items():
+            if fnmatch.fnmatch(normalized_key, pattern):
+                return bounds
+    return ParamBounds()
+
+
+def clamp_range_to_bounds(
+    new_low: float,
+    new_high: float,
+    anchor: float,
+    bounds: ParamBounds,
+    log: bool,
+) -> tuple[float, float, bool]:
+    min_allowed = bounds.low
+    max_allowed = bounds.high
+    if log:
+        min_allowed = max(min_allowed if min_allowed is not None else 1e-8, 1e-8)
+
+    clipped = False
+    if min_allowed is not None and new_low < min_allowed:
+        new_low = min_allowed
+        clipped = True
+    if max_allowed is not None and new_high > max_allowed:
+        new_high = max_allowed
+        clipped = True
+
+    if new_high > new_low:
+        return new_low, new_high, clipped
+
+    lower_floor = min_allowed if min_allowed is not None else -math.inf
+    upper_ceiling = max_allowed if max_allowed is not None else math.inf
+    if math.isfinite(lower_floor) and math.isfinite(upper_ceiling) and upper_ceiling > lower_floor:
+        anchor = min(max(anchor, lower_floor), upper_ceiling)
+        fallback_width = max((upper_ceiling - lower_floor) * 0.05, abs(anchor) * 0.1, 1e-6)
+        new_low = max(lower_floor, anchor - fallback_width / 2)
+        new_high = min(upper_ceiling, anchor + fallback_width / 2)
+        if new_high <= new_low:
+            new_low, new_high = lower_floor, upper_ceiling
+    else:
+        fallback_width = max(abs(anchor) * 0.1, 1e-6)
+        new_low = anchor
+        new_high = anchor + fallback_width
+        if min_allowed is not None:
+            new_low = max(new_low, min_allowed)
+            new_high = max(new_high, new_low + fallback_width)
+        if max_allowed is not None:
+            new_high = min(new_high, max_allowed)
+            new_low = min(new_low, new_high - fallback_width)
+    return new_low, new_high, True
+
+
+def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame, model: str | None = None) -> tuple[str, str]:
     if not spec.tunable or spec.low is None or spec.high is None or spec.key not in complete_df:
         return str(spec.raw), "fixed or unsupported search expression"
 
@@ -285,12 +435,12 @@ def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame) -> tuple[str, 
         log_width = log_high - log_low
         if pos_best <= 0.20 or pos_median <= 0.30:
             new_low = math.exp(log_low - 0.60 * log_width)
-            new_high = math.exp(log_low + 0.65 * log_width)
-            reason_parts.append("expanded lower log-bound")
+            new_high = high
+            reason_parts.append("expanded lower log-bound; preserved upper side")
         elif pos_best >= 0.80 or pos_median >= 0.70:
-            new_low = math.exp(log_high - 0.65 * log_width)
+            new_low = low
             new_high = math.exp(log_high + 0.60 * log_width)
-            reason_parts.append("expanded upper log-bound")
+            reason_parts.append("expanded upper log-bound; preserved lower side")
         else:
             log_top = [math.log(v) for v in top_values if v > 0]
             center = float(np.median(log_top))
@@ -302,12 +452,12 @@ def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame) -> tuple[str, 
     else:
         if pos_best <= 0.20 or pos_median <= 0.30:
             new_low = low - 0.50 * width
-            new_high = low + 0.65 * width
-            reason_parts.append("expanded lower bound")
+            new_high = high
+            reason_parts.append("expanded lower bound; preserved upper side")
         elif pos_best >= 0.80 or pos_median >= 0.70:
-            new_low = high - 0.65 * width
+            new_low = low
             new_high = high + 0.50 * width
-            reason_parts.append("expanded upper bound")
+            reason_parts.append("expanded upper bound; preserved lower side")
         else:
             center = median_top
             half = max(0.30 * width, (max_top - min_top) * 0.75)
@@ -317,6 +467,13 @@ def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame) -> tuple[str, 
 
     if low >= 0:
         new_low = max(0.0, new_low)
+    bounds = lookup_param_bounds(model, spec.key)
+    new_low, new_high, clipped = clamp_range_to_bounds(new_low, new_high, best_value, bounds, spec.log)
+    if clipped:
+        reason_parts.append(
+            f"clipped to safe bounds [{bounds.low if bounds.low is not None else '-inf'}, "
+            f"{bounds.high if bounds.high is not None else 'inf'}]"
+        )
     if new_high <= new_low:
         new_high = new_low + max(abs(new_low) * 0.1, 1e-6)
 
@@ -327,12 +484,16 @@ def propose_one_range(spec: ParamSpec, complete_df: pd.DataFrame) -> tuple[str, 
     return expression, "; ".join(reason_parts)
 
 
-def propose_params(config: dict[str, Any], complete_df: pd.DataFrame) -> tuple[dict[str, Any], dict[str, str]]:
+def propose_params(
+    config: dict[str, Any],
+    complete_df: pd.DataFrame,
+    model: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
     specs = param_specs(config)
     proposed: dict[str, Any] = {}
     reasons: dict[str, str] = {}
     for key, spec in specs.items():
-        value, reason = propose_one_range(spec, complete_df)
+        value, reason = propose_one_range(spec, complete_df, model=model)
         proposed[key] = value
         reasons[key] = reason
     return proposed, reasons
@@ -590,7 +751,7 @@ def command_propose(args: argparse.Namespace) -> int:
     if complete_df.empty:
         raise RuntimeError(f"No complete trials found in study: {study_name}")
 
-    proposed, reasons = propose_params(config, complete_df)
+    proposed, reasons = propose_params(config, complete_df, model=args.model)
     out_path = resolve_output_sweep_path(args.output_sweep)
     n_trials = args.n_trials if args.n_trials is not None else get_nested(config, ("hydra", "sweeper", "n_trials"))
     write_generated_sweep(config, proposed, out_path, study_name, reasons, n_trials)
@@ -632,8 +793,9 @@ def command_optimize(args: argparse.Namespace) -> int:
         study_name = (
             args.study_name
             if len(objectives) == 1 and args.study_name
-            else f"final_sweep_{args.model}_{target}_{objective.label}_{timestamp}"
+            else build_study_name(args, target, objective, timestamp)
         )
+        parent_run_name = build_parent_run_name(args, target, objective, timestamp)
         completed = get_trial_count(study_name, args.storage, state="COMPLETE")
         total_trials = args.n_trials or args.total_trials
         if total_trials is None:
@@ -662,6 +824,7 @@ def command_optimize(args: argparse.Namespace) -> int:
                 tracking_uri=args.tracking_uri,
                 experiment_name=experiment,
                 study_name=study_name,
+                parent_run_name=parent_run_name,
             )
             run_env["MLFLOW_PARENT_RUN_ID"] = parent_run_id
         run_env["TRIAL_OFFSET"] = str(completed)
@@ -686,7 +849,7 @@ def command_optimize(args: argparse.Namespace) -> int:
             f"mlflow.experiment_name={experiment}",
             f"sweep={sweep_name}",
             "+mode=final_sweep",
-            f"++mlflow.run_name=Step4_Final_Sweep_{args.model}_{target}_{objective.label}",
+            f"++mlflow.run_name={parent_run_name}",
             f"experiment={args.model}_{target}",
             f"hydra.sweeper.storage={args.storage}",
             f"hydra.sweeper.study_name={study_name}",
@@ -703,6 +866,7 @@ def command_optimize(args: argparse.Namespace) -> int:
         print("=" * 80)
         print(f"Running objective={objective.metric} direction={objective.direction} label={objective.label}")
         print(f"Study: {study_name}")
+        print(f"MLflow parent run: {parent_run_name}")
         print(f"Sweep: {sweep_name}")
         print(f"Trials: completed={completed}, remaining={remaining}, total={total_trials}")
         print("Command:", " ".join(command))
@@ -715,13 +879,68 @@ def command_optimize(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_refine(args: argparse.Namespace) -> int:
+def clone_args(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def objective_to_spec(objective: ObjectiveSpec) -> str:
+    return f"{objective.metric}:{objective.direction}:{objective.label}"
+
+
+def output_sweep_for_objective(
+    args: argparse.Namespace,
+    objective: ObjectiveSpec,
+    timestamp: str,
+    n_objectives: int,
+) -> str:
     if not args.output_sweep:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_sweep = f"generated/{args.model}_{target_name(args.domain, args.role)}_refined_{stamp}"
-    command_propose(args)
-    args.sweep = sweep_group_from_path(resolve_output_sweep_path(args.output_sweep))
-    return command_optimize(args)
+        target = target_name(args.domain, args.role)
+        return f"generated/{args.model}_{target}_{objective.label}_refined_{timestamp}"
+    if n_objectives == 1:
+        return args.output_sweep
+
+    path = Path(args.output_sweep)
+    if path.suffix:
+        return str(path.with_name(f"{path.stem}_{objective.label}{path.suffix}"))
+    return f"{args.output_sweep}_{objective.label}"
+
+
+def command_refine(args: argparse.Namespace) -> int:
+    objectives = [parse_objective_spec(v) for v in (args.objective or DEFAULT_OBJECTIVES)]
+    if len(objectives) > 1 and args.study_name:
+        raise ValueError("--study-name cannot be used with multiple objectives in refine mode.")
+    if len(objectives) > 1 and args.study_prefix:
+        raise ValueError("--study-prefix cannot be used with multiple objectives in refine mode.")
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    source_run_label = safe_label(args.refine_source_run_label)
+    for objective in objectives:
+        output_sweep = output_sweep_for_objective(args, objective, stamp, len(objectives))
+        propose_args = clone_args(
+            args,
+            output_sweep=output_sweep,
+            study_prefix=f"{study_prefix(args.model, args.domain, args.role, objective.label)}_{source_run_label}_",
+            objective_label=objective.label,
+            direction=objective.direction,
+        )
+        command_propose(propose_args)
+
+        sweep_name = sweep_group_from_path(resolve_output_sweep_path(output_sweep))
+        optimize_args = clone_args(
+            args,
+            objective=[objective_to_spec(objective)],
+            sweep=sweep_name,
+            study_name=None,
+            study_prefix=None,
+            objective_label=None,
+            direction=None,
+        )
+        result = command_optimize(optimize_args)
+        if result != 0:
+            return result
+    return 0
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -743,6 +962,7 @@ def add_execution_args(parser: argparse.ArgumentParser, *, include_sweep: bool) 
     parser.add_argument("--objective", action="append", help="metric:direction:label. Can be repeated.")
     if include_sweep:
         parser.add_argument("--sweep", default=None, help="Hydra sweep config group, e.g. lgbm_tac_alpha_gr_final.")
+    parser.add_argument("--run-label", default=None, help="Execution label used in study and MLflow parent run names.")
     parser.add_argument("--features", default=None)
     parser.add_argument("--data", default="master")
     parser.add_argument("--n-jobs", type=int, default=1)
@@ -780,6 +1000,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(refine)
     add_execution_args(refine, include_sweep=False)
     refine.add_argument("--output-sweep", default=None)
+    refine.add_argument(
+        "--refine-source-run-label",
+        default="optimize",
+        help="Run label used to select source studies for refine mode.",
+    )
     refine.set_defaults(func=command_refine)
     return parser
 

@@ -1,0 +1,22 @@
+selection:
+  model: gandalf
+  domain: tac
+  role: alpha_gr
+  target: tac_alpha_gr
+  selected_at: '20260705_140305'
+  selection_score: 0.43432934027887576
+  selection_score_name: tac_alpha
+  fixed_cv_config: config/cv/fixed.yaml
+  mlflow_run_id: 54111445289e4d4f96da32daa2ecaeb5
+  mlflow_parent_run_id: 33445baf31e94fb0aec1e847a2e71bf1
+  source_study: final_sweep_gandalf_tac_alpha_gr_guarded_refine_20260705_083905
+  source_trial: 28
+  source_objective: guarded
+  optuna_value: 1.7126985639546108
+  params:
+    +hparams.alpha: 1.7351916207816696
+    hparams.gflu_dropout: 0.11958265362110782
+    hparams.gflu_feature_init_sparsity: 0.1821679267802089
+    hparams.head_dropout: 0.36954087056034984
+    hparams.learning_rate: 0.0007918879402791451
+    hparams.weight_decay: 3.315935286203283e-08

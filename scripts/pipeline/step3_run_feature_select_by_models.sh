@@ -57,12 +57,15 @@ run_feature_select() {
 }
 
 # --- Execution ---
-run_feature_select "tac" "lgbm" "alpha_gr" "0"
+# run_feature_select "tac" "lgbm" "alpha_gr" "0"
 # run_feature_select "str" "lgbm" "alpha"  "0" \
 #     ++hparams.num_boost_round=1000 
 # run_feature_select "tac" "gandalf" "alpha_gr"  "1"
 
 # run_feature_select "tac" "tcn" "alpha_gr" "1"
 # run_feature_select "10d" "lgbm" "alpha_gr" "0"
+run_feature_select "tac" "lgbm" "tb_7_4" "0" \
+  ++hparams.is_unbalance=false \
+  ++hparams.scale_pos_weight=3.0
 # run_feature_select "20d" "lgbm" "alpha_gr" "0"
 # run_feature_select "40d" "lgbm" "alpha_gr" "0"

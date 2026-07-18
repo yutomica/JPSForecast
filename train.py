@@ -29,6 +29,144 @@ from src.utils.production_training import train_production_fold
 from src.utils.training_artifacts import save_training_artifacts
 
 
+def select_bin_analysis_data(full_res_df: pd.DataFrame, cv_method: str, mode: str | None) -> tuple[str, pd.DataFrame]:
+    """Return the phase used for post-training bin analysis and its rows."""
+    validation_phase_modes = {"production", "candidate_selection"}
+    validation_phase_cv_methods = {"purged_kfold", "cpcv", "anchored_walk_forward"}
+
+    preferred_phase = (
+        "valid"
+        if cv_method in validation_phase_cv_methods or mode in validation_phase_modes
+        else "test"
+    )
+    selected = full_res_df[full_res_df["phase"] == preferred_phase]
+    if preferred_phase == "test" and selected.empty:
+        fallback = full_res_df[full_res_df["phase"] == "valid"]
+        if not fallback.empty:
+            print(
+                "⚠️ WARNING: test phase is empty for bin analysis; "
+                "falling back to validation phase."
+            )
+            return "valid", fallback
+    return preferred_phase, selected
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _validate_target_horizon(cfg: DictConfig, domain_name: str, horizon: int) -> None:
+    target_horizon = cfg.target.get("prediction_horizon", None)
+    if target_horizon is None:
+        return
+    if int(target_horizon) != horizon:
+        raise ValueError(
+            f"Domain/target horizon mismatch: domain={domain_name} uses {horizon}d "
+            f"but target={cfg.target.name} declares prediction_horizon={target_horizon}."
+        )
+
+
+def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
+    domain_name = str(cfg.domain.name).upper()
+    interval_cfg = cfg.get("interval", {})
+
+    if domain_name == "TAC":
+        horizon = 5
+        interval = interval_cfg.get("tac", 5)
+        if cfg.model.data_category == "timeseries":
+            interval = 20
+        _validate_target_horizon(cfg, domain_name, horizon)
+        return {
+            "domain_name": domain_name,
+            "mask_col": "is_candidate_tac",
+            "future_suffix": "Tac",
+            "horizon": horizon,
+            "interval": interval,
+        }
+
+    if domain_name == "STR":
+        horizon = 60
+        _validate_target_horizon(cfg, domain_name, horizon)
+        return {
+            "domain_name": domain_name,
+            "mask_col": "is_candidate_str",
+            "future_suffix": "Str",
+            "horizon": horizon,
+            "interval": interval_cfg.get("str", 20),
+        }
+
+    horizon_by_domain = {"10D": 10, "20D": 20, "40D": 40}
+    if domain_name in horizon_by_domain:
+        horizon = horizon_by_domain[domain_name]
+        _validate_target_horizon(cfg, domain_name, horizon)
+        sampling_cfg = cfg.get("preprocess", {}).get("sampling", {})
+        return {
+            "domain_name": domain_name,
+            "mask_col": "is_candidate_tac",
+            "future_suffix": f"{horizon}d",
+            "horizon": horizon,
+            "interval": sampling_cfg.get("interval", horizon),
+        }
+
+    raise ValueError(
+        f"Unsupported domain: {cfg.domain.name}. "
+        "Expected one of TAC, STR, 10D, 20D, 40D."
+    )
+
+
+def _attach_domain_future_columns(meta_df: pd.DataFrame, cfg: DictConfig) -> tuple[pd.DataFrame, pd.Series, int, int]:
+    spec = _resolve_domain_metadata_spec(cfg)
+    future_cols = {
+        "Future_High": f"Future_High_{spec['future_suffix']}",
+        "Future_Low": f"Future_Low_{spec['future_suffix']}",
+        "Future_Close": f"Future_Close_{spec['future_suffix']}",
+    }
+    required_cols = [spec["mask_col"], *future_cols.values()]
+    missing_cols = [col for col in required_cols if col not in meta_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Required metadata columns are missing for domain={spec['domain_name']}: "
+            f"{missing_cols}. Regenerate index_meta.parquet via scripts/pipeline/run_data_pipeline.sh."
+        )
+
+    meta_df = meta_df.copy()
+    for target_col, source_col in future_cols.items():
+        meta_df[target_col] = meta_df[source_col]
+
+    mask = meta_df[spec["mask_col"]].eq(True)
+    print(
+        "  - Future metadata: "
+        f"{future_cols['Future_High']}/{future_cols['Future_Low']}/{future_cols['Future_Close']} "
+        "-> Future_High/Future_Low/Future_Close"
+    )
+    print(f"  - Candidate mask: {spec['mask_col']}, horizon={spec['horizon']}d")
+    return meta_df, mask, spec["horizon"], spec["interval"]
+
+
+def should_cleanup_zarr_cache(path: str, cfg: DictConfig) -> bool:
+    """永続TCN sequence cacheは残し、fold単位の一時Zarrだけ削除する。"""
+    if not isinstance(path, str) or not path.endswith(".zarr"):
+        return False
+
+    hparams = cfg.get("hparams", {})
+    if _as_bool(hparams.get("sequence_cache_enabled", False)):
+        cache_dir = hparams.get(
+            "sequence_cache_dir",
+            os.path.join(tempfile.gettempdir(), "jps_tcn_sequence_cache"),
+        )
+        try:
+            cache_root = Path(str(cache_dir)).resolve()
+            cache_path = Path(path).resolve()
+            if cache_path.is_relative_to(cache_root):
+                return False
+        except OSError:
+            pass
+
+    return os.path.exists(path)
+
+
 def train(cfg: DictConfig) -> float:
     client, experiment_id, parent_run_id, stack = setup_mlflow_run(cfg)
 
@@ -58,27 +196,9 @@ def train(cfg: DictConfig) -> float:
         master_dir = Path(cfg.data.path)
         meta_df = pd.read_parquet(master_dir / "index_meta.parquet")
         meta_df = meta_df.reset_index(drop=True)
-        # ドメイン（戦術/戦略）に応じてフィルタフラグを選択
+        # ドメインに応じて候補マスクと評価用Future列を選択
         print(f"📊 Domain: {cfg.domain.name}")
-        if cfg.domain.name == 'TAC':
-            mask = meta_df['is_candidate_tac'] == True
-            meta_df = meta_df.rename(columns={
-                'Future_High_Tac':'Future_High',
-                'Future_Low_Tac':'Future_Low',
-                'Future_Close_Tac':'Future_Close',
-            })
-            horizon = 5  # 5日間の予測期間
-            interval = cfg.get("interval", {}).get("tac", 5)
-            if cfg.model.data_category == 'timeseries': interval = 20
-        else:
-            mask = meta_df['is_candidate_str'] == True
-            meta_df = meta_df.rename(columns={
-                'Future_High_Str':'Future_High',
-                'Future_Low_Str':'Future_Low',
-                'Future_Close_Str':'Future_Close',
-            })
-            horizon = 60 # 60日間の予測期間
-            interval = cfg.get("interval", {}).get("str", 20)
+        meta_df, mask, horizon, interval = _attach_domain_future_columns(meta_df, cfg)
 
         # --- サンプリング ---
         # ユニバース選定
@@ -163,6 +283,8 @@ def train(cfg: DictConfig) -> float:
 
         # --- モデルの学習 ---
         print(f"🤖 Training model: {cfg.model.name}")
+        artifact_cfg = cfg.get("artifacts", {})
+        log_model_artifact = _as_bool(artifact_cfg.get("log_model", True))
         models = []
         all_results = []
         valid_metrics = []
@@ -324,12 +446,13 @@ def train(cfg: DictConfig) -> float:
             
             # 中間生成されたZarrキャッシュのクリーンアップ
             for x_cache in [X_train, X_valid, X_test]:
-                if isinstance(x_cache, str) and x_cache.endswith('.zarr') and os.path.exists(x_cache):
+                if should_cleanup_zarr_cache(x_cache, cfg):
                     shutil.rmtree(x_cache, ignore_errors=True)
             del X_train, X_valid, X_test
             gc.collect()
-            models.append(copy.deepcopy(model))
-            fold_pipelines.append(FoldPipeline(preprocessor, model))
+            if log_model_artifact:
+                models.append(copy.deepcopy(model))
+                fold_pipelines.append(FoldPipeline(preprocessor, model))
 
         # --- スクリーニング結果の集計と保存 ---
         if cfg.get("mode") == "feature_screening":
@@ -353,10 +476,15 @@ def train(cfg: DictConfig) -> float:
             
         # --- ビン分析 ---
         full_res_df = pd.concat(all_results, ignore_index=True)
-        if cv_method in ["purged_kfold", "cpcv", "anchored_walk_forward"] or cfg.get("mode") == "production":
-            test_res = full_res_df[full_res_df['phase'] == 'valid']
-        else: 
-            test_res = full_res_df[full_res_df['phase'] == 'test']
+        bin_analysis_phase, test_res = select_bin_analysis_data(
+            full_res_df=full_res_df,
+            cv_method=cv_method,
+            mode=cfg.get("mode"),
+        )
+        mlflow.log_param("bin_analysis_phase", bin_analysis_phase)
+        mlflow.log_metric("bin_analysis_rows", float(len(test_res)))
+        if test_res.empty:
+            print("⚠️ WARNING: No rows available for bin analysis artifact.")
         if cfg.get("mode") == "target_probe":
             max_fold = test_res['fold'].max()
             metrics = ['sample_count', 'target_mean', 'Future_High_mean', 'Future_Low_mean', 'Future_Close_mean']

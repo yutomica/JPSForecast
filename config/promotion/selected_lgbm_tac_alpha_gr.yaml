@@ -1,0 +1,23 @@
+selection:
+  model: lgbm
+  domain: tac
+  role: alpha_gr
+  target: tac_alpha_gr
+  selected_at: '20260705_135937'
+  selection_score: 0.5566275387819563
+  selection_score_name: tac_alpha
+  fixed_cv_config: config/cv/fixed.yaml
+  mlflow_run_id: ad6b0a3b650545f499dae646d8532559
+  mlflow_parent_run_id: f28b3d624a704e4097247bf747aa637a
+  source_study: final_sweep_lgbm_tac_alpha_gr_tac_refine_20260705_020314
+  source_trial: 60
+  source_objective: tac
+  optuna_value: 1.5115171571555126
+  params:
+    +hparams.alpha: 1.7895945749841544
+    +hparams.min_split_gain: 0.022280672954768134
+    hparams.bagging_fraction: 0.6835649791022007
+    hparams.feature_fraction: 0.10808733705799237
+    hparams.lambda_l1: 10.297428982623023
+    hparams.lambda_l2: 0.9689180472956123
+    hparams.learning_rate: 0.01865013409995008

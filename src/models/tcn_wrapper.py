@@ -136,6 +136,7 @@ class TCNWrapper(BaseModelWrapper):
         self.metric_direction = params.pop("metric_direction", "minimize")
         self.early_stopping_ema_alpha = float(params.pop("early_stopping_ema_alpha", 1.0))
         self.ensemble_size = int(params.pop("ensemble_size", 1))
+        self.log_learning_curve = bool(params.pop("log_learning_curve", True))
 
         if self.device_name == "auto":
             if torch.cuda.is_available():
@@ -406,7 +407,8 @@ class TCNWrapper(BaseModelWrapper):
                     if wait >= self.patience: break
 
             self.model.load_state_dict(best_state); self.model.eval(); self.models.append(copy.deepcopy(self.model))
-            if s_idx == 0: self._log_learning_curve(model_idx)
+            if s_idx == 0 and self.log_learning_curve:
+                self._log_learning_curve(model_idx)
             self._create_feature_importance_df(); all_feature_importances.append(self.feature_importances_)
             del best_state, optimizer; gc.collect()
 

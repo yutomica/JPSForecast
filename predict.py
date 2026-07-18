@@ -36,6 +36,103 @@ OUTPUT_DIR = "./predictions"
 # 警告抑制
 warnings.filterwarnings("ignore")
 
+def _string_key(value):
+    return str(value) if pd.notna(value) else np.nan
+
+
+def attach_symbol_metadata(df_ohlcv: pd.DataFrame, all_symbols: pd.DataFrame) -> pd.DataFrame:
+    """Attach symbol metadata without clobbering PIT sector codes from OHLCV."""
+    df = df_ohlcv.copy()
+    df['scode'] = df['scode'].astype(str)
+
+    if all_symbols is None or all_symbols.empty:
+        if 'sector33_code' not in df.columns:
+            df['sector33_code'] = np.nan
+        return df
+
+    symbol_meta = all_symbols.copy()
+    symbol_meta['scode'] = symbol_meta['scode'].astype(str)
+    if 'sector33_code' in symbol_meta.columns:
+        symbol_meta['sector33_code'] = symbol_meta['sector33_code'].map(_string_key)
+    symbol_meta = symbol_meta.drop_duplicates(subset='scode', keep='last')
+
+    # fetch_batch_data() already attaches point-in-time sector33_code. Prefer it
+    # and only use scode_list as a fallback to avoid sector33_code_x/y columns.
+    if 'sector33_code' not in df.columns and 'sector33_code' in symbol_meta.columns:
+        df = pd.merge(
+            df,
+            symbol_meta[['scode', 'sector33_code']],
+            on='scode',
+            how='left',
+            validate='many_to_one',
+        )
+    elif 'sector33_code' in df.columns:
+        df['sector33_code'] = df['sector33_code'].map(_string_key)
+        if 'sector33_code' in symbol_meta.columns:
+            fallback_sector = df['scode'].map(symbol_meta.set_index('scode')['sector33_code'])
+            df['sector33_code'] = df['sector33_code'].where(df['sector33_code'].notna(), fallback_sector)
+    else:
+        df['sector33_code'] = np.nan
+
+    metadata_cols = [
+        col for col in symbol_meta.columns
+        if col not in {'scode', 'sector33_code'} and col not in df.columns
+    ]
+    if metadata_cols:
+        df = pd.merge(
+            df,
+            symbol_meta[['scode', *metadata_cols]],
+            on='scode',
+            how='left',
+            validate='many_to_one',
+        )
+
+    return df
+
+
+def merge_sector_reference_data(
+    df_merged: pd.DataFrame,
+    df_shrt_sector: pd.DataFrame,
+    df_sector_indices: pd.DataFrame,
+) -> pd.DataFrame:
+    if 'sector33_code' not in df_merged.columns:
+        df_merged = df_merged.copy()
+        df_merged['sector33_code'] = np.nan
+
+    df_merged['sector33_code'] = df_merged['sector33_code'].map(_string_key)
+
+    short_required = {'date', 'sector33_code', 'selling_volume_ratio'}
+    if not df_shrt_sector.empty and short_required.issubset(df_shrt_sector.columns):
+        df_shrt_sector = df_shrt_sector.copy()
+        df_shrt_sector['date'] = pd.to_datetime(df_shrt_sector['date'])
+        df_shrt_sector['sector33_code'] = df_shrt_sector['sector33_code'].map(_string_key)
+        df_shrt_sector = df_shrt_sector.sort_values('date')
+        df_merged = pd.merge_asof(
+            df_merged.sort_values('date'),
+            df_shrt_sector,
+            left_on='date',
+            right_on='date',
+            by='sector33_code',
+            direction='backward',
+        )
+    else:
+        print("Warning: Short selling sector data is unavailable. Filling selling_volume_ratio with NaN.")
+        df_merged['selling_volume_ratio'] = np.nan
+
+    sector_required = {'date', 'sector33_code'}
+    if not df_sector_indices.empty and sector_required.issubset(df_sector_indices.columns):
+        df_sector_indices = df_sector_indices.copy()
+        df_sector_indices['date'] = pd.to_datetime(df_sector_indices['date'])
+        df_sector_indices['sector33_code'] = df_sector_indices['sector33_code'].map(_string_key)
+        df_merged = pd.merge(df_merged, df_sector_indices, on=['date', 'sector33_code'], how='left')
+    else:
+        print("Warning: Sector return data is unavailable. Filling sector_return with NaN.")
+        if 'sector_return' not in df_merged.columns:
+            df_merged['sector_return'] = np.nan
+
+    return df_merged
+
+
 def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
     print(f"Fetching data for prediction date: {target_date}")
     start_date = (pd.to_datetime(target_date) - timedelta(days=365)).strftime('%Y-%m-%d')
@@ -60,7 +157,8 @@ def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
     df_margin['available_date'] = pd.to_datetime(df_margin['date']) + pd.Timedelta(days=4)
     df_margin = df_margin.sort_values('available_date')
     df_shrt_sector = loader.fetch_short_selling_sector(start_date=start_date)
-    df_shrt_sector = df_shrt_sector.sort_values('date')
+    if 'date' in df_shrt_sector.columns:
+        df_shrt_sector = df_shrt_sector.sort_values('date')
     print(' - Fetching sector data...')
     df_sector_indices = loader.fetch_sector_return(start_date=start_date)
     print(' - Fetching OHLCV data...')
@@ -68,7 +166,7 @@ def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
     if df_ohlcv.empty:
         print("Warning: No OHLCV data found for the specified date range.")
         return pd.DataFrame()
-    df_merged = pd.merge(df_ohlcv, all_symbols, on='scode', how='left')
+    df_merged = attach_symbol_metadata(df_ohlcv, all_symbols)
     df_merged = pd.merge(df_merged, df_topix, on='date', how='left', suffixes=('', '_mkt'))
     df_merged = pd.merge(df_merged, df_n225, on='date', how='left')
     df_merged = pd.merge(df_merged, df_investor, on='date', how='left')
@@ -76,8 +174,7 @@ def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
     df_merged = df_merged.sort_values('date')
     df_merged = pd.merge_asof(df_merged, df_fins, left_on='date', right_on='published_date', by='scode', direction='backward')
     df_merged = pd.merge_asof(df_merged, df_margin[['scode', 'available_date', 'long_margin_trade_balance_share', 'short_margin_trade_balance_share']], left_on='date', right_on='available_date', by='scode', direction='backward')
-    df_merged = pd.merge_asof(df_merged, df_shrt_sector, left_on='date', right_on='date', by='sector33_code', direction='backward')
-    df_merged = pd.merge(df_merged, df_sector_indices, on=['date', 'sector33_code'], how='left')
+    df_merged = merge_sector_reference_data(df_merged, df_shrt_sector, df_sector_indices)
     df_merged = df_merged.sort_values(['scode', 'date'])
     print(f"Data fetching and merging complete. Total rows: {len(df_merged)}")
     return df_merged

@@ -1,0 +1,22 @@
+selection:
+  model: lgbm
+  domain: 10d
+  role: alpha_gr
+  target: 10d_alpha_gr
+  selected_at: '20260712_141115'
+  selection_score: 0.09596516846454892
+  selection_score_name: 10d_alpha
+  fixed_cv_config: config/cv/fixed.yaml
+  mlflow_run_id: 30d243a1826143b58d7be60738f8a466
+  mlflow_parent_run_id: 2ed9bde396084e38a5cb0a4619e618e7
+  source_study: final_sweep_lgbm_10d_alpha_gr_rankic_refine_20260711_225625
+  source_trial: 18
+  source_objective: rankic
+  optuna_value: 3.6901374628452555
+  params:
+    +hparams.alpha: 1.0297452602981305
+    hparams.bagging_fraction: 0.7408590025665597
+    hparams.feature_fraction: 0.5569890551247779
+    hparams.lambda_l1: 0.927594996859609
+    hparams.lambda_l2: 2.5286801171500577
+    hparams.learning_rate: 0.01650061891182833
