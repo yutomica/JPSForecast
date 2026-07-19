@@ -50,6 +50,41 @@ class DataLoader:
         self._listed_info_date_col = next((c for c in candidates if c in cols), None)
         return self._listed_info_date_col
 
+    @staticmethod
+    def _is_sector33_code_9999(sector33_code):
+        code = sector33_code.astype('string').str.strip()
+        return (code.eq('9999') | pd.to_numeric(code, errors='coerce').eq(9999)).fillna(False)
+
+    def _exclude_symbols_with_only_sector33_code_9999(self, symbols):
+        sector_history = self.fetch_sector33_history()
+        if (
+            symbols.empty
+            or sector_history.empty
+            or 'effective_date' not in sector_history.columns
+        ):
+            return symbols
+
+        sector_history = sector_history.copy()
+        sector_history['scode'] = sector_history['scode'].astype(str)
+        sector_history['effective_date'] = pd.to_datetime(
+            sector_history['effective_date'], errors='coerce'
+        )
+        sector_history['_is_9999'] = self._is_sector33_code_9999(
+            sector_history['sector33_code']
+        )
+        all_history_is_9999 = sector_history.groupby('scode')['_is_9999'].all()
+        all_effective_dates_valid = sector_history.groupby('scode')['effective_date'].apply(
+            lambda dates: dates.notna().all()
+        )
+        first_effective_date = sector_history.groupby('scode')['effective_date'].min()
+        exclude_symbol = (
+            all_history_is_9999
+            & all_effective_dates_valid
+            & first_effective_date.le(pd.Timestamp(START_DATE))
+        )
+        excluded_scodes = exclude_symbol.index[exclude_symbol]
+        return symbols.loc[~symbols['scode'].isin(excluded_scodes)].reset_index(drop=True)
+
     def get_all_symbols(self):
         query = """
             SELECT DISTINCT scode
@@ -60,7 +95,8 @@ class DataLoader:
         try:
             df = pd.read_sql(query, self.conn)
             df['scode'] = df['scode'].astype(str)
-            return df.drop_duplicates(subset=['scode']).reset_index(drop=True)
+            df = df.drop_duplicates(subset=['scode']).reset_index(drop=True)
+            return self._exclude_symbols_with_only_sector33_code_9999(df)
         except Exception as e:
             print(f"Error fetching symbols: {e}")
             return pd.DataFrame(columns=['scode'])
@@ -88,9 +124,9 @@ class DataLoader:
                     ORDER BY scode, effective_date
                 """
                 df = pd.read_sql(query, self.conn, parse_dates=['effective_date'])
-                df = df.dropna(subset=['scode', 'sector33_code', 'effective_date'])
+                df = df.dropna(subset=['scode', 'effective_date'])
                 df['scode'] = df['scode'].astype(str)
-                df['sector33_code'] = df['sector33_code'].astype(str)
+                df['sector33_code'] = df['sector33_code'].astype('string').astype(object)
                 self._sector33_history_cache = (
                     df.sort_values(['scode', 'effective_date'])
                     .drop_duplicates(subset=['scode', 'effective_date'], keep='last')
@@ -104,11 +140,10 @@ class DataLoader:
                     LEFT(Code, 4) AS scode,
                     Sector33Code AS sector33_code
                 FROM org.listed_info
-                WHERE Sector33Code IS NOT NULL
             """
             df = pd.read_sql(query, self.conn)
             df['scode'] = df['scode'].astype(str)
-            df['sector33_code'] = df['sector33_code'].astype(str)
+            df['sector33_code'] = df['sector33_code'].astype('string').astype(object)
             self._sector33_history_cache = df.drop_duplicates(subset=['scode'], keep='last').reset_index(drop=True)
             return self._sector33_history_cache.copy()
         except Exception as e:
@@ -130,24 +165,23 @@ class DataLoader:
         price_df['date'] = pd.to_datetime(price_df['date'])
         price_df['scode'] = price_df['scode'].astype(str)
 
-        if 'effective_date' in sector_history.columns:
-            left = price_df.sort_values(['date', 'scode'])
-            right = sector_history.sort_values(['effective_date', 'scode'])
-            merged = pd.merge_asof(
-                left,
-                right,
-                left_on='date',
-                right_on='effective_date',
-                by='scode',
-                direction='backward'
+        if 'effective_date' not in sector_history.columns:
+            raise RuntimeError(
+                "Point-in-time sector33 history is unavailable; refusing to apply "
+                "current sector classifications to historical prices."
             )
-            merged = merged.drop(columns=['effective_date'])
-        else:
-            merged = price_df.merge(
-                sector_history[['scode', 'sector33_code']].drop_duplicates('scode'),
-                on='scode',
-                how='left'
-            )
+
+        left = price_df.sort_values(['date', 'scode'])
+        right = sector_history.sort_values(['effective_date', 'scode'])
+        merged = pd.merge_asof(
+            left,
+            right,
+            left_on='date',
+            right_on='effective_date',
+            by='scode',
+            direction='backward'
+        )
+        merged = merged.drop(columns=['effective_date'])
 
         return merged.sort_values('_row_order').drop(columns=['_row_order']).reset_index(drop=True)
 
@@ -160,7 +194,7 @@ class DataLoader:
             df = pd.read_sql(query, self.conn)
             df = df.dropna(subset=['sector33_code'])
             df['sector33_code'] = df['sector33_code'].astype(str)
-            return df
+            return df.loc[~self._is_sector33_code_9999(df['sector33_code'])].reset_index(drop=True)
         except Exception as e:
             print(f"Error fetching symbols: {e}")
             return []
@@ -178,6 +212,21 @@ class DataLoader:
             print(f"Error fetching all close data: {e}")
             return pd.DataFrame()
 
+    def fetch_price_trading_dates(self, start_date=None):
+        if start_date is None:
+            start_date = START_DATE
+        query = f"""
+            SELECT DISTINCT date
+            FROM {TABLE_NAME}
+            WHERE date >= '{start_date}' AND mcode = 'T'
+            ORDER BY date
+        """
+        try:
+            return pd.read_sql(query, self.conn, parse_dates=['date'])
+        except Exception as e:
+            print(f"Error fetching price trading dates: {e}")
+            return pd.DataFrame(columns=['date'])
+
     def fetch_batch_data(self, symbols, start_date=None):
         if not symbols:
             return pd.DataFrame()
@@ -193,7 +242,12 @@ class DataLoader:
         """
         try:
             df = pd.read_sql(query, self.conn, parse_dates=['date'])
-            return self._attach_sector33_code(df)
+            df = self._attach_sector33_code(df)
+            if 'sector33_code' in df.columns:
+                df = df.loc[~self._is_sector33_code_9999(df['sector33_code'])]
+            return df.reset_index(drop=True)
+        except RuntimeError:
+            raise
         except Exception as e:
             print(f"Error fetching batch data: {e}")
             return pd.DataFrame()
@@ -270,29 +324,20 @@ class DataLoader:
         if start_date is None:
             start_date = START_DATE
         query = f"""
-            SELECT PubDate, sum(FrgnBuy) as Foreign_Net_Buy, sum(IndBuy) as Individual_Net_Buy 
+            SELECT PubDate as investor_source_date,
+                   sum(FrgnBuy) as Foreign_Net_Buy,
+                   sum(IndBuy) as Individual_Net_Buy
             FROM org.investor_types 
-            WHERE PubDate >= '{START_DATE}'
+            WHERE PubDate >= '{start_date}'
             GROUP BY PubDate
         """
         try:
-            df_trends = pd.read_sql(query, self.conn, parse_dates=['PubDate'])
-            if not df_trends.empty:
-                # -- preprocess --
-                df_trends = df_trends.set_index('PubDate').sort_index()
-                df_trends = df_trends[['Foreign_Net_Buy', 'Individual_Net_Buy']]
-                # 日次カレンダーへのリサンプリングと前方埋め (ffill)
-                # これにより、ある公開日から次の公開日まで、同じ値が継続する
-                # 実際のバックテスト期間に合わせてreindexする
-                # 例: 2018-01-01 から直近まで
-                end_date = pd.Timestamp.now().strftime('%Y-%m-%d')
-                full_range = pd.date_range(start=start_date, end=end_date, freq='D')
-                # 日次データに合わせてリインデックスし、値を前方埋めする
-                # 例: 木曜(Pub) -> 金曜(穴埋め) -> 月曜(穴埋め) ... -> 次の木曜(新データ)
-                df_daily = df_trends.reindex(full_range, method='ffill')
-                # DataFrameを整えて返す
-                df_daily.index.name = 'date'
-                return df_daily.reset_index()
+            df_trends = pd.read_sql(
+                query,
+                self.conn,
+                parse_dates=['investor_source_date'],
+            )
+            return df_trends.sort_values('investor_source_date').reset_index(drop=True)
         except Exception as e:
             print(f"Error fetching investor types data: {e}")
             return pd.DataFrame()
@@ -374,6 +419,7 @@ class DataLoader:
                 ShrtVol as short_margin_trade_balance_share
             FROM org.margin_interest
             WHERE Date >= '{start_date}'
+              AND RIGHT(Code, 1) = '0'
             ORDER BY Date, Code
         """
         try:

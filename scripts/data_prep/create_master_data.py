@@ -27,6 +27,14 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 INPUT_DIR = PROJECT_DIR / 'data/intermediate'
 OUTPUT_DIR = PROJECT_DIR / 'data/master'
 SAMPLE_OUTPUT_DIR = PROJECT_DIR / 'data/sample' # サンプル出力先
+CANDIDATE_COLS = [
+    'is_candidate_5d',
+    'is_candidate_10d',
+    'is_candidate_20d',
+    'is_candidate_40d',
+    'is_candidate_60d',
+]
+LEGACY_CANDIDATE_COLS = ['is_candidate_tac', 'is_candidate_str']
 
 
 def main(mode = "full"):
@@ -133,8 +141,8 @@ def main(mode = "full"):
             # --- フィルタリング ---
             calc_df = filter.calc_relative_metrics(calc_df)
             current_flags = calc_df.iloc[-len(df):]
-            df['is_candidate_tac'] = current_flags['is_candidate_tac'].values
-            df['is_candidate_str'] = current_flags['is_candidate_str'].values
+            for col in [*CANDIDATE_COLS, *LEGACY_CANDIDATE_COLS]:
+                df[col] = current_flags[col].values
             # --- クロスセクショナル特徴量＆ターゲットの生成 ---
             engineer = FeatureEngineer(df)
             pipe = (
@@ -154,10 +162,13 @@ def main(mode = "full"):
                 continue
 
             # フィルタ通過状況のログ出力
-            n_tac = df['is_candidate_tac'].sum()
-            n_str = df['is_candidate_str'].sum()
-            if n_tac > 0 or n_str > 0:
-                print(f"  [Filter Stats] TAC: {n_tac}, STR: {n_str} / {len(df)} rows")
+            candidate_counts = df[CANDIDATE_COLS].sum()
+            if candidate_counts.any():
+                stats = ", ".join(
+                    f"{col.removeprefix('is_candidate_').upper()}: {int(candidate_counts[col])}"
+                    for col in CANDIDATE_COLS
+                )
+                print(f"  [Filter Stats] {stats} / {len(df)} rows")
             # --- 特徴量とメタデータの書き込み ---
             future_cols = [
                 'Future_High_Tac', 'Future_Low_Tac', 'Future_Close_Tac',
@@ -175,7 +186,7 @@ def main(mode = "full"):
             for col in future_cols:
                 df[col] = df[col]/df['Entry_Price']
 
-            meta_cols = ['date', 'scode', 'is_candidate_tac', 'is_candidate_str', 'log_market_cap'] + future_cols + [c for c in df.columns if c.startswith('target_')]
+            meta_cols = ['date', 'scode'] + CANDIDATE_COLS + LEGACY_CANDIDATE_COLS + ['log_market_cap'] + future_cols + [c for c in df.columns if c.startswith('target_')]
             
             # メモリ節約のため必要なカラムだけ保持
             save_cols = list(set(meta_cols + feature_cols))
@@ -202,9 +213,9 @@ def main(mode = "full"):
         gc.collect()
 
         print("Filtering out stocks that are never candidates...")
-        # scode ごとに期間全体で is_candidate_tac または is_candidate_str が True になった回数をカウント
-        candidate_counts = meta_df.groupby('scode')[['is_candidate_tac', 'is_candidate_str']].sum()
-        valid_scodes = candidate_counts[(candidate_counts['is_candidate_tac'] > 0) | (candidate_counts['is_candidate_str'] > 0)].index
+        # scode ごとに期間全体でいずれかの horizon が True になったかを確認
+        candidate_counts = meta_df.groupby('scode')[CANDIDATE_COLS].sum()
+        valid_scodes = candidate_counts.index[candidate_counts.gt(0).any(axis=1)]
         
         initial_scode_count = meta_df['scode'].nunique()
         initial_row_count = len(meta_df)

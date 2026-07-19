@@ -69,6 +69,7 @@ class TCNPreprocessor(BasePreprocessor):
         self.imputer = None
         self.scaler = None
         self.boundary_col_idx_ = None
+        self._index_metadata_cache_ = None
         self.is_fitted = False
 
     @staticmethod
@@ -209,6 +210,87 @@ class TCNPreprocessor(BasePreprocessor):
             "dtype": str(getattr(data_arr, "dtype", "")),
         }
 
+    def _load_index_metadata(self, data_arr):
+        filename = getattr(data_arr, "filename", None)
+        if filename is None:
+            raise ValueError(
+                "TCN entity boundary protection requires a memmap filename when "
+                "the boundary column is not present in feature_cols."
+            )
+
+        try:
+            data_path = os.path.abspath(os.fspath(filename))
+        except TypeError as exc:
+            raise ValueError(f"Unable to resolve TCN memmap filename: {filename!r}") from exc
+        if not os.path.isfile(data_path):
+            raise FileNotFoundError(f"TCN memmap file not found: {data_path}")
+
+        metadata_path = os.path.join(os.path.dirname(data_path), "index_meta.parquet")
+        if not os.path.isfile(metadata_path):
+            raise FileNotFoundError(
+                "TCN entity boundary metadata not found next to the memmap: "
+                f"{metadata_path}"
+            )
+
+        try:
+            stat = os.stat(metadata_path)
+        except OSError as exc:
+            raise OSError(f"Unable to stat TCN boundary metadata: {metadata_path}") from exc
+
+        n_rows = int(data_arr.shape[0])
+        cache_key = (metadata_path, stat.st_mtime_ns, stat.st_size, n_rows)
+        cached = self._index_metadata_cache_
+        if cached is not None and cached["key"] == cache_key:
+            return cached["scode"], cached["date"], cached["fingerprint"]
+
+        try:
+            metadata = pd.read_parquet(metadata_path, columns=["scode", "date"])
+        except Exception as exc:
+            raise ValueError(
+                "Unable to read required TCN boundary metadata columns "
+                f"['scode', 'date'] from {metadata_path}"
+            ) from exc
+
+        if len(metadata) != n_rows:
+            raise ValueError(
+                "TCN boundary metadata row count does not match the feature memmap: "
+                f"metadata={len(metadata)}, data={n_rows}, path={metadata_path}"
+            )
+        if metadata["scode"].isna().any():
+            raise ValueError(f"TCN boundary metadata contains missing scode values: {metadata_path}")
+
+        scode, _ = pd.factorize(metadata["scode"], sort=False)
+        if np.any(scode < 0):
+            raise ValueError(f"Unable to encode TCN boundary scode values: {metadata_path}")
+
+        date = pd.to_datetime(metadata["date"], errors="coerce", utc=True)
+        if date.isna().any():
+            raise ValueError(f"TCN boundary metadata contains invalid date values: {metadata_path}")
+
+        try:
+            stat_after = os.stat(metadata_path)
+        except OSError as exc:
+            raise OSError(f"Unable to restat TCN boundary metadata: {metadata_path}") from exc
+        if (stat_after.st_mtime_ns, stat_after.st_size) != (stat.st_mtime_ns, stat.st_size):
+            raise RuntimeError(f"TCN boundary metadata changed while being read: {metadata_path}")
+
+        scode_arr = np.asarray(scode, dtype=np.int64)
+        date_arr = date.astype("int64").to_numpy(dtype=np.int64, copy=True)
+        scode_arr.setflags(write=False)
+        date_arr.setflags(write=False)
+        fingerprint = {
+            "path": metadata_path,
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+        }
+        self._index_metadata_cache_ = {
+            "key": cache_key,
+            "scode": scode_arr,
+            "date": date_arr,
+            "fingerprint": fingerprint,
+        }
+        return scode_arr, date_arr, fingerprint
+
     def _preprocessor_fingerprint(self) -> dict:
         scaler_payload = {}
         if self.scaler is not None:
@@ -217,7 +299,7 @@ class TCNPreprocessor(BasePreprocessor):
                     scaler_payload[attr] = self._hash_array(getattr(self.scaler, attr))
 
         return {
-            "version": "tcn_sequence_cache_v1",
+            "version": "tcn_sequence_cache_v2",
             "feature_cols": self.feature_cols,
             "cat_cols": self.cat_cols,
             "num_cols": self.num_cols,
@@ -240,6 +322,11 @@ class TCNPreprocessor(BasePreprocessor):
         payload = {
             "data": self._data_fingerprint(data_arr),
             "preprocessor": self._preprocessor_fingerprint(),
+            "index_metadata": (
+                None
+                if self.boundary_col_idx_ is not None
+                else self._load_index_metadata(data_arr)[2]
+            ),
             "col_indices": None if col_indices is None else [int(i) for i in col_indices],
             "n_rows": int(len(row_indices)),
         }
@@ -258,6 +345,11 @@ class TCNPreprocessor(BasePreprocessor):
             return False
 
     def _build_sequence_zarr(self, zarr_dir, data_arr, row_indices, col_indices):
+        metadata_scode = None
+        metadata_date = None
+        if self.boundary_col_idx_ is None:
+            metadata_scode, metadata_date, _ = self._load_index_metadata(data_arr)
+
         z = zarr.open(
             zarr_dir,
             mode='w',
@@ -294,9 +386,18 @@ class TCNPreprocessor(BasePreprocessor):
                     boundary_source = np.asarray(extracted[:, :, local_idx])
                     target_boundary = boundary_source[:, -1][:, None]
                     valid_mask &= (boundary_source == target_boundary)
-                except (ValueError, IndexError):
-                    # 境界列が選択されていない場合はスキップ
-                    pass
+                except (ValueError, IndexError) as exc:
+                    raise ValueError(
+                        f"TCN boundary column {self.boundary_col!r} is not available "
+                        "in the selected feature data."
+                    ) from exc
+            else:
+                boundary_source = metadata_scode[clipped_idx_mat]
+                date_source = metadata_date[clipped_idx_mat]
+                target_boundary = metadata_scode[chunk_row_indices][:, None]
+                target_date = metadata_date[chunk_row_indices][:, None]
+                valid_mask &= boundary_source == target_boundary
+                valid_mask &= date_source <= target_date
 
             # Padding
             if self.pad_mode == "zero":
@@ -385,6 +486,13 @@ class TCNPreprocessor(BasePreprocessor):
         row_indices = np.asarray(row_indices, dtype=np.int64)
         if row_indices.ndim != 1:
             raise ValueError("row_indices must be 1-dimensional.")
+        n_rows = int(data_arr.shape[0])
+        if np.any(row_indices < 0):
+            raise IndexError("row_indices contains negative values.")
+        if np.any(row_indices >= n_rows):
+            raise IndexError(
+                f"row_indices contains values outside data range [0, {n_rows})."
+            )
 
         if self.sequence_cache_enabled:
             return self._get_or_build_sequence_cache(data_arr, row_indices, col_indices)
@@ -456,5 +564,6 @@ class TCNPreprocessor(BasePreprocessor):
             os.path.join(tempfile.gettempdir(), "jps_tcn_sequence_cache"),
         )
         self.sequence_cache_wait_seconds = state.get("sequence_cache_wait_seconds", 600)
+        self._index_metadata_cache_ = None
         self.is_fitted = True
         print(f"TCNPreprocessor loaded from {load_path}")

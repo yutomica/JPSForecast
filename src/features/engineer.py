@@ -726,7 +726,7 @@ class FeatureEngineer:
         grouped = self.df.groupby('scode')
         for col in fund_cols:
             v_t = grouped[col].ffill()
-            v_prev = grouped[col].shift(LAG_YEAR).ffill()
+            v_prev = grouped[col].transform(lambda x: x.shift(LAG_YEAR).ffill())
             growth = (v_t - v_prev) / (0.5 * (v_t.abs() + v_prev.abs()) + epsilon)
             self.df[f'{col}_growth_yoy'] = growth.clip(-3.0, 3.0)
         col_name = self._generate_name("QLT", "OperatingProfitGrowthYOY", "RAW")
@@ -1036,7 +1036,7 @@ class FeatureEngineer:
         self.df['Future_High_Str'] = future_high_str
         self.df['Future_Low_Str'] = future_low_str
         self.df['Future_Close_Str'] = future_close_str
-        self.df['target_ret_60'] = (self.df['close'].shift(-self.horizon_str) / entry_price.replace(0, np.nan)) - 1.0
+        self.df['target_ret_60'] = (future_close_str / entry_price.replace(0, np.nan)) - 1.0
 
         return self
 
@@ -1044,23 +1044,46 @@ class FeatureEngineer:
         """クロスセクションターゲットの追加"""
         new_cols = {}
         # フラグによるフィルタリング（事前スキャン時やフラグ未計算時のフォールバック付）
-        tac_mask = self.df['is_candidate_tac'] == True if 'is_candidate_tac' in self.df.columns else pd.Series(True, index=self.df.index)
-        str_mask = self.df['is_candidate_str'] == True if 'is_candidate_str' in self.df.columns else pd.Series(True, index=self.df.index)
+        def _candidate_mask(canonical_col, legacy_col):
+            if canonical_col in self.df.columns:
+                return self.df[canonical_col].eq(True)
+            if legacy_col in self.df.columns:
+                return self.df[legacy_col].eq(True)
+            return pd.Series(True, index=self.df.index)
+
+        rank_masks = {
+            h: _candidate_mask(
+                f'is_candidate_{h}d',
+                'is_candidate_tac' if h < 60 else 'is_candidate_str',
+            )
+            for h in [5, 10, 20, 40, 60]
+        }
         epsilon = 1e-6
+
+        def _label_complete_mask(future_close_col, target_ret_col):
+            label_values = self.df[
+                [future_close_col, 'Entry_Price', target_ret_col]
+            ].replace([np.inf, -np.inf], np.nan)
+            return label_values.notna().all(axis=1) & label_values['Entry_Price'].ne(0)
 
         # --- 短期モデルクロスセクション ---
         # 単純なRank (0.0 ~ 1.0)
-        tac_rank = self.df.loc[tac_mask].groupby('date')['target_ret_5'].rank(pct=True, method='average')
+        tac_label_mask = rank_masks[5] & _label_complete_mask('Future_Close_Tac', 'target_ret_5')
+        tac_rank = self.df.loc[tac_label_mask].groupby('date')['target_ret_5'].rank(pct=True, method='average')
         rank_clipped = tac_rank * (1 - 2 * epsilon) + epsilon
         new_cols['target_tac_gauss_rank'] = (erfinv(2 * rank_clipped - 1)).clip(-3.0, 3.0)
         for h in [10, 20, 40]:
-            h_rank = self.df.loc[tac_mask].groupby('date')[f'target_ret_{h}'].rank(pct=True, method='average')
+            h_label_mask = rank_masks[h] & _label_complete_mask(
+                f'Future_Close_{h}d', f'target_ret_{h}'
+            )
+            h_rank = self.df.loc[h_label_mask].groupby('date')[f'target_ret_{h}'].rank(pct=True, method='average')
             new_cols[f'target_{h}d_rank'] = h_rank
             h_rank_clipped = h_rank * (1 - 2 * epsilon) + epsilon
             new_cols[f'target_{h}d_gauss_rank'] = (erfinv(2 * h_rank_clipped - 1)).clip(-3.0, 3.0)
 
         # --- 長期モデルクロスセクション ---
-        str_rank = self.df.loc[str_mask].groupby('date')['target_ret_60'].rank(pct=True, method='average')
+        str_label_mask = rank_masks[60] & _label_complete_mask('Future_Close_Str', 'target_ret_60')
+        str_rank = self.df.loc[str_label_mask].groupby('date')['target_ret_60'].rank(pct=True, method='average')
         str_rank_clipped = str_rank * (1 - 2 * epsilon) + epsilon
         new_cols['target_str_gauss_rank'] = (erfinv(2 * str_rank_clipped - 1)).clip(-3.0, 3.0)
 

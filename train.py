@@ -72,7 +72,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
     domain_name = str(cfg.domain.name).upper()
     interval_cfg = cfg.get("interval", {})
 
-    if domain_name == "TAC":
+    if domain_name == "5D":
         horizon = 5
         interval = interval_cfg.get("tac", 5)
         if cfg.model.data_category == "timeseries":
@@ -86,7 +86,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
             "interval": interval,
         }
 
-    if domain_name == "STR":
+    if domain_name == "60D":
         horizon = 60
         _validate_target_horizon(cfg, domain_name, horizon)
         return {
@@ -112,7 +112,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
 
     raise ValueError(
         f"Unsupported domain: {cfg.domain.name}. "
-        "Expected one of TAC, STR, 10D, 20D, 40D."
+        "Expected one of 5D, 10D, 20D, 40D, 60D."
     )
 
 
