@@ -66,10 +66,11 @@ run_selected_production() {
     echo ""
 }
 
-run_selected_production "tac" "lgbm" "alpha_gr"
-run_selected_production "tac" "gandalf" "alpha_gr"
-run_selected_production "tac" "tcn" "alpha_gr"
-run_selected_production "10d" "lgbm" "alpha_gr"
+# run_selected_production "tac" "lgbm" "alpha_gr"
+# run_selected_production "tac" "gandalf" "alpha_gr"
+# run_selected_production "tac" "tcn" "alpha_gr"
+# run_selected_production "10d" "lgbm" "alpha_gr"
+run_selected_production "tac" "lgbm" "tb_7_4"
 
 # Add more targets here after Step5 writes the corresponding
 # config/promotion/selected_${model}_${target}.yaml manifest.
