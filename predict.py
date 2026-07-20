@@ -169,8 +169,17 @@ def fetch_prediction_data(loader: DataLoader, target_date: str) -> pd.DataFrame:
     df_merged = attach_symbol_metadata(df_ohlcv, all_symbols)
     df_merged = pd.merge(df_merged, df_topix, on='date', how='left', suffixes=('', '_mkt'))
     df_merged = pd.merge(df_merged, df_n225, on='date', how='left')
-    df_merged = pd.merge(df_merged, df_investor, on='date', how='left')
     df_merged['date'] = pd.to_datetime(df_merged['date'])
+    df_investor = df_investor.copy()
+    df_investor['investor_source_date'] = pd.to_datetime(df_investor['investor_source_date'])
+    df_merged = pd.merge_asof(
+        df_merged.sort_values('date'),
+        df_investor.sort_values('investor_source_date'),
+        left_on='date',
+        right_on='investor_source_date',
+        direction='backward',
+        allow_exact_matches=False,
+    )
     df_merged = df_merged.sort_values('date')
     df_merged = pd.merge_asof(df_merged, df_fins, left_on='date', right_on='published_date', by='scode', direction='backward')
     df_merged = pd.merge_asof(df_merged, df_margin[['scode', 'available_date', 'long_margin_trade_balance_share', 'short_margin_trade_balance_share']], left_on='date', right_on='available_date', by='scode', direction='backward')

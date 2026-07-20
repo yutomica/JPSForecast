@@ -55,14 +55,14 @@ run_screening() {
 
 # run_screening "str" "alpha"
 # run_screening "tac" "alpha_tb_5_3"
-# run_screening "tac" "alpha_gr" 
+run_screening "tac" "alpha_gr" 
 # run_screening "str" "alpha" 
 # run_screening "10d" "alpha_gr" 
 # run_screening "20d" "alpha_gr" 
 # run_screening "40d" "alpha_gr"
-run_screening "tac" "tb_7_4" \
-  ++hparams.is_unbalance=false \
-  ++hparams.scale_pos_weight=3.0
+# run_screening "tac" "tb_7_4" \
+#   ++hparams.is_unbalance=false \
+#   ++hparams.scale_pos_weight=3.0
 
 # # 2. STR (Strategic) 攻め/守り
 # run_screening "str" "lgbm" "alpha" &

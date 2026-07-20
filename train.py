@@ -72,7 +72,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
     domain_name = str(cfg.domain.name).upper()
     interval_cfg = cfg.get("interval", {})
 
-    if domain_name == "5D":
+    if domain_name == "TAC":
         horizon = 5
         interval = interval_cfg.get("tac", 5)
         if cfg.model.data_category == "timeseries":
@@ -86,7 +86,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
             "interval": interval,
         }
 
-    if domain_name == "60D":
+    if domain_name == "STR":
         horizon = 60
         _validate_target_horizon(cfg, domain_name, horizon)
         return {
@@ -112,7 +112,7 @@ def _resolve_domain_metadata_spec(cfg: DictConfig) -> dict:
 
     raise ValueError(
         f"Unsupported domain: {cfg.domain.name}. "
-        "Expected one of 5D, 10D, 20D, 40D, 60D."
+        "Expected one of TAC, 10D, 20D, 40D, STR."
     )
 
 
@@ -454,17 +454,17 @@ def train(cfg: DictConfig) -> float:
                 models.append(copy.deepcopy(model))
                 fold_pipelines.append(FoldPipeline(preprocessor, model))
 
-        # --- スクリーニング結果の集計と保存 ---
-        if cfg.get("mode") == "feature_screening":
-            # SHAP集計
-            if all_fold_shap_values:
-                shap_df = pd.DataFrame(all_fold_shap_values).T
-                shap_df.columns = ['fold_'+str(i) for i in range(len(all_fold_shap_values))]
-                shap_df.index = feature_cols
-                output_filename = f"screening_results_{cfg.domain.name}_{cfg.target.name}.csv"
-                shap_df.to_csv(output_filename)
-                mlflow.log_artifact(output_filename)
-                print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
+            # --- スクリーニング結果の集計と保存 ---
+            if cfg.get("mode") == "feature_screening":
+                is_lgbm_screening = hasattr(model, "model") and all(hasattr(model.model, attr) for attr in ("best_iteration", "model_to_string"))
+                if is_lgbm_screening:
+                    X_valid = preprocessor.transform(features_array, row_indices=valid_idx, col_indices=col_indices); X_valid = combine_features_with_oof(X_valid, meta_df, valid_idx, oof_cols)
+                    shap_model = copy.copy(model); shap_model.model = type(model.model)(model_str=model.model.model_to_string(num_iteration=model.model.best_iteration))
+                    all_fold_shap_values[-1] = calculate_shap(shap_model, X_valid)
+                    shutil.rmtree(X_valid, ignore_errors=True) if should_cleanup_zarr_cache(X_valid, cfg) else None; del X_valid
+                if i == len(splits) - 1 and all_fold_shap_values:
+                    shap_df = pd.DataFrame(all_fold_shap_values).T; shap_df.columns = ['fold_'+str(i) for i in range(len(all_fold_shap_values))]; shap_df.index = feature_cols; output_filename = f"screening_results_{cfg.domain.name}_{cfg.target.name}.csv"
+                    shap_df.to_csv(output_filename); mlflow.log_artifact(output_filename); print(f"✅ Feature screening results saved to {output_filename} and uploaded to MLflow.")
         
         # --- MDA (Feature Sharpe) の集計と保存 ---
         if cfg.get("mode") == "feature_select" and all_fold_mda_values:

@@ -1,1 +1,11 @@
 name: "all"
+cat_cols:
+ - EVT_IsMissingEPS_RAW
+ - GOV_market_segment_RAW
+ - GOV_sector33_code_RAW
+ - SEA_DayOfMonth_RAW
+ - SEA_DayOfWeek_RAW
+ - SEA_IsGotobi_RAW
+ - SEA_IsMonthEnd_RAW
+ - SEA_Quarter_RAW
+ - SEA_IsQuarterEnd_RAW
