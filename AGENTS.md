@@ -236,6 +236,14 @@ portfolio設計も研究仮説であり、特定のTop-N、long-short、leverage
 - entityを扱う時系列modelでは、entity境界と時間方向を検証する。
 - 認証情報や機種固有の絶対pathをrepositoryへ埋め込まない。
 
+#### 8.2.1 変更スコープ統制
+
+- 編集前に、依頼から必須変更、維持すべき既存挙動、完了条件を特定する。解釈によって結果、public interface、data contract、artifactが変わる不明点は、編集前にrootへ返す。
+- 依頼達成に必要と確認できたものを除き、処理順序、data選択・filter、default値、入出力schema、例外、side effect、設定解決、数値式を変更しない。
+- 既存コードに別の不具合、重複、非効率、構造的欠陥を見つけても、依頼達成に不可欠でなければ変更へ混在させず、別の指摘または提案として返す。提案は実装承認を意味しない。
+- 明示要件を満たす最も単純な局所変更を優先し、依頼されていない将来拡張、一般化、抽象化、互換layer、fallback、option、helper、loggingを追加しない。
+- 複数案の比較は、選択によって結果、interface、risk、保守費用が実質的に変わる場合、またはrootから求められた場合に限定する。
+
 ### 8.3 runtime
 
 device、precision、worker数、thread数、memory手法、分散実行はruntime profileから取得する。特定hardwareの値をagent定義へ固定しない。
@@ -307,6 +315,17 @@ root agentが、task分割、protocol凍結、最終判断、ユーザーへの�
 
 結果評価では、研究設計との整合性、統計的妥当性、経済的価値を別々に報告させ、rootが統合する。
 
+### 10.3 限定的な保守変更
+
+研究仮説、protocol、data contract、modelの意味を変更しない局所的なscript修正やbug fixでは、次の限定workflowを使用できる。
+
+1. rootが、task開始時のbase revisionとstaged・unstaged・untracked差分を記録し、必須変更、維持すべき既存挙動、完了条件、編集対象を固定する。
+2. `modeling_systems_engineer`が、固定されたscope内で最小の局所変更を実装する。
+3. `software_verification_engineer`が、依頼、編集前の挙動、diff、testを対応付けてscopeと回帰を独立検証する。
+4. 本番昇格の対象となる場合は、`model_risk_governor`がscope gateを含む独立判定と検証済みrevisionを確認する。
+
+この限定workflowは、未承認の挙動変更、refactor、研究判断、独立評価の省略を許可しない。変更が研究結果または本番判断へ影響する場合は、該当する標準workflowの役割へ戻す。
+
 ## 11. 共通報告形式
 
 各subagentは次を返す。
@@ -344,6 +363,9 @@ root agentが、task分割、protocol凍結、最終判断、ユーザーへの�
 - 本番変更に必要な承認、monitoring、rollbackがある。
 - 無関係なユーザー変更を保持している。
 - 明示承認なしにcommit、push、昇格、deployment、削除を行っていない。
+- 必須変更、維持すべき既存挙動、完了条件が明確である。
+- 各production変更hunkが、依頼要件またはその達成に直接必要な補助変更へ対応し、各test変更hunkが確認対象の要件または回帰riskへ対応しており、未承認の変更を含まない。
+- 変更箇所に隣接して回帰riskがある既存挙動が、既存testまたは必要最小限のcharacterization testで確認されている。
 
 ## 13. プロジェクトフォルダ構成
 

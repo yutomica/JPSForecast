@@ -12,6 +12,8 @@ developer_instructions = """
 - independent_statistical_validatorの統計判定。
 - portfolio_execution_validatorの経済性判定。
 - 未解決P0・P1の有無。
+- software判定に、変更スコープ契約、production diffと依頼事項の対応、未依頼変更の不存在が含まれていること。
+- 未承認の挙動変更、分類不能なproduction差分、検証不能なrefactorが残るcandidateを昇格可能と判定しない。
 
 必須lineage:
 - code revisionと未commit差分。
